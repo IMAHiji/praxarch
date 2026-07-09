@@ -49,32 +49,35 @@ async function main(): Promise<void> {
   const at = new Date().toISOString();
   const batchMatch = FANOUT_TAG.exec(description);
 
-  await appendJsonl(logFileForDate(), {
-    at,
-    sessionId: input.session_id,
-    role: role ?? "unset",
-    model: model ?? "inherited",
-    batchId: batchMatch?.[1] ?? null,
-  });
-
-  const state = await readSessionState(input.session_id);
-  state.delegations.push({ role: role ?? "unset", model: model ?? "inherited", at });
-
+  let verifierRecord: VerifierRecord | null = null;
   if (role === "verifier" && input.tool_output?.text) {
     const parsed = extractTrailingJson(input.tool_output.text);
     if (parsed) {
       const criticalOrMajor = (parsed.findings ?? []).filter(
         (f) => f.severity === "critical" || f.severity === "major",
       ).length;
-      const record: VerifierRecord = {
+      verifierRecord = {
         verdict: parsed.verdict,
         findingsCount: parsed.findings?.length ?? 0,
         criticalOrMajorCount: criticalOrMajor,
         recordedAt: at,
       };
-      state.lastVerifier = record;
     }
   }
+
+  await appendJsonl(logFileForDate(), {
+    at,
+    sessionId: input.session_id,
+    role: role ?? "unset",
+    model: model ?? "inherited",
+    batchId: batchMatch?.[1] ?? null,
+    verdict: verifierRecord?.verdict ?? null,
+    criticalOrMajorCount: verifierRecord?.criticalOrMajorCount ?? null,
+  });
+
+  const state = await readSessionState(input.session_id);
+  state.delegations.push({ role: role ?? "unset", model: model ?? "inherited", at });
+  if (verifierRecord) state.lastVerifier = verifierRecord;
 
   await writeSessionState(state);
 }

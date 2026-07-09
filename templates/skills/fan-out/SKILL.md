@@ -22,7 +22,9 @@ mechanical migrations applied to N independent packages.
    criteria, paths, reasoning). Do this before launching anything.
 2. **Launch all N in one message**, each as an `Agent` call with `isolation: "worktree"` and an explicit
    `model` per the role table in the orchestration policy. Do not launch them one at a time across
-   multiple turns — the point is concurrency.
+   multiple turns — the point is concurrency. Prefix each call's `description` with
+   `[fanout:<batch-id>]` (same id across all N, e.g. a short slug for the overall task) so telemetry
+   can group them — see Reporting below.
 3. **Collect results.** Each worktree agent reports back its branch/path. Do not merge yet.
 4. **One verifier pass over the merged result**, not one per worker. Merge the branches (or diff them
    together) first, then run a single `verifier` against the combined change — this catches
@@ -32,5 +34,7 @@ mechanical migrations applied to N independent packages.
 
 ## Reporting
 
-praxarch's telemetry hook tags fan-out delegations as a batch (shared batch id) so `/praxarch-report`
-can distinguish parallel from serial delegation and show whether fan-out is earning its overhead.
+praxarch's telemetry hook reads the `[fanout:<batch-id>]` prefix from each call's `description` and
+records it as that delegation's batch id, so `/praxarch-report` can show a fan-out batch count.
+Without the prefix, the hook still logs the delegation normally — it just won't be counted as part
+of a batch.

@@ -1,29 +1,37 @@
 ---
 name: praxarch-report
-description: Show delegation and verification telemetry — which roles ran, how often, cost/quota impact, and verification pass rate. Use when the user asks "how much am I saving", "what's my delegation breakdown", "how often do we escalate", or wants to sanity-check praxarch is actually routing work.
+description: Show delegation and verification telemetry — which roles ran, how often, and verification pass rate. Use when the user asks "what's my delegation breakdown", "how often does verification catch problems", or wants to sanity-check praxarch is actually routing work.
 ---
 
 Run the report CLI and present its output to the user, adding brief interpretation (don't just dump the
-raw numbers — call out anything notable: heavy escalation, low verification rate, a role that's barely
-used).
+raw numbers — call out anything notable: a role that's barely used, a low verification pass rate).
 
 ```
 node ~/.claude/praxarch/report.js [--session current|all] [--since YYYY-MM]
 ```
 
-Default scope is the current session if invoked mid-session, otherwise the current calendar month.
+`--session current` filters to `$CLAUDE_SESSION_ID` when that's set in the invoking shell; otherwise it
+falls back to all sessions in the window. Default scope with no flags is every session across all
+logged months.
 
-## What to look for and mention
+## What the report actually measures — and what it doesn't
 
-- **Delegation-vs-local ratio** — how much work stayed in the main session vs. was routed out.
-- **Role distribution** — is `executor` (expensive) doing work `mech-executor` could have done?
-- **Escalation frequency** — repeated escalations from one role suggest its agent file needs a
-  clearer spec or the role boundary is wrong for this project.
-- **Verification pass rate** — `CONFIRMED` vs `REFUTED` on the first pass; a low rate means executors
-  are shipping unverified-quality work that verifier is catching, which is the gate working as intended,
-  not a problem — but worth surfacing.
-- **Fan-out usage** — whether parallel batches (see `/fan-out`) are being used for the independent,
-  fully-specifiable work that benefits from them.
+Praxarch's telemetry hook observes `Agent` tool calls only. It has no visibility into the main
+session's own direct work, so it **cannot** compute a delegation-vs-local ratio or escalation
+frequency (that would require tracking that two delegations were retries of the same task, which
+isn't logged). Don't imply the report shows those — it doesn't, and claiming otherwise would be
+guessing dressed up as data.
 
-If the log file doesn't exist yet or is empty, say so plainly — this means no delegations have happened
-in the requested window, not that the tool is broken.
+What it does report, honestly:
+
+- **Role distribution** — count per role. Worth flagging if `executor` (expensive) is doing high
+  volume that looks like it could've been `mech-executor` work — that's a judgment call for the
+  user to make, the report just surfaces the raw counts.
+- **Verifier pass rate** — `CONFIRMED` vs `REFUTED` across logged verifier runs. A low rate isn't
+  necessarily bad — it means the gate is catching things — but it's worth surfacing either way.
+- **Fan-out batch count** — how many `/fan-out` batches ran (delegations tagged
+  `[fanout:<id>]` in their description), as a rough signal of whether parallel fan-out is being
+  used at all.
+
+If the log directory doesn't exist yet or the window is empty, the report says so plainly — that
+means no delegations have happened in the requested window, not that the tool is broken.
