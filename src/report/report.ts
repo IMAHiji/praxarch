@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { readdir } from "node:fs/promises";
 import { readJsonl } from "../hooks/lib/jsonl.js";
-import { LOG_DIR } from "../hooks/lib/paths.js";
+import { logDir } from "../hooks/lib/paths.js";
 
 /**
  * praxarch report: role distribution and verification pass rate from the delegation JSONL logs.
@@ -39,14 +39,14 @@ function parseArgs(argv: string[]): Args {
 async function loadRecords(since: string | null): Promise<DelegationLogRecord[]> {
   let files: string[];
   try {
-    files = (await readdir(LOG_DIR)).filter((f) => f.endsWith(".jsonl"));
+    files = (await readdir(logDir())).filter((f) => f.endsWith(".jsonl"));
   } catch {
     return [];
   }
   const relevant = since ? files.filter((f) => f >= `${since}.jsonl`) : files;
   const all: DelegationLogRecord[] = [];
   for (const file of relevant.sort()) {
-    all.push(...(await readJsonl<DelegationLogRecord>(`${LOG_DIR}/${file}`)));
+    all.push(...(await readJsonl<DelegationLogRecord>(`${logDir()}/${file}`)));
   }
   return all;
 }

@@ -16,7 +16,7 @@ import { copyWithBackup, exists, readJsonIfExists, readTextIfExists, writeJson, 
 import { mergeSettings, type SettingsFragment } from "./lib/settings-merge.js";
 import { upsertOrchestrationBlock } from "./lib/claude-md-merge.js";
 import { DEFAULT_CONFIG } from "../hooks/lib/config.js";
-import { GLOBAL_CONFIG_PATH } from "../hooks/lib/paths.js";
+import { globalConfigPath } from "../hooks/lib/paths.js";
 
 interface InstallOptions {
   yes: boolean;
@@ -67,7 +67,7 @@ async function planSummary(): Promise<{ lines: string[]; settingsFragment: Setti
 
   lines.push(`~/.claude/praxarch/ (${PRAXARCH_INSTALL_DIR}):`);
   lines.push("  - copy compiled hooks, statusline, report from dist/");
-  lines.push(`  - config.json: ${(await exists(GLOBAL_CONFIG_PATH)) ? "already exists, left unchanged" : "create with defaults"}`);
+  lines.push(`  - config.json: ${(await exists(globalConfigPath())) ? "already exists, left unchanged" : "create with defaults"}`);
   lines.push("  - VERSION: write");
 
   return { lines, settingsFragment };
@@ -142,8 +142,8 @@ export async function install(options: InstallOptions): Promise<void> {
 
   await copyDistTree();
 
-  if (!(await exists(GLOBAL_CONFIG_PATH))) {
-    await writeJson(GLOBAL_CONFIG_PATH, DEFAULT_CONFIG);
+  if (!(await exists(globalConfigPath()))) {
+    await writeJson(globalConfigPath(), DEFAULT_CONFIG);
   }
 
   const version = (
