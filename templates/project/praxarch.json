@@ -1,0 +1,21 @@
+{
+  "$comment": "Copy to <project>/.claude/praxarch.json to override praxarch defaults for this project. Every key is optional — omit anything you don't want to override. Project config merges over global (~/.claude/praxarch/config.json), which merges over built-in defaults.",
+
+  "roleModelOverrides": {
+    "$comment": "Force a role to a specific model tier for this project, e.g. downgrade executor in a low-stakes repo.",
+    "executor": "sonnet"
+  },
+
+  "verifyGate": {
+    "$comment": "Thresholds that trigger the Stop-hook verification requirement, and paths excluded from the size calculation.",
+    "minChangedLines": 80,
+    "minChangedFiles": 3,
+    "ignorePatterns": ["package-lock.json", "pnpm-lock.yaml", "yarn.lock", ".min.js", "dist/"]
+  },
+
+  "routeGuard": {
+    "$comment": "strict:false turns hard denials into warnings. securityKeywords are ADDED to the built-in set that forces routing to security-executor.",
+    "strict": true,
+    "securityKeywords": []
+  }
+}
