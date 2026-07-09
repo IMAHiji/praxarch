@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { GLOBAL_CONFIG_PATH, projectConfigPath } from "./paths.js";
+import { globalConfigPath, projectConfigPath } from "./paths.js";
 
 export interface VerifyGateConfig {
   /** Minimum changed lines (insertions + deletions) in the session diff before a verifier pass is required. */
@@ -62,7 +62,7 @@ function mergeConfig(base: PraxarchConfig, override: Partial<PraxarchConfig> | n
 }
 
 export async function loadConfig(cwd: string): Promise<PraxarchConfig> {
-  const global = await readJsonIfExists(GLOBAL_CONFIG_PATH);
+  const global = await readJsonIfExists(globalConfigPath());
   const project = await readJsonIfExists(projectConfigPath(cwd));
   return mergeConfig(mergeConfig(DEFAULT_CONFIG, global), project);
 }
