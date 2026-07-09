@@ -1,0 +1,22 @@
+{
+  "name": "praxarch",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A config + hooks orchestration harness for Claude Code, extending pilotfish with enforcement, telemetry, and structured verification.",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "pnpm@11.8.0",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "test": "node --test --experimental-strip-types src/**/*.test.ts"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.19.0",
+    "@types/node": "^22.10.5",
+    "eslint": "^9.19.0",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.20.0"
+  }
+}
