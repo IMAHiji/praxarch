@@ -7,7 +7,7 @@ Run the report CLI and present its output to the user, adding brief interpretati
 raw numbers — call out anything notable: a role that's barely used, a low verification pass rate).
 
 ```
-node ~/.claude/praxarch/report.js [--session current|all] [--since YYYY-MM]
+node ~/.claude/praxarch/report/report.js [--session current|all] [--since YYYY-MM]
 ```
 
 `--session current` filters to `$CLAUDE_SESSION_ID` when that's set in the invoking shell; otherwise it

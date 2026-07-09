@@ -4,7 +4,7 @@
   "fallbackModel": ["opus", "sonnet"],
   "statusLine": {
     "type": "command",
-    "command": "node ~/.claude/praxarch/statusline.js"
+    "command": "node ~/.claude/praxarch/statusline/statusline.js"
   },
   "hooks": {
     "SessionStart": [
