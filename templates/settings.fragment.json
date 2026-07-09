@@ -1,0 +1,41 @@
+{
+  "$comment": "praxarch settings fragment — the installer merges this into ~/.claude/settings.json under the praxarch:start/end markers it tracks. Do not hand-edit the merged result; edit this template and re-run `praxarch install`.",
+  "model": "best",
+  "fallbackModel": ["opus", "sonnet"],
+  "statusLine": {
+    "type": "command",
+    "command": "node ~/.claude/praxarch/statusline.js"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node ~/.claude/praxarch/hooks/session-init.js" }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Agent",
+        "hooks": [
+          { "type": "command", "command": "node ~/.claude/praxarch/hooks/route-guard.js" }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Agent",
+        "hooks": [
+          { "type": "command", "command": "node ~/.claude/praxarch/hooks/telemetry.js" }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node ~/.claude/praxarch/hooks/verify-gate.js" }
+        ]
+      }
+    ]
+  }
+}
