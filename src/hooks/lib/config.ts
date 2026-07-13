@@ -13,18 +13,22 @@ export interface VerifyGateConfig {
 export interface RouteGuardConfig {
   /** When false, violations are warnings instead of hard denials. */
   strict: boolean;
-  /** Extra keywords (beyond the built-in set) that force routing to security-executor. */
+  /**
+   * Extra keywords (beyond the built-in set) that force routing to security-executor.
+   * Matched at word boundaries, case-insensitively; a trailing "*" matches the stem's suffixes.
+   */
   securityKeywords: string[];
 }
 
+// Role→model bindings deliberately have no override key here: they live in agent frontmatter,
+// and a project retunes them by shadowing the agent file in <project>/.claude/agents/ (project
+// agents take precedence over user agents by name — verified empirically via resolvedModel).
 export interface PraxarchConfig {
-  roleModelOverrides: Record<string, string>;
   verifyGate: VerifyGateConfig;
   routeGuard: RouteGuardConfig;
 }
 
 export const DEFAULT_CONFIG: PraxarchConfig = {
-  roleModelOverrides: {},
   verifyGate: {
     minChangedLines: 80,
     minChangedFiles: 3,
@@ -49,7 +53,6 @@ async function readJsonIfExists(path: string): Promise<Partial<PraxarchConfig> |
 function mergeConfig(base: PraxarchConfig, override: Partial<PraxarchConfig> | null): PraxarchConfig {
   if (!override) return base;
   return {
-    roleModelOverrides: { ...base.roleModelOverrides, ...(override.roleModelOverrides ?? {}) },
     verifyGate: { ...base.verifyGate, ...(override.verifyGate ?? {}) },
     routeGuard: {
       strict: override.routeGuard?.strict ?? base.routeGuard.strict,

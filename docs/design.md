@@ -83,20 +83,29 @@ Agent tool can see. An earlier draft of the `/praxarch-report` skill promised th
 corrected once the actual telemetry schema made clear they couldn't be honestly computed. Reporting
 a number that looks measured but is actually guessed is worse than not reporting it.
 
-**A related known gap**: Claude Code's PostToolUse hook does not expose token usage or duration
-for a subagent run (confirmed against the hooks documentation while building this). Delegation
-records are role/model/outcome only — no cost figures. If Claude Code exposes usage data at this
-hook in the future, the schema should be extended rather than estimated around.
+**Update (v0.1.x, verified against a live payload capture)**: Claude Code's PostToolUse hook
+*does* expose subagent cost data — `tool_response` carries the resolved model ID, total token
+usage, and run duration. Delegation records now include `resolvedModel`, `totalTokens`, and
+`durationMs`. An earlier revision of this document claimed the opposite based on a reading of the
+hooks documentation; the lesson folded back into the codebase is that hook payload assumptions
+get verified against captures (`PRAXARCH_DEBUG_PAYLOADS=1` dumps raw payloads to
+`~/.claude/praxarch/debug/`), which also serve as contract-test fixtures.
 
 ### Per-project overrides
 
 Pilotfish is global-only by design, on the grounds that an audit of real projects found zero
 project-level model policy in the wild. Praxarch adds a narrow, optional override surface —
-`.claude/praxarch.json` — scoped to exactly the three things a project might legitimately need to
-retune: role→model bindings, verify-gate thresholds (a doc-heavy repo's "non-trivial" diff size
-differs from a monorepo's), and route-guard strictness/extra security keywords. It does not
-duplicate the policy layer — delegation *rules* still live in CLAUDE.md, stacked per Claude Code's
-native project/global memory behavior; `praxarch.json` only tunes the hooks' thresholds.
+`.claude/praxarch.json` — scoped to exactly the two things the hooks might legitimately need
+retuned per project: verify-gate thresholds (a doc-heavy repo's "non-trivial" diff size differs
+from a monorepo's) and route-guard strictness/extra security keywords. It does not duplicate the
+policy layer — delegation *rules* still live in CLAUDE.md, stacked per Claude Code's native
+project/global memory behavior; `praxarch.json` only tunes the hooks' thresholds.
+
+Role→model bindings are deliberately *not* overridable here. An earlier revision shipped a
+`roleModelOverrides` key that nothing consumed; rather than wiring it up, it was removed, because
+Claude Code already has the right mechanism: a project-level `.claude/agents/<role>.md` shadows
+the user-level agent of the same name (verified empirically — a project scout pinned to sonnet
+resolved to sonnet in delegation telemetry). One source of truth for bindings: agent frontmatter.
 
 ### Parallel fan-out
 
@@ -110,9 +119,9 @@ a hook can't safely make.
 
 ## Known limitations
 
-- **No token/cost telemetry** (see above) — logged data is role/model/outcome only.
 - **Report metrics are intentionally narrower than pilotfish's claims** — role distribution and
-  verifier pass rate only, not savings percentages or escalation frequency.
+  verifier pass rate only, not savings percentages or escalation frequency. (Per-delegation token
+  and duration data is now logged — see above — but the report CLI doesn't yet aggregate it.)
 - **`verify-gate`'s diff-size heuristic is a proxy, not a semantic judgment** — a large
   formatting-only diff can trigger it unnecessarily (mitigated by `ignorePatterns` and the waiver
   escape hatch); a small but behaviorally significant change can slip under the threshold

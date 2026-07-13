@@ -11,7 +11,12 @@ export interface VerifierRecord {
 
 export interface DelegationRecord {
   role: string;
+  /** Model requested in the Agent call, or "inherited" when unset. */
   model: string;
+  /** Model the subagent actually ran on, from tool_response. Null in records predating capture. */
+  resolvedModel: string | null;
+  totalTokens: number | null;
+  durationMs: number | null;
   at: string;
 }
 
@@ -20,6 +25,8 @@ export interface SessionState {
   startedAt: string;
   delegations: DelegationRecord[];
   lastVerifier: VerifierRecord | null;
+  /** Consecutive verify-gate blocks in the current stop cycle — the gate's loop guard. */
+  verifyGateConsecutiveBlocks?: number;
 }
 
 function emptyState(sessionId: string): SessionState {

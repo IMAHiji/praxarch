@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { loadConfig } from "./lib/config.js";
 import { diffStat } from "./lib/git-diff.js";
-import { readSessionState } from "./lib/session-state.js";
+import { readSessionState, writeSessionState } from "./lib/session-state.js";
 import { emit, readHookInput, type StopInput, type StopOutput } from "./lib/hook-io.js";
 
 /**
@@ -16,6 +16,11 @@ import { emit, readHookInput, type StopInput, type StopOutput } from "./lib/hook
  */
 
 const WAIVER_PATTERN = /PRAXARCH_VERIFY_WAIVED:\s*(.+)/;
+
+// After this many consecutive blocks in one stop cycle, fail open instead of re-blocking —
+// per the hooks docs' stop_hook_active guidance, a Stop hook that blocks unconditionally can
+// trap a session that can't (or won't) satisfy the gate in an infinite stop loop.
+const MAX_CONSECUTIVE_BLOCKS = 2;
 
 function allow(): StopOutput {
   return {};
@@ -53,6 +58,18 @@ async function main(): Promise<void> {
     emit(allow());
     return;
   }
+
+  const priorBlocks = input.stop_hook_active ? (state.verifyGateConsecutiveBlocks ?? 0) : 0;
+  if (priorBlocks >= MAX_CONSECUTIVE_BLOCKS) {
+    emit({
+      systemMessage:
+        `praxarch verify-gate: diff is still unverified after ${MAX_CONSECUTIVE_BLOCKS} blocks — ` +
+        `failing open rather than trapping the session in a stop loop.`,
+    } satisfies StopOutput);
+    return;
+  }
+  state.verifyGateConsecutiveBlocks = priorBlocks + 1;
+  await writeSessionState(state);
 
   const reasonDetail = verifier
     ? `last verifier pass was ${verifier.verdict} with ${verifier.criticalOrMajorCount} critical/major finding(s)`

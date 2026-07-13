@@ -1,0 +1,75 @@
+{
+  "session_id": "fixture-session",
+  "transcript_path": "/Users/example/.claude/projects/-Users-laskins-code-personal-praxarch/212853c5-44c5-47c4-a658-43427468d109.jsonl",
+  "cwd": "/Users/example/code/personal/praxarch",
+  "prompt_id": "d559c0f6-aaaa-4716-99c5-1ddf14ecb107",
+  "permission_mode": "default",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Agent",
+  "tool_input": {
+    "description": "Get package.json name field",
+    "prompt": "Read the file package.json at the root of the repository /Users/example/code/personal/praxarch (path: /Users/example/code/personal/praxarch/package.json). Report back the value of the top-level \"name\" field in that JSON file. Respond with just the value.",
+    "subagent_type": "scout",
+    "run_in_background": false
+  },
+  "tool_response": {
+    "status": "completed",
+    "prompt": "Read the file package.json at the root of the repository /Users/example/code/personal/praxarch (path: /Users/example/code/personal/praxarch/package.json). Report back the value of the top-level \"name\" field in that JSON file. Respond with just the value.",
+    "agentId": "afe4f89651c4d0ef6",
+    "agentType": "scout",
+    "content": [
+      {
+        "type": "text",
+        "text": "praxarch"
+      }
+    ],
+    "resolvedModel": "claude-haiku-4-5-20251001",
+    "totalDurationMs": 2937,
+    "totalTokens": 8225,
+    "totalToolUseCount": 1,
+    "usage": {
+      "input_tokens": 8,
+      "cache_creation_input_tokens": 488,
+      "cache_read_input_tokens": 7673,
+      "output_tokens": 56,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 0,
+        "ephemeral_5m_input_tokens": 488
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 8,
+          "output_tokens": 56,
+          "cache_read_input_tokens": 7673,
+          "cache_creation_input_tokens": 488,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 488,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "toolStats": {
+      "readCount": 1,
+      "searchCount": 0,
+      "bashCount": 0,
+      "editFileCount": 0,
+      "linesAdded": 0,
+      "linesRemoved": 0,
+      "otherToolCount": 0
+    }
+  },
+  "tool_use_id": "toolu_01BR25Fjrs5mumkFQqH1PVLq",
+  "duration_ms": 2938
+}

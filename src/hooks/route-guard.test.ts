@@ -70,6 +70,33 @@ test("denies a security-flavored delegation not routed to security-executor", as
   assert.equal(decision, "deny");
 });
 
+test("does not flag 'author'/'authored' as security-sensitive", async () => {
+  const { decision } = await run({
+    session_id: "s1",
+    cwd: process.cwd(),
+    hook_event_name: "PreToolUse",
+    tool_name: "Agent",
+    tool_input: {
+      subagent_type: "executor",
+      prompt: "Update the CHANGELOG authors section; each entry was authored by a Co-Authored-By trailer.",
+    },
+  });
+  assert.equal(decision, "allow");
+});
+
+test("flags stem-matched keywords like 'authentication' and 'encrypted'", async () => {
+  for (const prompt of ["add authentication to the endpoint", "store the file encrypted at rest"]) {
+    const { decision } = await run({
+      session_id: "s1",
+      cwd: process.cwd(),
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: "executor", prompt },
+    });
+    assert.equal(decision, "deny", `expected deny for: ${prompt}`);
+  }
+});
+
 test("allows a security-flavored delegation routed to security-executor", async () => {
   const { decision } = await run({
     session_id: "s1",

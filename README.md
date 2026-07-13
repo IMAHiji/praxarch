@@ -30,8 +30,9 @@ for the full rationale and the delta from pilotfish.
 - **Telemetry surfaces**: a status line showing live role-spend for the current session, and a
   `praxarch report` CLI / `/praxarch-report` skill for historical role distribution and verifier
   pass rate.
-- **Per-project overrides**: `.claude/praxarch.json` in any repo can retune role→model bindings,
-  verify-gate thresholds, and route-guard strictness for that project.
+- **Per-project overrides**: `.claude/praxarch.json` in any repo can retune verify-gate
+  thresholds and route-guard strictness for that project. Role→model bindings are retuned the
+  native way instead: shadow the agent file in `<project>/.claude/agents/`.
 - **`/fan-out` skill**: the pattern for running several independent, fully-specified units of work
   concurrently in isolated git worktrees, with a single verification pass over the merged result.
 

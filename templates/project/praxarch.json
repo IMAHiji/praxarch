@@ -1,10 +1,5 @@
 {
-  "$comment": "Copy to <project>/.claude/praxarch.json to override praxarch defaults for this project. Every key is optional — omit anything you don't want to override. Project config merges over global (~/.claude/praxarch/config.json), which merges over built-in defaults.",
-
-  "roleModelOverrides": {
-    "$comment": "Force a role to a specific model tier for this project, e.g. downgrade executor in a low-stakes repo.",
-    "executor": "sonnet"
-  },
+  "$comment": "Copy to <project>/.claude/praxarch.json to override praxarch defaults for this project. Every key is optional — omit anything you don't want to override. Project config merges over global (~/.claude/praxarch/config.json), which merges over built-in defaults. To retune a role's MODEL for one project, don't use this file — copy the role's agent file into <project>/.claude/agents/ and change its model frontmatter; project agents shadow user agents by name.",
 
   "verifyGate": {
     "$comment": "Thresholds that trigger the Stop-hook verification requirement, and paths excluded from the size calculation.",
@@ -14,7 +9,7 @@
   },
 
   "routeGuard": {
-    "$comment": "strict:false turns hard denials into warnings. securityKeywords are ADDED to the built-in set that forces routing to security-executor.",
+    "$comment": "strict:false turns hard denials into warnings. securityKeywords are ADDED to the built-in set that forces routing to security-executor. Keywords match whole words case-insensitively; end one with * to match a stem (e.g. \"tokeniz*\" matches tokenize/tokenizer/tokenization).",
     "strict": true,
     "securityKeywords": []
   }
