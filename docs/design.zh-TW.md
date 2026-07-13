@@ -77,19 +77,28 @@ pilotfish 引用了基準測試數據（例如「Sonnet 執行者達到全 Fable
 曾經承諾過這兩項數據；在確認實際遙測結構無法誠實算出後已經修正。回報一個
 「看起來像量測出來、實際上是用猜的」數字，比乾脆不回報還糟。
 
-**相關的已知限制**：根據撰寫本專案時對照 hook 文件確認的結果，Claude Code 的
-PostToolUse hook 並不會提供子代理執行的 token 用量或耗時。派工紀錄僅包含
-角色／模型／結果，不含成本數字。若 Claude Code 未來在此 hook 提供用量資料，
-應該擴充 schema，而不是用猜測去湊。
+**更新（v0.1.x，已用實際 payload 擷取驗證）**：Claude Code 的 PostToolUse hook
+*確實*會提供子代理的成本資料——`tool_response` 內含實際解析出的模型 ID、
+token 總用量與執行耗時。派工紀錄現在包含 `resolvedModel`、`totalTokens` 與
+`durationMs`。本文件早前版本根據對 hook 文件的解讀做出了相反的宣稱；
+這次教訓已回饋到程式碼中：所有 hook payload 的假設都應以實際擷取驗證
+（`PRAXARCH_DEBUG_PAYLOADS=1` 會將原始 payload 傾印到
+`~/.claude/praxarch/debug/`），這些擷取同時作為 contract test 的 fixture。
 
 ### 專案層級覆寫
 
 pilotfish 刻意只做全域設定，理由是實際稽核多個專案後發現沒有任何專案層級的模型政策。
 praxarch 加了一個範圍很窄、選用性的覆寫介面——`.claude/praxarch.json`——只針對
-一個專案真正可能需要調整的三件事：角色對模型的綁定、verify-gate 門檻
+hook 真正可能需要依專案調整的兩件事：verify-gate 門檻
 （文件為主的專案跟 monorepo 對「非瑣碎」的定義本來就不同）、以及 route-guard
 的嚴格程度／額外安全關鍵字。它不會重複政策層的內容——派工*規則*仍然寫在 CLAUDE.md，
 依 Claude Code 原生的專案／全域記憶機制疊加；`praxarch.json` 只調整 hook 的門檻。
+
+角色對模型的綁定刻意*不*放在這裡覆寫。早期版本曾有一個沒有任何程式碼讀取的
+`roleModelOverrides` 設定鍵；與其把它接上，不如直接移除——因為 Claude Code
+本來就有正確的機制：專案層級的 `.claude/agents/<role>.md` 會以同名遮蔽
+使用者層級的 agent（已實測驗證——專案內把 scout 釘在 sonnet 後，
+派工遙測的 resolvedModel 確實是 sonnet）。綁定只有一個真相來源：agent frontmatter。
 
 ### 平行分工（fan-out）
 
@@ -103,9 +112,9 @@ praxarch 加了一個範圍很窄、選用性的覆寫介面——`.claude/praxa
 
 ## 已知限制
 
-- **沒有 token／成本遙測**（見上文）——記錄的資料僅為角色／模型／結果。
 - **報表指標刻意比 pilotfish 宣稱的範圍窄**——只有角色分布與 verifier 通過率，
-  沒有節省成本百分比或升級頻率。
+  沒有節省成本百分比或升級頻率。（每次派工的 token 與耗時資料現在已記錄——見上文——
+  但報表 CLI 尚未彙總這些數據。）
 - **`verify-gate` 的變更量門檻只是一個代理指標，不是語意判斷**——
   純格式調整造成的大量變更可能誤觸（可用 `ignorePatterns` 與逃生閥緩解）；
   變更量小但行為影響重大的修改則可能低於門檻（政策層仍會要求驗證，

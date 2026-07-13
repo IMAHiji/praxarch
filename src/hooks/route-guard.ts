@@ -18,25 +18,40 @@ const KNOWN_ROLES = new Set([
   "security-executor",
 ]);
 
+// Keywords match at word boundaries, case-insensitively. A trailing "*" makes it a stem
+// (open-ended suffix); without it the match is exact-word. Substring matching is what made
+// "auth" flag every prompt containing "author" or "Co-Authored-By".
 const BUILTIN_SECURITY_KEYWORDS = [
   "auth",
+  "authenticat*",
+  "authoriz*",
+  "authoris*",
   "secret",
-  "credential",
-  "password",
+  "secrets",
+  "credential*",
+  "password*",
   "jwt",
-  "oauth",
+  "oauth*",
   "crypto",
-  "encrypt",
-  "decrypt",
+  "cryptograph*",
+  "encrypt*",
+  "decrypt*",
   "cve",
-  "vulnerab",
-  "exploit",
+  "vulnerab*",
+  "exploit*",
   "sql injection",
   "xss",
   "csrf",
-  "penetration test",
-  "pentest",
+  "penetration test*",
+  "pentest*",
 ];
+
+function keywordPattern(keyword: string): RegExp {
+  const isStem = keyword.endsWith("*");
+  const body = isStem ? keyword.slice(0, -1) : keyword;
+  const escaped = body.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`\\b${escaped}${isStem ? "" : "\\b"}`, "i");
+}
 
 function allow(): PreToolUseOutput {
   return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow" } };
@@ -64,17 +79,17 @@ async function main(): Promise<void> {
   const { subagent_type: subagentType, model, prompt = "", description = "" } = input.tool_input;
   const config = await loadConfig(input.cwd);
 
-  const haystack = `${prompt} ${description}`.toLowerCase();
+  const haystack = `${prompt} ${description}`;
   const securityKeywords = [...BUILTIN_SECURITY_KEYWORDS, ...config.routeGuard.securityKeywords];
-  const looksSecuritySensitive = securityKeywords.some((kw) => haystack.includes(kw.toLowerCase()));
+  const matchedKeyword = securityKeywords.find((kw) => keywordPattern(kw).test(haystack));
 
-  if (looksSecuritySensitive && subagentType !== "security-executor") {
+  if (matchedKeyword !== undefined && subagentType !== "security-executor") {
     emit(
       decide(
         config.routeGuard.strict,
-        `this delegation looks security-sensitive (matched a security keyword) but subagent_type is ` +
-          `"${subagentType ?? "unset"}", not "security-executor". Route auth/secrets/crypto/validation ` +
-          `work to security-executor per the orchestration policy.`,
+        `this delegation looks security-sensitive (matched keyword "${matchedKeyword}") but ` +
+          `subagent_type is "${subagentType ?? "unset"}", not "security-executor". Route ` +
+          `auth/secrets/crypto/validation work to security-executor per the orchestration policy.`,
       ),
     );
     return;

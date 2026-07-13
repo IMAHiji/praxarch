@@ -31,13 +31,24 @@ export interface PostToolUseInput extends HookInputBase {
   tool_name: string;
   tool_use_id?: string;
   tool_input: PreToolUseInput["tool_input"];
-  tool_output?: { type: string; text?: string };
+  // Shape verified against a live capture (see fixtures/post-tool-use.agent.json). The field is
+  // tool_response — NOT tool_output — and the subagent's text lives in the content array.
+  tool_response?: {
+    status?: string;
+    agentType?: string;
+    content?: { type: string; text?: string }[];
+    resolvedModel?: string;
+    totalTokens?: number;
+    totalDurationMs?: number;
+    [key: string]: unknown;
+  };
 }
 
 export interface StopInput extends HookInputBase {
   hook_event_name: "Stop";
+  /** True when this stop attempt follows a continuation that a Stop hook itself forced. */
+  stop_hook_active?: boolean;
   last_assistant_message?: string;
-  tool_results?: { tool_use_id: string; tool_name: string; was_successful: boolean }[];
 }
 
 export interface SessionStartInput extends HookInputBase {
@@ -60,6 +71,7 @@ export interface PreToolUseOutput {
 export interface StopOutput {
   decision?: "block";
   reason?: string;
+  systemMessage?: string;
   hookSpecificOutput?: { hookEventName: "Stop"; additionalContext?: string };
 }
 
@@ -74,8 +86,25 @@ export async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
+async function capturePayload(raw: string): Promise<void> {
+  if (process.env["PRAXARCH_DEBUG_PAYLOADS"] !== "1") return;
+  const { mkdir, writeFile } = await import("node:fs/promises");
+  const { join } = await import("node:path");
+  const { praxarchHome } = await import("./paths.js");
+  let event = "unknown";
+  try {
+    event = String((JSON.parse(raw) as { hook_event_name?: string }).hook_event_name ?? "unknown");
+  } catch {
+    // keep "unknown" — capture the raw payload regardless of whether it parses
+  }
+  const dir = join(praxarchHome(), "debug");
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, `${Date.now()}-${process.pid}-${event}.json`), raw, "utf8");
+}
+
 export async function readHookInput<T>(): Promise<T> {
   const raw = await readStdin();
+  await capturePayload(raw);
   return JSON.parse(raw) as T;
 }
 

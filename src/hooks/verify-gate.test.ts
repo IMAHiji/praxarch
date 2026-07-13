@@ -149,6 +149,31 @@ test("PRAXARCH_SKIP_VERIFY=1 bypasses the gate on a non-trivial diff", async () 
   }
 });
 
+test("fails open after two consecutive blocks in one stop cycle (loop guard)", async () => {
+  const fixture = await setupFixture();
+  try {
+    await makeNonTrivialDiff(fixture.repo);
+    const stop = (active: boolean): { decision?: string; systemMessage?: string } =>
+      run(fixture, {
+        session_id: "s1",
+        cwd: fixture.repo,
+        hook_event_name: "Stop",
+        stop_hook_active: active,
+      }) as { decision?: string; systemMessage?: string };
+
+    assert.equal(stop(false).decision, "block");
+    assert.equal(stop(true).decision, "block");
+    const third = stop(true);
+    assert.equal(third.decision, undefined);
+    assert.match(third.systemMessage ?? "", /failing open/);
+
+    // A fresh stop cycle (stop_hook_active back to false) blocks again from scratch.
+    assert.equal(stop(false).decision, "block");
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
 test("an explicit waiver in the final message bypasses the gate", async () => {
   const fixture = await setupFixture();
   try {

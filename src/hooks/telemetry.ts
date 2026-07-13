@@ -9,9 +9,9 @@ import { readHookInput, type PostToolUseInput } from "./lib/hook-io.js";
  * calls, parses the required trailing JSON verdict block into session state so verify-gate can
  * check it later.
  *
- * Known gap: PostToolUse does not expose token usage or duration for the subagent run (confirmed
- * against the hooks docs), so records are role/model/outcome only. If Claude Code exposes usage
- * data here in the future, extend DelegationRecord rather than working around its absence.
+ * tool_response carries the subagent's resolved model, token usage, and duration (verified
+ * against a live capture — see fixtures/post-tool-use.agent.json), so each record includes real
+ * cost data alongside role/model/outcome.
  */
 
 const FANOUT_TAG = /^\[fanout:([a-zA-Z0-9_-]+)\]/;
@@ -41,6 +41,13 @@ function extractTrailingJson(text: string): VerifierVerdictJson | null {
   return null;
 }
 
+function responseText(response: PostToolUseInput["tool_response"]): string {
+  return (response?.content ?? [])
+    .filter((block) => block.type === "text" && typeof block.text === "string")
+    .map((block) => block.text)
+    .join("\n");
+}
+
 async function main(): Promise<void> {
   const input = await readHookInput<PostToolUseInput>();
   if (input.tool_name !== "Agent") return;
@@ -50,8 +57,9 @@ async function main(): Promise<void> {
   const batchMatch = FANOUT_TAG.exec(description);
 
   let verifierRecord: VerifierRecord | null = null;
-  if (role === "verifier" && input.tool_output?.text) {
-    const parsed = extractTrailingJson(input.tool_output.text);
+  const text = responseText(input.tool_response);
+  if (role === "verifier" && text) {
+    const parsed = extractTrailingJson(text);
     if (parsed) {
       const criticalOrMajor = (parsed.findings ?? []).filter(
         (f) => f.severity === "critical" || f.severity === "major",
@@ -65,18 +73,32 @@ async function main(): Promise<void> {
     }
   }
 
+  const resolvedModel = input.tool_response?.resolvedModel ?? null;
+  const totalTokens = input.tool_response?.totalTokens ?? null;
+  const durationMs = input.tool_response?.totalDurationMs ?? null;
+
   await appendJsonl(logFileForDate(), {
     at,
     sessionId: input.session_id,
     role: role ?? "unset",
     model: model ?? "inherited",
+    resolvedModel,
+    totalTokens,
+    durationMs,
     batchId: batchMatch?.[1] ?? null,
     verdict: verifierRecord?.verdict ?? null,
     criticalOrMajorCount: verifierRecord?.criticalOrMajorCount ?? null,
   });
 
   const state = await readSessionState(input.session_id);
-  state.delegations.push({ role: role ?? "unset", model: model ?? "inherited", at });
+  state.delegations.push({
+    role: role ?? "unset",
+    model: model ?? "inherited",
+    resolvedModel,
+    totalTokens,
+    durationMs,
+    at,
+  });
   if (verifierRecord) state.lastVerifier = verifierRecord;
 
   await writeSessionState(state);

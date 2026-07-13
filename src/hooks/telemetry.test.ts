@@ -25,6 +25,15 @@ function run(home: string, input: unknown): void {
   });
 }
 
+function monthlyLogPath(home: string): string {
+  const now = new Date();
+  return join(
+    home,
+    "logs",
+    `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}.jsonl`,
+  );
+}
+
 test("logs a delegation record and updates session state", async () => {
   await withPraxarchHome(async (home) => {
     run(home, {
@@ -33,16 +42,10 @@ test("logs a delegation record and updates session state", async () => {
       hook_event_name: "PostToolUse",
       tool_name: "Agent",
       tool_input: { subagent_type: "mech-executor", model: "sonnet" },
-      tool_output: { type: "text", text: "done" },
+      tool_response: { status: "completed", content: [{ type: "text", text: "done" }] },
     });
 
-    const now = new Date();
-    const logPath = join(
-      home,
-      "logs",
-      `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}.jsonl`,
-    );
-    const logContent = await readFile(logPath, "utf8");
+    const logContent = await readFile(monthlyLogPath(home), "utf8");
     const record = JSON.parse(logContent.trim()) as { role: string; model: string };
     assert.equal(record.role, "mech-executor");
     assert.equal(record.model, "sonnet");
@@ -50,6 +53,29 @@ test("logs a delegation record and updates session state", async () => {
     const statePath = join(home, "state", "s1.json");
     const state = JSON.parse(await readFile(statePath, "utf8")) as { delegations: unknown[] };
     assert.equal(state.delegations.length, 1);
+  });
+});
+
+test("records resolved model, tokens, and duration from a real captured payload", async () => {
+  await withPraxarchHome(async (home) => {
+    const fixture = JSON.parse(
+      await readFile(join(here, "fixtures", "post-tool-use.agent.json"), "utf8"),
+    ) as Record<string, unknown>;
+    run(home, fixture);
+
+    const logContent = await readFile(monthlyLogPath(home), "utf8");
+    const record = JSON.parse(logContent.trim()) as {
+      role: string;
+      model: string;
+      resolvedModel: string | null;
+      totalTokens: number | null;
+      durationMs: number | null;
+    };
+    assert.equal(record.role, "scout");
+    assert.equal(record.model, "inherited");
+    assert.equal(record.resolvedModel, "claude-haiku-4-5-20251001");
+    assert.equal(record.totalTokens, 8225);
+    assert.equal(record.durationMs, 2937);
   });
 });
 
@@ -69,7 +95,7 @@ test("parses a verifier's trailing JSON verdict into session state", async () =>
       hook_event_name: "PostToolUse",
       tool_name: "Agent",
       tool_input: { subagent_type: "verifier", model: "opus" },
-      tool_output: { type: "text", text: verifierText },
+      tool_response: { status: "completed", content: [{ type: "text", text: verifierText }] },
     });
 
     const statePath = join(home, "state", "s1.json");
@@ -101,7 +127,7 @@ test("counts critical/major findings from a REFUTED verdict", async () => {
       hook_event_name: "PostToolUse",
       tool_name: "Agent",
       tool_input: { subagent_type: "verifier", model: "opus" },
-      tool_output: { type: "text", text: verifierText },
+      tool_response: { status: "completed", content: [{ type: "text", text: verifierText }] },
     });
 
     const statePath = join(home, "state", "s1.json");
