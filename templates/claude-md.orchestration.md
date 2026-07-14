@@ -29,8 +29,10 @@ live in `~/.claude/agents/*.md` frontmatter and shift independently as models ch
    make directly — delegation overhead exceeds the savings below a certain size.
 3. **Bounded escalation.** After two failed attempts at a role, escalate one tier or take the
    work over directly. Never retry the same tier a third time.
-4. **Explicit model on every fan-out.** Ad-hoc parallel agent calls declare `model` explicitly;
-   never rely on inheriting the main session's model. (praxarch's route-guard hook enforces this.)
+4. **Models come from role bindings.** Never pass `model` when delegating to a defined role —
+   an explicit `model` overrides the role's frontmatter binding and silently defeats tiered
+   routing. Only ad-hoc calls that use no defined role declare `model` explicitly; never rely
+   on inheriting the main session's model. (praxarch's route-guard hook enforces both.)
 5. **Security routing is not optional.** Anything touching authentication, authorization, secrets,
    cryptography, or trust-boundary input validation goes to `security-executor`, full stop — this
    keeps benign defensive-security work away from safety classifiers tuned for general use, and

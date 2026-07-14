@@ -97,6 +97,31 @@ test("flags stem-matched keywords like 'authentication' and 'encrypted'", async 
   }
 });
 
+test("allows a security-flavored delegation to verifier (review role, verify-gate needs it)", async () => {
+  const { decision } = await run({
+    session_id: "s1",
+    cwd: process.cwd(),
+    hook_event_name: "PreToolUse",
+    tool_name: "Agent",
+    tool_input: {
+      subagent_type: "verifier",
+      prompt: "Review the JWT secret rotation and authentication changes for correctness.",
+    },
+  });
+  assert.equal(decision, "allow");
+});
+
+test("denies a defined-role delegation that passes an explicit model", async () => {
+  const { decision } = await run({
+    session_id: "s1",
+    cwd: process.cwd(),
+    hook_event_name: "PreToolUse",
+    tool_name: "Agent",
+    tool_input: { subagent_type: "executor", model: "sonnet", prompt: "refactor the widget module" },
+  });
+  assert.equal(decision, "deny");
+});
+
 test("allows a security-flavored delegation routed to security-executor", async () => {
   const { decision } = await run({
     session_id: "s1",

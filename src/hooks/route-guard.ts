@@ -3,10 +3,11 @@ import { loadConfig } from "./lib/config.js";
 import { emit, readHookInput, type PreToolUseInput, type PreToolUseOutput } from "./lib/hook-io.js";
 
 /**
- * PreToolUse(Agent) — hard-enforces two orchestration rules the policy text alone can't guarantee
- * under pressure: (1) security-sensitive delegations must go to security-executor, (2) ad-hoc
- * fan-out calls that don't use a defined role must declare `model` explicitly rather than
- * silently inheriting the main session's tier.
+ * PreToolUse(Agent) — hard-enforces three orchestration rules the policy text alone can't
+ * guarantee under pressure: (1) security-sensitive delegations must go to security-executor,
+ * (2) ad-hoc fan-out calls that don't use a defined role must declare `model` explicitly rather
+ * than silently inheriting the main session's tier, (3) defined-role calls must NOT pass an
+ * explicit `model`, which would override the role's frontmatter binding.
  */
 
 const KNOWN_ROLES = new Set([
@@ -83,7 +84,10 @@ async function main(): Promise<void> {
   const securityKeywords = [...BUILTIN_SECURITY_KEYWORDS, ...config.routeGuard.securityKeywords];
   const matchedKeyword = securityKeywords.find((kw) => keywordPattern(kw).test(haystack));
 
-  if (matchedKeyword !== undefined && subagentType !== "security-executor") {
+  // "verifier" is exempt (user-approved 2026-07-08): it is a read-only review role that never
+  // edits source, and blocking it here conflicts with verify-gate, which requires a
+  // verifier-role pass on exactly these security-sensitive tickets.
+  if (matchedKeyword !== undefined && subagentType !== "security-executor" && subagentType !== "verifier") {
     emit(
       decide(
         config.routeGuard.strict,
@@ -96,6 +100,22 @@ async function main(): Promise<void> {
   }
 
   const isKnownRole = subagentType !== undefined && KNOWN_ROLES.has(subagentType);
+
+  // The inverse of the fan-out rule: an explicit model on a defined role silently overrides the
+  // role's frontmatter binding. Live telemetry (2026-07-09) showed this defeating tiered routing
+  // on 40/40 delegations — every opus-pinned role actually ran on the model passed in the call.
+  if (isKnownRole && model) {
+    emit(
+      decide(
+        config.routeGuard.strict,
+        `delegation to defined role "${subagentType}" passes explicit model "${model}", which ` +
+          `overrides the role's frontmatter binding and defeats tiered routing. Omit model — ` +
+          `role→model bindings live in the agent file.`,
+      ),
+    );
+    return;
+  }
+
   if (!isKnownRole && !model) {
     emit(
       decide(

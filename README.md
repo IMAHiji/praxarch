@@ -53,12 +53,16 @@ until you confirm (or pass `--yes` for scripted use). Anything it overwrites is 
 `<file>.praxarch-backup-<timestamp>`. It will **not** overwrite a `model`/`fallbackModel` you've
 already set (e.g. via `/model`) — it only sets those if absent.
 
-To use the `praxarch` command directly instead of `node dist/cli/index.js`:
+To use the `praxarch` command directly instead of `node dist/cli/index.js` (pnpm ≥ 10 dropped
+`pnpm link --global`; use `link:` so the global install symlinks back to this repo):
 
 ```sh
-pnpm link --global
+pnpm add -g link:$(pwd)
 praxarch install
 ```
+
+If pnpm reports its global bin directory is not in PATH, add it (e.g.
+`export PATH="$HOME/Library/pnpm/bin:$PATH"` in your shell profile on macOS).
 
 Prefer a manual, code-free install? See [`install/AGENT-INSTALL.md`](install/AGENT-INSTALL.md) —
 paste it into a Claude Code session and it walks through the same changes by hand.

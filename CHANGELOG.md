@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.1.1 — 2026-07-13
+
+Fixes driven by the first week of live telemetry (includes the previously uncommitted
+payload-handling fixes shipped in `d271412`).
+
+### Fixed
+
+- **route-guard: `verifier` is exempt from the security-keyword redirect.** A verifier reviewing
+  auth/secrets/crypto changes necessarily mentions those keywords, and blocking it deadlocked
+  against verify-gate, which requires a verifier pass on exactly those diffs. This exemption was
+  approved and hand-patched into the live install on 2026-07-08 but never made it into source —
+  reinstalling would have silently regressed it.
+- **doctor: byte-compares installed hooks/statusline/report against the repo's dist build** instead
+  of trusting VERSION strings. A stale install (exactly what happened with the `d271412` fixes)
+  previously passed doctor 20/20.
+- **session-init/doctor/uninstall: check `explore.md` (lowercase)**, matching the file the
+  installer actually writes. The old `Explore.md` check only passed on case-insensitive
+  filesystems, and uninstall silently orphaned the file elsewhere.
+- **README: global CLI install uses `pnpm add -g link:$(pwd)`** — pnpm ≥ 10 removed
+  `pnpm link --global`, so the documented command failed outright on current pnpm.
+
+### Changed
+
+- **route-guard: denies explicit `model` on defined-role delegations.** Live telemetry showed
+  40/40 delegations passing `model` explicitly, silently overriding every role's frontmatter
+  binding and defeating tiered routing. Policy rule 4 reworded to match: models come from role
+  bindings; only ad-hoc (role-less) calls declare `model`.
+
 ## v0.1.0 — 2026-07-08
 
 Initial release. A config + hooks orchestration harness for Claude Code, derived from

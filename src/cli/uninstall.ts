@@ -4,7 +4,9 @@ import { join } from "node:path";
 import { AGENTS_DIR, CLAUDE_MD_PATH, PRAXARCH_INSTALL_DIR, SETTINGS_PATH, SKILLS_DIR } from "./lib/paths.js";
 import { readJsonIfExists, readTextIfExists, backupThenWriteJson, backupThenWriteText } from "./lib/fsops.js";
 
-const ROLE_FILES = ["scout", "Explore", "mech-executor", "executor", "verifier", "security-executor"];
+// Lowercase "explore" — the installed file is explore.md; "Explore.md" only matched on
+// case-insensitive filesystems, silently orphaning the file on uninstall elsewhere.
+const ROLE_FILES = ["scout", "explore", "mech-executor", "executor", "verifier", "security-executor"];
 const SKILL_NAMES = ["praxarch-report", "fan-out"];
 const START_MARKER = "<!-- praxarch:orchestration:start -->";
 const END_MARKER = "<!-- praxarch:orchestration:end -->";
