@@ -11,7 +11,9 @@ import { emit, readHookInput, type SessionStartInput, type SessionStartOutput } 
  * degrading delegation for the whole session.
  */
 
-const ROLE_FILES = ["scout", "Explore", "mech-executor", "executor", "verifier", "security-executor"];
+// Lowercase "explore" — the installed file is explore.md (the agent *name* "Explore" comes from
+// frontmatter). Checking "Explore.md" only passed on case-insensitive filesystems.
+const ROLE_FILES = ["scout", "explore", "mech-executor", "executor", "verifier", "security-executor"];
 
 async function fileExists(path: string): Promise<boolean> {
   try {

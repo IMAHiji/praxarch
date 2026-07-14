@@ -1,9 +1,11 @@
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
-import { AGENTS_DIR, CLAUDE_MD_PATH, PRAXARCH_INSTALL_DIR, REPO_ROOT, SETTINGS_PATH, SKILLS_DIR } from "./lib/paths.js";
+import { AGENTS_DIR, CLAUDE_MD_PATH, DIST_DIR, PRAXARCH_INSTALL_DIR, REPO_ROOT, SETTINGS_PATH, SKILLS_DIR } from "./lib/paths.js";
 import { exists, readJsonIfExists, readTextIfExists } from "./lib/fsops.js";
 
-const ROLE_FILES = ["scout", "Explore", "mech-executor", "executor", "verifier", "security-executor"];
+// Lowercase "explore" — the template/installed file is explore.md (the agent's *name* is
+// "Explore", from frontmatter). Checking "Explore.md" only passed on case-insensitive filesystems.
+const ROLE_FILES = ["scout", "explore", "mech-executor", "executor", "verifier", "security-executor"];
 const SKILL_NAMES = ["praxarch-report", "fan-out"];
 
 interface Check {
@@ -76,12 +78,44 @@ async function checkVersion(): Promise<Check> {
   };
 }
 
+// Byte-compares every installed file against the repo's dist build, not just directory
+// existence — a stale install otherwise passes doctor as long as VERSION strings agree
+// (which is exactly how the 2026-07 payload fixes sat undeployed while doctor said 20/20).
 async function checkDistTree(): Promise<Check[]> {
   const checks: Check[] = [];
   for (const subdir of ["hooks", "statusline", "report"]) {
+    const srcDir = join(DIST_DIR, subdir);
+    const destDir = join(PRAXARCH_INSTALL_DIR, subdir);
+    if (!(await exists(destDir))) {
+      checks.push({ ok: false, message: `praxarch/${subdir}/ is installed` });
+      continue;
+    }
+    if (!(await exists(srcDir))) {
+      checks.push({ ok: false, message: `praxarch/${subdir}/: repo has no dist/${subdir} — run \`pnpm build\`` });
+      continue;
+    }
+    // Recursive readdir includes directory entries (e.g. hooks/lib) — keep only the compiled
+    // files the installer actually copies.
+    const files = (await readdir(srcDir, { recursive: true })).filter(
+      (f) => (f.endsWith(".js") || f.endsWith(".js.map")) && !f.includes(".test."),
+    );
+    const stale: string[] = [];
+    for (const file of files) {
+      const src = join(srcDir, file);
+      const dest = join(destDir, file);
+      try {
+        const [a, b] = await Promise.all([readFile(src), readFile(dest)]);
+        if (!a.equals(b)) stale.push(file);
+      } catch {
+        stale.push(file);
+      }
+    }
     checks.push({
-      ok: await exists(join(PRAXARCH_INSTALL_DIR, subdir)),
-      message: `praxarch/${subdir}/ is installed`,
+      ok: stale.length === 0,
+      message:
+        stale.length === 0
+          ? `praxarch/${subdir}/ matches the repo's dist build`
+          : `praxarch/${subdir}/ differs from dist (${stale.join(", ")}) — \`pnpm build\` then \`praxarch install\``,
     });
   }
   return checks;

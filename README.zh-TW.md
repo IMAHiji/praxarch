@@ -50,12 +50,16 @@ node dist/cli/index.js install
 `<file>.praxarch-backup-<timestamp>`。如果你已經設定過 `model`／`fallbackModel`
 （例如透過 `/model`），安裝程式**不會**覆寫，只有在該欄位空白時才會設定。
 
-若想直接使用 `praxarch` 指令而非 `node dist/cli/index.js`：
+若想直接使用 `praxarch` 指令而非 `node dist/cli/index.js`（pnpm ≥ 10 已移除
+`pnpm link --global`；改用 `link:`，讓全域安裝以符號連結指回這個 repo）：
 
 ```sh
-pnpm link --global
+pnpm add -g link:$(pwd)
 praxarch install
 ```
+
+若 pnpm 回報其全域 bin 目錄不在 PATH 中，請自行加入（例如 macOS 上在 shell 設定檔加上
+`export PATH="$HOME/Library/pnpm/bin:$PATH"`）。
 
 想用不寫程式、純手動的安裝方式？參見 [`install/AGENT-INSTALL.md`](install/AGENT-INSTALL.md)——
 把它貼進 Claude Code 工作階段，就能以人工方式走過相同的變更流程。

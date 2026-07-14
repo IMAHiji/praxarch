@@ -1,6 +1,6 @@
 {
   "name": "praxarch",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "A config + hooks orchestration harness for Claude Code, extending pilotfish with enforcement, telemetry, and structured verification.",
   "license": "MIT",

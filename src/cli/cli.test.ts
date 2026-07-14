@@ -135,6 +135,9 @@ test("uninstall removes agents, skills, and the praxarch dir", async () => {
     assert.equal(status, 0);
 
     await assert.rejects(readFile(join(fixture.claudeHome, "agents", "scout.md"), "utf8"));
+    // explore.md by name: uninstall once deleted "Explore.md", orphaning the real file on
+    // case-sensitive filesystems.
+    await assert.rejects(readFile(join(fixture.claudeHome, "agents", "explore.md"), "utf8"));
     await assert.rejects(readFile(join(fixture.claudeHome, "praxarch", "VERSION.json"), "utf8"));
 
     const claudeMd = await readFile(join(fixture.claudeHome, "CLAUDE.md"), "utf8");
