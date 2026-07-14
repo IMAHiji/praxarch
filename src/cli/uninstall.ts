@@ -2,7 +2,28 @@ import { rm } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { join } from "node:path";
 import { AGENTS_DIR, CLAUDE_MD_PATH, PRAXARCH_INSTALL_DIR, SETTINGS_PATH, SKILLS_DIR } from "./lib/paths.js";
-import { readJsonIfExists, readTextIfExists, backupThenWriteJson, backupThenWriteText } from "./lib/fsops.js";
+import { exists, isSymlink, resolvesIntoPraxarchRepo, realpathOrNull, readJsonIfExists, readTextIfExists, backupThenWriteJson, backupThenWriteText } from "./lib/fsops.js";
+
+/**
+ * Removes something praxarch installed, without ever deleting into the repo itself.
+ *
+ * A symlink is unlinked directly (rm removes the link, not its target) — that is exactly right for
+ * praxarch's own links. But a *real* file reached through a symlinked parent dir lives in whatever
+ * that link points at; if that is the clone, rm would delete tracked template files and take any
+ * uncommitted edits with them. Those we keep and report.
+ */
+async function removeInstalled(path: string, kept: string[]): Promise<void> {
+  if (await isSymlink(path)) {
+    await rm(path, { recursive: true, force: true });
+    return;
+  }
+  if (!(await exists(path))) return;
+  if (await resolvesIntoPraxarchRepo(path)) {
+    kept.push((await realpathOrNull(path)) ?? path);
+    return;
+  }
+  await rm(path, { recursive: true, force: true });
+}
 
 // Lowercase "explore" — the installed file is explore.md; "Explore.md" only matched on
 // case-insensitive filesystems, silently orphaning the file on uninstall elsewhere.
@@ -85,12 +106,18 @@ export async function uninstall(options: UninstallOptions): Promise<void> {
     await backupThenWriteText(CLAUDE_MD_PATH, stripOrchestrationBlock(claudeMd));
   }
 
+  const kept: string[] = [];
   for (const role of ROLE_FILES) {
-    await rm(join(AGENTS_DIR, `${role}.md`), { force: true });
+    await removeInstalled(join(AGENTS_DIR, `${role}.md`), kept);
   }
-
   for (const name of SKILL_NAMES) {
-    await rm(join(SKILLS_DIR, name), { recursive: true, force: true });
+    await removeInstalled(join(SKILLS_DIR, name), kept);
+  }
+  if (kept.length > 0) {
+    process.stdout.write(
+      `\nKept ${kept.length} path(s) — they live inside the praxarch repo itself (reached through a ` +
+        `symlink), and deleting them would edit your clone:\n${kept.map((p) => `  - ${p}`).join("\n")}\n`,
+    );
   }
 
   await rm(PRAXARCH_INSTALL_DIR, { recursive: true, force: true });
