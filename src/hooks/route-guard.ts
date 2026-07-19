@@ -10,14 +10,16 @@ import { emit, readHookInput, type PreToolUseInput, type PreToolUseOutput } from
  * explicit `model`, which would override the role's frontmatter binding.
  */
 
-const KNOWN_ROLES = new Set([
+// The six praxarch-installed roles. Config (routeGuard.knownRoles) extends this set at runtime
+// for defined roles praxarch doesn't own — see RouteGuardConfig.
+const BUILTIN_ROLES = [
   "scout",
   "Explore",
   "mech-executor",
   "executor",
   "verifier",
   "security-executor",
-]);
+];
 
 // Keywords match at word boundaries, case-insensitively. A trailing "*" makes it a stem
 // (open-ended suffix); without it the match is exact-word. Substring matching is what made
@@ -99,7 +101,8 @@ async function main(): Promise<void> {
     return;
   }
 
-  const isKnownRole = subagentType !== undefined && KNOWN_ROLES.has(subagentType);
+  const knownRoles = new Set([...BUILTIN_ROLES, ...config.routeGuard.knownRoles]);
+  const isKnownRole = subagentType !== undefined && knownRoles.has(subagentType);
 
   // The inverse of the fan-out rule: an explicit model on a defined role silently overrides the
   // role's frontmatter binding. Live telemetry (2026-07-09) showed this defeating tiered routing
