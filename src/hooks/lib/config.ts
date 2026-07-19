@@ -26,6 +26,13 @@ export interface RouteGuardConfig {
    * adding `model` to satisfy the guard overrides the very binding it exists to protect.
    */
   knownRoles: string[];
+  /**
+   * Read-only review roles exempt from the security-keyword redirect. A reviewer of
+   * auth/secrets/crypto code necessarily mentions those keywords, and denying it deadlocks
+   * against verify-gate — the hardcoded verifier exemption (approved 2026-07-08), generalized.
+   * Additive over the default ["verifier"], so a config can add reviewers but never drop it.
+   */
+  reviewRoles: string[];
 }
 
 // Role→model bindings deliberately have no override key here: they live in agent frontmatter,
@@ -46,6 +53,7 @@ export const DEFAULT_CONFIG: PraxarchConfig = {
     strict: true,
     securityKeywords: [],
     knownRoles: [],
+    reviewRoles: ["verifier"],
   },
 };
 
@@ -70,6 +78,7 @@ function mergeConfig(base: PraxarchConfig, override: Partial<PraxarchConfig> | n
         ...(override.routeGuard?.securityKeywords ?? []),
       ],
       knownRoles: [...base.routeGuard.knownRoles, ...(override.routeGuard?.knownRoles ?? [])],
+      reviewRoles: [...base.routeGuard.reviewRoles, ...(override.routeGuard?.reviewRoles ?? [])],
     },
   };
 }

@@ -86,10 +86,13 @@ async function main(): Promise<void> {
   const securityKeywords = [...BUILTIN_SECURITY_KEYWORDS, ...config.routeGuard.securityKeywords];
   const matchedKeyword = securityKeywords.find((kw) => keywordPattern(kw).test(haystack));
 
-  // "verifier" is exempt (user-approved 2026-07-08): it is a read-only review role that never
-  // edits source, and blocking it here conflicts with verify-gate, which requires a
-  // verifier-role pass on exactly these security-sensitive tickets.
-  if (matchedKeyword !== undefined && subagentType !== "security-executor" && subagentType !== "verifier") {
+  // Review roles are exempt (the 2026-07-08 verifier exemption, generalized to config): a
+  // read-only reviewer of auth/secrets code necessarily mentions those keywords, and blocking
+  // it here deadlocks against verify-gate, which requires a review pass on exactly these
+  // security-sensitive tickets. Default is ["verifier"]; config adds, never removes.
+  const reviewRoles = new Set(config.routeGuard.reviewRoles);
+  const isReviewRole = subagentType !== undefined && reviewRoles.has(subagentType);
+  if (matchedKeyword !== undefined && subagentType !== "security-executor" && !isReviewRole) {
     emit(
       decide(
         config.routeGuard.strict,
