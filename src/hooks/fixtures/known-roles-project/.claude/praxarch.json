@@ -1,0 +1,5 @@
+{
+  "routeGuard": {
+    "knownRoles": ["planner"]
+  }
+}

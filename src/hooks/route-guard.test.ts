@@ -6,14 +6,25 @@ import { dirname, join } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const script = join(here, "..", "..", "dist", "hooks", "route-guard.js");
+const knownRolesProject = join(here, "fixtures", "known-roles-project");
 
-async function run(input: unknown): Promise<{ decision: string; stdout: unknown }> {
-  const stdout = execFileSync("node", [script], { input: JSON.stringify(input) }).toString("utf8");
+async function run(
+  input: unknown,
+  env?: Record<string, string>,
+): Promise<{ decision: string; stdout: unknown }> {
+  const stdout = execFileSync("node", [script], {
+    input: JSON.stringify(input),
+    env: env ? { ...process.env, ...env } : process.env,
+  }).toString("utf8");
   const parsed = JSON.parse(stdout) as {
     hookSpecificOutput: { permissionDecision: string };
   };
   return { decision: parsed.hookSpecificOutput.permissionDecision, stdout: parsed };
 }
+
+// Isolates the hook from this machine's real global config (~/.claude/praxarch/config.json),
+// whose knownRoles/securityKeywords would otherwise leak into fixture-based assertions.
+const HERMETIC_ENV = { PRAXARCH_HOME: join(knownRolesProject, "no-such-praxarch-home") };
 
 test("allows non-Agent tool calls unconditionally", async () => {
   const { decision } = await run({
@@ -131,4 +142,50 @@ test("allows a security-flavored delegation routed to security-executor", async 
     tool_input: { subagent_type: "security-executor", prompt: "rotate the JWT secret handling" },
   });
   assert.equal(decision, "allow");
+});
+
+test("treats a config-extended knownRole as defined: no explicit model → allow", async () => {
+  const { decision } = await run(
+    {
+      session_id: "s1",
+      cwd: knownRolesProject,
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: "planner", prompt: "decompose the dashboard feature into a plan" },
+    },
+    HERMETIC_ENV,
+  );
+  assert.equal(decision, "allow");
+});
+
+test("applies the no-explicit-model rule to config-extended knownRoles", async () => {
+  const { decision } = await run(
+    {
+      session_id: "s1",
+      cwd: knownRolesProject,
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_input: {
+        subagent_type: "planner",
+        model: "sonnet",
+        prompt: "decompose the dashboard feature into a plan",
+      },
+    },
+    HERMETIC_ENV,
+  );
+  assert.equal(decision, "deny");
+});
+
+test("still denies a role absent from both builtin and config knownRoles", async () => {
+  const { decision } = await run(
+    {
+      session_id: "s1",
+      cwd: knownRolesProject,
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: "implementer", prompt: "build task 3 from the plan file" },
+    },
+    HERMETIC_ENV,
+  );
+  assert.equal(decision, "deny");
 });
