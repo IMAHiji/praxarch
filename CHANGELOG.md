@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **route-guard: `routeGuard.knownRoles` config extends the defined-role set.** The built-in six
+  roles are praxarch's own; agents installed by other tools with their own frontmatter bindings
+  (orchestrate's planner/implementer/plan-reviewer, plugin agents) were caught by the ad-hoc rule:
+  strict mode denied them for lacking `model`, and passing `model` to satisfy it overrides the
+  binding the guard exists to protect. Config-listed roles now get the same treatment as built-ins
+  (frontmatter owns the model; explicit `model` is denied). Additive merge, like
+  `securityKeywords`.
+
 ## v0.1.1 — 2026-07-13
 
 Fixes driven by the first week of live telemetry (includes the previously uncommitted

@@ -18,6 +18,14 @@ export interface RouteGuardConfig {
    * Matched at word boundaries, case-insensitively; a trailing "*" matches the stem's suffixes.
    */
   securityKeywords: string[];
+  /**
+   * Extra subagent types (beyond the built-in six roles) treated as defined roles: their model
+   * comes from agent-file frontmatter, so delegations to them must omit `model`. For agents
+   * praxarch doesn't install (orchestrate-pipeline roles, plugin agents with frontmatter
+   * bindings) — without this, strict mode denies them for lacking an explicit `model`, and
+   * adding `model` to satisfy the guard overrides the very binding it exists to protect.
+   */
+  knownRoles: string[];
 }
 
 // Role→model bindings deliberately have no override key here: they live in agent frontmatter,
@@ -37,6 +45,7 @@ export const DEFAULT_CONFIG: PraxarchConfig = {
   routeGuard: {
     strict: true,
     securityKeywords: [],
+    knownRoles: [],
   },
 };
 
@@ -60,6 +69,7 @@ function mergeConfig(base: PraxarchConfig, override: Partial<PraxarchConfig> | n
         ...base.routeGuard.securityKeywords,
         ...(override.routeGuard?.securityKeywords ?? []),
       ],
+      knownRoles: [...base.routeGuard.knownRoles, ...(override.routeGuard?.knownRoles ?? [])],
     },
   };
 }
