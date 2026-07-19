@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 const here = dirname(fileURLToPath(import.meta.url));
 const script = join(here, "..", "..", "dist", "hooks", "route-guard.js");
 const knownRolesProject = join(here, "fixtures", "known-roles-project");
+const reviewRolesProject = join(here, "fixtures", "review-roles-project");
 
 async function run(
   input: unknown,
@@ -170,6 +171,37 @@ test("applies the no-explicit-model rule to config-extended knownRoles", async (
         model: "sonnet",
         prompt: "decompose the dashboard feature into a plan",
       },
+    },
+    HERMETIC_ENV,
+  );
+  assert.equal(decision, "deny");
+});
+
+test("exempts config-listed review roles from the security redirect", async () => {
+  const { decision } = await run(
+    {
+      session_id: "s1",
+      cwd: reviewRolesProject,
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_input: {
+        subagent_type: "pr-review-toolkit:silent-failure-hunter",
+        prompt: "Review the JWT secret rotation and authentication changes for swallowed errors.",
+      },
+    },
+    HERMETIC_ENV,
+  );
+  assert.equal(decision, "allow");
+});
+
+test("security redirect still applies to non-review roles under a reviewRoles config", async () => {
+  const { decision } = await run(
+    {
+      session_id: "s1",
+      cwd: reviewRolesProject,
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: "executor", prompt: "rotate the JWT secret handling in auth.ts" },
     },
     HERMETIC_ENV,
   );
