@@ -11,6 +11,12 @@
   binding the guard exists to protect. Config-listed roles now get the same treatment as built-ins
   (frontmatter owns the model; explicit `model` is denied). Additive merge, like
   `securityKeywords`.
+- **route-guard: `routeGuard.reviewRoles` generalizes the verifier security exemption.** The
+  2026-07-08 exemption was hardcoded to `subagent_type === "verifier"`, so other read-only
+  review agents (pr-review-toolkit's reviewers) hit the identical deadlock: reviewing
+  auth/secrets code mentions the keywords, strict mode denies the dispatch. Config-listed
+  review roles are now exempt alongside verifier; additive merge over the default
+  `["verifier"]`, so the canonical exemption can be extended but never dropped.
 
 ## v0.1.1 — 2026-07-13
 
