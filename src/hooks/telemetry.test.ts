@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -137,6 +137,62 @@ test("counts critical/major findings from a REFUTED verdict", async () => {
     assert.equal(state.lastVerifier?.verdict, "REFUTED");
     assert.equal(state.lastVerifier?.criticalOrMajorCount, 1);
     assert.equal(state.lastVerifier?.findingsCount, 2);
+  });
+});
+
+test("records a verdict from a config-added verdictRole", async () => {
+  await withPraxarchHome(async (home) => {
+    await writeFile(
+      join(home, "config.json"),
+      JSON.stringify({ verifyGate: { verdictRoles: ["plan-reviewer"] } }),
+    );
+    const reviewText = [
+      "Task 1: OK",
+      "Unplanned changes: none",
+      "",
+      "```json",
+      JSON.stringify({ verdict: "CONFIRMED", findings: [] }),
+      "```",
+    ].join("\n");
+
+    run(home, {
+      session_id: "s1",
+      cwd: process.cwd(),
+      hook_event_name: "PostToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: "plan-reviewer" },
+      tool_response: { status: "completed", content: [{ type: "text", text: reviewText }] },
+    });
+
+    const statePath = join(home, "state", "s1.json");
+    const state = JSON.parse(await readFile(statePath, "utf8")) as {
+      lastVerifier: { verdict: string; criticalOrMajorCount: number } | null;
+    };
+    assert.equal(state.lastVerifier?.verdict, "CONFIRMED");
+    assert.equal(state.lastVerifier?.criticalOrMajorCount, 0);
+  });
+});
+
+test("ignores a verdict block from a role outside verdictRoles", async () => {
+  await withPraxarchHome(async (home) => {
+    const reviewText = ["```json", JSON.stringify({ verdict: "CONFIRMED", findings: [] }), "```"].join(
+      "\n",
+    );
+
+    run(home, {
+      session_id: "s1",
+      cwd: process.cwd(),
+      hook_event_name: "PostToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: "plan-reviewer" },
+      tool_response: { status: "completed", content: [{ type: "text", text: reviewText }] },
+    });
+
+    const statePath = join(home, "state", "s1.json");
+    const state = JSON.parse(await readFile(statePath, "utf8")) as {
+      lastVerifier?: { verdict: string } | null;
+    };
+    assert.ok(!state.lastVerifier);
   });
 });
 

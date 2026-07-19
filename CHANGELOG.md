@@ -11,6 +11,12 @@
   binding the guard exists to protect. Config-listed roles now get the same treatment as built-ins
   (frontmatter owns the model; explicit `model` is denied). Additive merge, like
   `securityKeywords`.
+- **telemetry/verify-gate: `verifyGate.verdictRoles` lets non-verifier reviews satisfy the gate.**
+  Telemetry recorded trailing JSON verdicts only from the `verifier` role, so an /orchestrate
+  run's plan-reviewer pass went unrecorded and verify-gate demanded a second review at session
+  stop. Roles listed in `verifyGate.verdictRoles` (additive over the default `["verifier"]`) now
+  get their verdict blocks recorded; the added role's report contract must end with the verifier
+  template's JSON verdict block.
 
 ## v0.1.1 — 2026-07-13
 

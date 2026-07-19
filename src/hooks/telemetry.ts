@@ -1,13 +1,14 @@
 #!/usr/bin/env node
+import { loadConfig } from "./lib/config.js";
 import { appendJsonl } from "./lib/jsonl.js";
 import { logFileForDate } from "./lib/paths.js";
 import { readSessionState, writeSessionState, type VerifierRecord } from "./lib/session-state.js";
 import { readHookInput, type PostToolUseInput } from "./lib/hook-io.js";
 
 /**
- * PostToolUse(Agent) — appends a delegation record to the monthly JSONL log and, for verifier
- * calls, parses the required trailing JSON verdict block into session state so verify-gate can
- * check it later.
+ * PostToolUse(Agent) — appends a delegation record to the monthly JSONL log and, for verdict
+ * roles (config verifyGate.verdictRoles, default ["verifier"]), parses the required trailing
+ * JSON verdict block into session state so verify-gate can check it later.
  *
  * tool_response carries the subagent's resolved model, token usage, and duration (verified
  * against a live capture — see fixtures/post-tool-use.agent.json), so each record includes real
@@ -56,9 +57,11 @@ async function main(): Promise<void> {
   const at = new Date().toISOString();
   const batchMatch = FANOUT_TAG.exec(description);
 
+  const config = await loadConfig(input.cwd);
+
   let verifierRecord: VerifierRecord | null = null;
   const text = responseText(input.tool_response);
-  if (role === "verifier" && text) {
+  if (role !== undefined && config.verifyGate.verdictRoles.includes(role) && text) {
     const parsed = extractTrailingJson(text);
     if (parsed) {
       const criticalOrMajor = (parsed.findings ?? []).filter(

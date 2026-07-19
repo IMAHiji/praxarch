@@ -8,6 +8,15 @@ export interface VerifyGateConfig {
   minChangedFiles: number;
   /** Glob-ish path fragments to exclude from the diff-size calculation (lockfiles, generated files). */
   ignorePatterns: string[];
+  /**
+   * Roles whose trailing JSON verdict telemetry records for the verify-gate. Without this, an
+   * /orchestrate run's plan-reviewer pass goes unrecorded and the gate demands a second review
+   * at stop. Additive over the default ["verifier"] — unlike verifyGate's other keys, which
+   * override wholesale — so a config can add its own review roles but never drop the canonical
+   * verifier. The added role's report contract must end with the same JSON verdict block the
+   * verifier template mandates.
+   */
+  verdictRoles: string[];
 }
 
 export interface RouteGuardConfig {
@@ -41,6 +50,7 @@ export const DEFAULT_CONFIG: PraxarchConfig = {
     minChangedLines: 80,
     minChangedFiles: 3,
     ignorePatterns: ["package-lock.json", "pnpm-lock.yaml", "yarn.lock", ".min.js", "dist/"],
+    verdictRoles: ["verifier"],
   },
   routeGuard: {
     strict: true,
@@ -62,7 +72,14 @@ async function readJsonIfExists(path: string): Promise<Partial<PraxarchConfig> |
 function mergeConfig(base: PraxarchConfig, override: Partial<PraxarchConfig> | null): PraxarchConfig {
   if (!override) return base;
   return {
-    verifyGate: { ...base.verifyGate, ...(override.verifyGate ?? {}) },
+    verifyGate: {
+      ...base.verifyGate,
+      ...(override.verifyGate ?? {}),
+      verdictRoles: [
+        ...base.verifyGate.verdictRoles,
+        ...(override.verifyGate?.verdictRoles ?? []),
+      ],
+    },
     routeGuard: {
       strict: override.routeGuard?.strict ?? base.routeGuard.strict,
       securityKeywords: [
