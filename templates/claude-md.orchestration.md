@@ -19,6 +19,23 @@ live in `~/.claude/agents/*.md` frontmatter and shift independently as models ch
 | `verifier` | Fresh-context adversarial review of non-trivial completed work |
 | `security-executor` | Auth, authz, secrets, crypto, trust-boundary validation — always, no exceptions |
 
+### Plan/execute tier rule (hard rule)
+
+- **Planning** runs at the highest tier you currently have available — this varies with usage,
+  so check what's actually selected rather than assuming a fixed name. For code, that's the
+  `planner` role via `/orchestrate`, or the orchestrator's own session when it's already at that
+  tier. Planning always ends in a written plan (a plan file for `/orchestrate`; an equivalent
+  written-down plan for ad-hoc delegation) — never a handoff based only on in-context reasoning.
+- **Execution** always runs at a role bound to a lower tier (`implementer`, `executor`,
+  `mech-executor`) — never the orchestrator itself, even when the orchestrator's own session
+  happens to already be at the highest tier. Being the highest-tier session is a reason to
+  delegate execution, not license to do it yourself.
+- Unlike the process skills in Autonomy, this is hard, not suggest-only — it governs everything
+  above the "single-file read / quick judgment call" line in Retained locally below, which is
+  unchanged.
+- Scope: code/praxarch roles only for now. `adobe-practice-research` already has an equivalent
+  split; other content-creation skills don't yet — treat as a separate, tracked follow-up.
+
 ### Delegation protocol
 
 1. **Complete specs only.** Every delegation includes: goal, constraints, success criteria,
