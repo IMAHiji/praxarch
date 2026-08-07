@@ -8,19 +8,25 @@ const here = dirname(fileURLToPath(import.meta.url));
 const script = join(here, "..", "..", "dist", "hooks", "route-guard.js");
 const knownRolesProject = join(here, "fixtures", "known-roles-project");
 const reviewRolesProject = join(here, "fixtures", "review-roles-project");
+const malformedConfigProject = join(here, "fixtures", "malformed-config-project");
 
 async function run(
   input: unknown,
   env?: Record<string, string>,
-): Promise<{ decision: string; stdout: unknown }> {
+): Promise<{ decision: string; systemMessage?: string; stdout: unknown }> {
   const stdout = execFileSync("node", [script], {
     input: JSON.stringify(input),
     env: env ? { ...process.env, ...env } : process.env,
   }).toString("utf8");
   const parsed = JSON.parse(stdout) as {
     hookSpecificOutput: { permissionDecision: string };
+    systemMessage?: string;
   };
-  return { decision: parsed.hookSpecificOutput.permissionDecision, stdout: parsed };
+  return {
+    decision: parsed.hookSpecificOutput.permissionDecision,
+    ...(parsed.systemMessage !== undefined ? { systemMessage: parsed.systemMessage } : {}),
+    stdout: parsed,
+  };
 }
 
 // Isolates the hook from this machine's real global config (~/.claude/praxarch/config.json),
@@ -220,4 +226,19 @@ test("still denies a role absent from both builtin and config knownRoles", async
     HERMETIC_ENV,
   );
   assert.equal(decision, "deny");
+});
+
+test("malformed project config does not disable the guard: defined-role delegation with explicit model is still denied, and the warning surfaces", async () => {
+  const { decision, systemMessage } = await run(
+    {
+      session_id: "s1",
+      cwd: malformedConfigProject,
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: "executor", model: "sonnet", prompt: "refactor the widget module" },
+    },
+    HERMETIC_ENV,
+  );
+  assert.equal(decision, "deny");
+  assert.match(systemMessage ?? "", /praxarch\.json is unreadable or not valid JSON/);
 });

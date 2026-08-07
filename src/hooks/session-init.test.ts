@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -49,6 +49,41 @@ test("warns when CLAUDE_CODE_SUBAGENT_MODEL is set", async () => {
       { CLAUDE_CODE_SUBAGENT_MODEL: "haiku" },
     ) as { systemMessage?: string };
     assert.match(result.systemMessage ?? "", /CLAUDE_CODE_SUBAGENT_MODEL is set/);
+  });
+});
+
+test("records baselineHead on first run and does not overwrite it on a second run", async () => {
+  await withPraxarchHome(async (home) => {
+    const repo = await mkdtemp(join(tmpdir(), "praxarch-sessioninit-repo-"));
+    try {
+      execFileSync("git", ["init", "-q"], { cwd: repo });
+      execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
+      execFileSync("git", ["config", "user.name", "Test"], { cwd: repo });
+      await writeFile(join(repo, "file.txt"), "line\n");
+      execFileSync("git", ["add", "."], { cwd: repo });
+      execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: repo });
+      const initHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo }).toString("utf8").trim();
+
+      run(home, { session_id: "s1", cwd: repo, hook_event_name: "SessionStart", source: "startup" });
+      const stateAfterFirst = JSON.parse(await readFile(join(home, "state", "s1.json"), "utf8")) as {
+        baselineHead?: string | null;
+      };
+      assert.equal(stateAfterFirst.baselineHead, initHead);
+
+      // A second SessionStart (e.g. resume/clear/compact) must not move the goalposts —
+      // commit again so a naive re-capture would pick up the new HEAD.
+      await writeFile(join(repo, "file2.txt"), "line\n");
+      execFileSync("git", ["add", "."], { cwd: repo });
+      execFileSync("git", ["commit", "-q", "-m", "second commit"], { cwd: repo });
+
+      run(home, { session_id: "s1", cwd: repo, hook_event_name: "SessionStart", source: "resume" });
+      const stateAfterSecond = JSON.parse(await readFile(join(home, "state", "s1.json"), "utf8")) as {
+        baselineHead?: string | null;
+      };
+      assert.equal(stateAfterSecond.baselineHead, initHead);
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
   });
 });
 
