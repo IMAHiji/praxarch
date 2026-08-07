@@ -1,9 +1,13 @@
 #!/usr/bin/env node
+import { execFile } from "node:child_process";
 import { access } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { readSessionState, writeSessionState } from "./lib/session-state.js";
 import { emit, readHookInput, type SessionStartInput, type SessionStartOutput } from "./lib/hook-io.js";
+
+const execFileAsync = promisify(execFile);
 
 /**
  * SessionStart — ensures session state exists, and does a lightweight drift check (not the full
@@ -28,6 +32,16 @@ async function main(): Promise<void> {
   const input = await readHookInput<SessionStartInput>();
 
   const state = await readSessionState(input.session_id);
+  // Only capture on first run — SessionStart also fires on resume/clear/compact, and
+  // re-capturing then would move the verify-gate's baseline mid-session.
+  if (state.baselineHead === undefined || state.baselineHead === null) {
+    try {
+      const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: input.cwd });
+      state.baselineHead = stdout.trim();
+    } catch {
+      state.baselineHead = null;
+    }
+  }
   await writeSessionState(state);
 
   const warnings: string[] = [];

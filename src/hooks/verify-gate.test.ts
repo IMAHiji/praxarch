@@ -174,6 +174,87 @@ test("fails open after two consecutive blocks in one stop cycle (loop guard)", a
   }
 });
 
+async function seedBaselineHead(
+  home: string,
+  sessionId: string,
+  baselineHead: string | null,
+): Promise<void> {
+  const stateDir = join(home, "state");
+  await mkdir(stateDir, { recursive: true });
+  await writeFile(
+    join(stateDir, `${sessionId}.json`),
+    JSON.stringify({
+      sessionId,
+      startedAt: new Date().toISOString(),
+      delegations: [],
+      lastVerifier: null,
+      baselineHead,
+    }),
+  );
+}
+
+test("blocks a non-trivial change that was committed during the session", async () => {
+  const fixture = await setupFixture();
+  try {
+    const initHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: fixture.repo })
+      .toString("utf8")
+      .trim();
+    await seedBaselineHead(fixture.home, "s1", initHead);
+
+    await makeNonTrivialDiff(fixture.repo);
+    execFileSync("git", ["add", "."], { cwd: fixture.repo });
+    execFileSync("git", ["commit", "-q", "-m", "non-trivial change"], { cwd: fixture.repo });
+
+    const result = run(fixture, {
+      session_id: "s1",
+      cwd: fixture.repo,
+      hook_event_name: "Stop",
+    }) as { decision?: string };
+    assert.equal(result.decision, "block");
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("blocks a non-trivial change consisting only of untracked new files", async () => {
+  const fixture = await setupFixture();
+  try {
+    for (let i = 0; i < 3; i += 1) {
+      await writeFile(join(fixture.repo, `untracked-${i}.txt`), "new line\n".repeat(40));
+    }
+    const result = run(fixture, {
+      session_id: "s1",
+      cwd: fixture.repo,
+      hook_event_name: "Stop",
+    }) as { decision?: string };
+    assert.equal(result.decision, "block");
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("blocks a non-trivial change of only untracked files in a repo with no commits", async () => {
+  const repo = await mkdtemp(join(tmpdir(), "praxarch-verifygate-repo-"));
+  const home = await mkdtemp(join(tmpdir(), "praxarch-verifygate-home-"));
+  const fixture: Fixture = { repo, home };
+  try {
+    execFileSync("git", ["init", "-q"], { cwd: repo });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: repo });
+    for (let i = 0; i < 3; i += 1) {
+      await writeFile(join(repo, `untracked-${i}.txt`), "new line\n".repeat(60));
+    }
+    const result = run(fixture, {
+      session_id: "s1",
+      cwd: fixture.repo,
+      hook_event_name: "Stop",
+    }) as { decision?: string };
+    assert.equal(result.decision, "block");
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
 test("an explicit waiver in the final message bypasses the gate", async () => {
   const fixture = await setupFixture();
   try {

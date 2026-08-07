@@ -5,10 +5,11 @@ import { readSessionState, writeSessionState } from "./lib/session-state.js";
 import { emit, readHookInput, type StopInput, type StopOutput } from "./lib/hook-io.js";
 
 /**
- * Stop — blocks session completion when the working-tree diff is large enough to count as
- * "non-trivial" per config, and no CONFIRMED verifier pass (zero critical/major findings) is on
- * record for this session. This is the hard enforcement of the policy's "verify before claiming
- * done" rule, which pilotfish leaves as unenforced policy text.
+ * Stop — blocks session completion when the diff since the session's recorded baseline commit
+ * (falling back to HEAD, plus untracked new files) is large enough to count as "non-trivial" per
+ * config, and no CONFIRMED verifier pass (zero critical/major findings) is on record for this
+ * session. This is the hard enforcement of the policy's "verify before claiming done" rule, which
+ * pilotfish leaves as unenforced policy text.
  *
  * Escape hatches: PRAXARCH_SKIP_VERIFY=1 env var, or the orchestrator stating
  * "PRAXARCH_VERIFY_WAIVED: <reason>" in its final message for changes that genuinely don't
@@ -22,8 +23,19 @@ const WAIVER_PATTERN = /PRAXARCH_VERIFY_WAIVED:\s*(.+)/;
 // trap a session that can't (or won't) satisfy the gate in an infinite stop loop.
 const MAX_CONSECUTIVE_BLOCKS = 2;
 
-function allow(): StopOutput {
-  return {};
+function allow(warnings: string[] = []): StopOutput {
+  return warnings.length > 0 ? { systemMessage: warnings.join(" ") } : {};
+}
+
+// Appends config warnings to whatever systemMessage an already-built output carries (e.g. the
+// loop-guard's own message), rather than overwriting it — the enforcement decision is unaffected.
+function withConfigWarnings(output: StopOutput, warnings: string[]): StopOutput {
+  if (warnings.length === 0) return output;
+  const warningMessage = warnings.join(" ");
+  return {
+    ...output,
+    systemMessage: output.systemMessage ? `${output.systemMessage} ${warningMessage}` : warningMessage,
+  };
 }
 
 async function main(): Promise<void> {
@@ -40,32 +52,42 @@ async function main(): Promise<void> {
     return;
   }
 
-  const config = await loadConfig(input.cwd);
-  const { changedLines, changedFiles } = await diffStat(input.cwd, config.verifyGate.ignorePatterns);
+  const state = await readSessionState(input.session_id);
+
+  const { config, warnings } = await loadConfig(input.cwd);
+  const { changedLines, changedFiles } = await diffStat(
+    input.cwd,
+    config.verifyGate.ignorePatterns,
+    state.baselineHead,
+  );
 
   const isNonTrivial =
     changedLines >= config.verifyGate.minChangedLines || changedFiles >= config.verifyGate.minChangedFiles;
   if (!isNonTrivial) {
-    emit(allow());
+    emit(allow(warnings));
     return;
   }
 
-  const state = await readSessionState(input.session_id);
   const verifier = state.lastVerifier;
 
   const passed = verifier !== null && verifier.verdict === "CONFIRMED" && verifier.criticalOrMajorCount === 0;
   if (passed) {
-    emit(allow());
+    emit(allow(warnings));
     return;
   }
 
   const priorBlocks = input.stop_hook_active ? (state.verifyGateConsecutiveBlocks ?? 0) : 0;
   if (priorBlocks >= MAX_CONSECUTIVE_BLOCKS) {
-    emit({
-      systemMessage:
-        `praxarch verify-gate: diff is still unverified after ${MAX_CONSECUTIVE_BLOCKS} blocks — ` +
-        `failing open rather than trapping the session in a stop loop.`,
-    } satisfies StopOutput);
+    emit(
+      withConfigWarnings(
+        {
+          systemMessage:
+            `praxarch verify-gate: diff is still unverified after ${MAX_CONSECUTIVE_BLOCKS} blocks — ` +
+            `failing open rather than trapping the session in a stop loop.`,
+        },
+        warnings,
+      ),
+    );
     return;
   }
   state.verifyGateConsecutiveBlocks = priorBlocks + 1;
@@ -75,20 +97,23 @@ async function main(): Promise<void> {
     ? `last verifier pass was ${verifier.verdict} with ${verifier.criticalOrMajorCount} critical/major finding(s)`
     : "no verifier pass is on record for this session";
 
-  const output: StopOutput = {
-    decision: "block",
-    reason:
-      `praxarch verify-gate: this session changed ${changedLines} lines across ${changedFiles} files ` +
-      `(non-trivial) but ${reasonDetail}. Run a verifier pass before reporting completion, or state ` +
-      `"PRAXARCH_VERIFY_WAIVED: <reason>" if verification genuinely doesn't apply here.`,
-    hookSpecificOutput: {
-      hookEventName: "Stop",
-      additionalContext:
-        "Delegate to the verifier role for a fresh-context review of the changes, then re-check " +
-        "completion. If this diff is something like docs/config that doesn't warrant verification, " +
-        'say "PRAXARCH_VERIFY_WAIVED: <reason>" explicitly instead of just stopping.',
+  const output: StopOutput = withConfigWarnings(
+    {
+      decision: "block",
+      reason:
+        `praxarch verify-gate: this session changed ${changedLines} lines across ${changedFiles} files ` +
+        `(non-trivial) but ${reasonDetail}. Run a verifier pass before reporting completion, or state ` +
+        `"PRAXARCH_VERIFY_WAIVED: <reason>" if verification genuinely doesn't apply here.`,
+      hookSpecificOutput: {
+        hookEventName: "Stop",
+        additionalContext:
+          "Delegate to the verifier role for a fresh-context review of the changes, then re-check " +
+          "completion. If this diff is something like docs/config that doesn't warrant verification, " +
+          'say "PRAXARCH_VERIFY_WAIVED: <reason>" explicitly instead of just stopping.',
+      },
     },
-  };
+    warnings,
+  );
   emit(output);
 }
 
