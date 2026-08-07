@@ -1,6 +1,6 @@
 # praxarch agent install runbook
 
-You are being asked to install praxarch (https://github.com/IMAHiji/praxarch) into a user's global
+You are being asked to install praxarch (https://gitlab.com/IMAHiji/praxarch) into a user's global
 Claude Code configuration. Praxarch is a config + hooks orchestration harness — six role-based
 subagents, an orchestration policy, and enforcement hooks (route-guard, telemetry, verify-gate,
 session-init) wired into `~/.claude/settings.json`.
@@ -12,9 +12,9 @@ is inspecting exactly what would change before trusting the CLI.
 
 ## Before you do anything
 
-1. Clone or already have a local copy of `https://github.com/IMAHiji/praxarch` — you need its
+1. Clone or already have a local copy of `https://gitlab.com/IMAHiji/praxarch` — you need its
    `templates/` directory. If the user hasn't given you a local path, ask for one or clone it
-   (`git clone git@github.com:IMAHiji/praxarch.git` or the HTTPS equivalent) to a scratch
+   (`git clone git@gitlab.com:IMAHiji/praxarch.git` or the HTTPS equivalent) to a scratch
    directory. Do not fetch and apply raw file contents over the network sight-unseen — read what
    you're about to install.
 2. Read every file you're about to install (agents/*.md, claude-md.orchestration.md,
