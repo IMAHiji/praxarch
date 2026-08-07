@@ -43,6 +43,12 @@ export interface PraxarchConfig {
   routeGuard: RouteGuardConfig;
 }
 
+/** A parsed-and-shape-validated (but not yet merged/defaulted) config layer. */
+export interface ConfigLayer {
+  verifyGate?: Partial<VerifyGateConfig>;
+  routeGuard?: Partial<RouteGuardConfig>;
+}
+
 export const DEFAULT_CONFIG: PraxarchConfig = {
   verifyGate: {
     minChangedLines: 80,
@@ -57,17 +63,126 @@ export const DEFAULT_CONFIG: PraxarchConfig = {
   },
 };
 
-async function readJsonIfExists(path: string): Promise<Partial<PraxarchConfig> | null> {
+// Trust boundary: config.json / praxarch.json are project- or user-controlled files read on
+// every hook invocation. A malformed or wrongly-shaped file must degrade to defaults-plus-warning,
+// never propagate an exception up to the hook's top-level catch — that catch fails the whole
+// enforcement layer open, which is exactly what a hostile or merely broken config could exploit.
+
+function shortError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isFiniteNonNegativeNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+/** Filters an array down to its string elements, warning once if any were dropped. */
+function stringArray(path: string, field: string, value: unknown, warnings: string[]): string[] | undefined {
+  if (!Array.isArray(value)) {
+    warnings.push(`praxarch config: ${path} ${field} must be an array of strings — ignoring it`);
+    return undefined;
+  }
+  const strings = value.filter((el): el is string => typeof el === "string");
+  if (strings.length !== value.length) {
+    warnings.push(`praxarch config: ${path} ${field} contains non-string element(s) — dropping them`);
+  }
+  return strings;
+}
+
+/** Reads and JSON-parses a config layer. Never throws: unreadable/invalid JSON → null + warning. */
+async function readJsonIfExists(path: string, warnings: string[]): Promise<unknown | null> {
   try {
     const raw = await readFile(path, "utf8");
-    return JSON.parse(raw) as Partial<PraxarchConfig>;
+    return JSON.parse(raw);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw err;
+    warnings.push(`praxarch config: ${path} is unreadable or not valid JSON — ignoring it (${shortError(err)})`);
+    return null;
   }
 }
 
-function mergeConfig(base: PraxarchConfig, override: Partial<PraxarchConfig> | null): PraxarchConfig {
+/**
+ * Shape-validates one already-parsed config layer. Invalid fields are dropped individually (with
+ * a warning naming the path/field/expected type) so one bad field doesn't discard the whole layer,
+ * and the default/lower-layer value stands for anything dropped. Unknown keys are ignored silently.
+ */
+function validateLayer(path: string, raw: unknown, warnings: string[]): ConfigLayer {
+  if (!isPlainObject(raw)) {
+    warnings.push(`praxarch config: ${path} top-level value must be an object — ignoring it`);
+    return {};
+  }
+
+  const result: ConfigLayer = {};
+
+  if ("verifyGate" in raw) {
+    const vg = raw["verifyGate"];
+    if (isPlainObject(vg)) {
+      const validated: Partial<VerifyGateConfig> = {};
+      if ("minChangedLines" in vg) {
+        if (isFiniteNonNegativeNumber(vg["minChangedLines"])) {
+          validated.minChangedLines = vg["minChangedLines"];
+        } else {
+          warnings.push(
+            `praxarch config: ${path} verifyGate.minChangedLines must be a finite number >= 0 — ignoring it`,
+          );
+        }
+      }
+      if ("minChangedFiles" in vg) {
+        if (isFiniteNonNegativeNumber(vg["minChangedFiles"])) {
+          validated.minChangedFiles = vg["minChangedFiles"];
+        } else {
+          warnings.push(
+            `praxarch config: ${path} verifyGate.minChangedFiles must be a finite number >= 0 — ignoring it`,
+          );
+        }
+      }
+      if ("ignorePatterns" in vg) {
+        const patterns = stringArray(path, "verifyGate.ignorePatterns", vg["ignorePatterns"], warnings);
+        if (patterns !== undefined) validated.ignorePatterns = patterns;
+      }
+      result.verifyGate = validated;
+    } else {
+      warnings.push(`praxarch config: ${path} verifyGate must be an object — ignoring it`);
+    }
+  }
+
+  if ("routeGuard" in raw) {
+    const rg = raw["routeGuard"];
+    if (isPlainObject(rg)) {
+      const validated: Partial<RouteGuardConfig> = {};
+      if ("strict" in rg) {
+        if (typeof rg["strict"] === "boolean") {
+          validated.strict = rg["strict"];
+        } else {
+          warnings.push(`praxarch config: ${path} routeGuard.strict must be a boolean — ignoring it`);
+        }
+      }
+      if ("securityKeywords" in rg) {
+        const keywords = stringArray(path, "routeGuard.securityKeywords", rg["securityKeywords"], warnings);
+        if (keywords !== undefined) validated.securityKeywords = keywords;
+      }
+      if ("knownRoles" in rg) {
+        const roles = stringArray(path, "routeGuard.knownRoles", rg["knownRoles"], warnings);
+        if (roles !== undefined) validated.knownRoles = roles;
+      }
+      if ("reviewRoles" in rg) {
+        const roles = stringArray(path, "routeGuard.reviewRoles", rg["reviewRoles"], warnings);
+        if (roles !== undefined) validated.reviewRoles = roles;
+      }
+      result.routeGuard = validated;
+    } else {
+      warnings.push(`praxarch config: ${path} routeGuard must be an object — ignoring it`);
+    }
+  }
+
+  return result;
+}
+
+function mergeConfig(base: PraxarchConfig, override: ConfigLayer | null): PraxarchConfig {
   if (!override) return base;
   return {
     verifyGate: { ...base.verifyGate, ...(override.verifyGate ?? {}) },
@@ -83,8 +198,23 @@ function mergeConfig(base: PraxarchConfig, override: Partial<PraxarchConfig> | n
   };
 }
 
-export async function loadConfig(cwd: string): Promise<PraxarchConfig> {
-  const global = await readJsonIfExists(globalConfigPath());
-  const project = await readJsonIfExists(projectConfigPath(cwd));
-  return mergeConfig(mergeConfig(DEFAULT_CONFIG, global), project);
+export interface LoadedConfig {
+  config: PraxarchConfig;
+  /** Human-readable notices about ignored/dropped config content — never affects enforcement. */
+  warnings: string[];
+}
+
+export async function loadConfig(cwd: string): Promise<LoadedConfig> {
+  const warnings: string[] = [];
+
+  const globalPath = globalConfigPath();
+  const globalRaw = await readJsonIfExists(globalPath, warnings);
+  const globalLayer = globalRaw === null ? null : validateLayer(globalPath, globalRaw, warnings);
+
+  const projectPath = projectConfigPath(cwd);
+  const projectRaw = await readJsonIfExists(projectPath, warnings);
+  const projectLayer = projectRaw === null ? null : validateLayer(projectPath, projectRaw, warnings);
+
+  const config = mergeConfig(mergeConfig(DEFAULT_CONFIG, globalLayer), projectLayer);
+  return { config, warnings };
 }

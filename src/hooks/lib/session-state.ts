@@ -27,10 +27,22 @@ export interface SessionState {
   lastVerifier: VerifierRecord | null;
   /** Consecutive verify-gate blocks in the current stop cycle — the gate's loop guard. */
   verifyGateConsecutiveBlocks?: number;
+  /**
+   * `HEAD` sha captured at SessionStart, used by verify-gate to diff against the state at the
+   * start of the session rather than the working tree's uncommitted changes only. Null when
+   * cwd wasn't a git repo (or had no commits yet) at session start.
+   */
+  baselineHead?: string | null;
 }
 
 function emptyState(sessionId: string): SessionState {
-  return { sessionId, startedAt: new Date().toISOString(), delegations: [], lastVerifier: null };
+  return {
+    sessionId,
+    startedAt: new Date().toISOString(),
+    delegations: [],
+    lastVerifier: null,
+    baselineHead: null,
+  };
 }
 
 export async function readSessionState(sessionId: string): Promise<SessionState> {
