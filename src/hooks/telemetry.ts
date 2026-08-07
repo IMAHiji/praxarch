@@ -57,7 +57,10 @@ async function main(): Promise<void> {
   const at = new Date().toISOString();
   const batchMatch = FANOUT_TAG.exec(description);
 
-  const config = await loadConfig(input.cwd);
+  const { config, warnings } = await loadConfig(input.cwd);
+  if (warnings.length > 0) {
+    process.stderr.write(`praxarch telemetry: ${warnings.join(" ")}\n`);
+  }
 
   let verifierRecord: VerifierRecord | null = null;
   const text = responseText(input.tool_response);

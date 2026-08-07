@@ -7,19 +7,26 @@ import { dirname, join } from "node:path";
 const here = dirname(fileURLToPath(import.meta.url));
 const script = join(here, "..", "..", "dist", "hooks", "route-guard.js");
 const knownRolesProject = join(here, "fixtures", "known-roles-project");
+const reviewRolesProject = join(here, "fixtures", "review-roles-project");
+const malformedConfigProject = join(here, "fixtures", "malformed-config-project");
 
 async function run(
   input: unknown,
   env?: Record<string, string>,
-): Promise<{ decision: string; stdout: unknown }> {
+): Promise<{ decision: string; systemMessage?: string; stdout: unknown }> {
   const stdout = execFileSync("node", [script], {
     input: JSON.stringify(input),
     env: env ? { ...process.env, ...env } : process.env,
   }).toString("utf8");
   const parsed = JSON.parse(stdout) as {
     hookSpecificOutput: { permissionDecision: string };
+    systemMessage?: string;
   };
-  return { decision: parsed.hookSpecificOutput.permissionDecision, stdout: parsed };
+  return {
+    decision: parsed.hookSpecificOutput.permissionDecision,
+    ...(parsed.systemMessage !== undefined ? { systemMessage: parsed.systemMessage } : {}),
+    stdout: parsed,
+  };
 }
 
 // Isolates the hook from this machine's real global config (~/.claude/praxarch/config.json),
@@ -176,6 +183,37 @@ test("applies the no-explicit-model rule to config-extended knownRoles", async (
   assert.equal(decision, "deny");
 });
 
+test("exempts config-listed review roles from the security redirect", async () => {
+  const { decision } = await run(
+    {
+      session_id: "s1",
+      cwd: reviewRolesProject,
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_input: {
+        subagent_type: "pr-review-toolkit:silent-failure-hunter",
+        prompt: "Review the JWT secret rotation and authentication changes for swallowed errors.",
+      },
+    },
+    HERMETIC_ENV,
+  );
+  assert.equal(decision, "allow");
+});
+
+test("security redirect still applies to non-review roles under a reviewRoles config", async () => {
+  const { decision } = await run(
+    {
+      session_id: "s1",
+      cwd: reviewRolesProject,
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: "executor", prompt: "rotate the JWT secret handling in auth.ts" },
+    },
+    HERMETIC_ENV,
+  );
+  assert.equal(decision, "deny");
+});
+
 test("still denies a role absent from both builtin and config knownRoles", async () => {
   const { decision } = await run(
     {
@@ -188,4 +226,19 @@ test("still denies a role absent from both builtin and config knownRoles", async
     HERMETIC_ENV,
   );
   assert.equal(decision, "deny");
+});
+
+test("malformed project config does not disable the guard: defined-role delegation with explicit model is still denied, and the warning surfaces", async () => {
+  const { decision, systemMessage } = await run(
+    {
+      session_id: "s1",
+      cwd: malformedConfigProject,
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: "executor", model: "sonnet", prompt: "refactor the widget module" },
+    },
+    HERMETIC_ENV,
+  );
+  assert.equal(decision, "deny");
+  assert.match(systemMessage ?? "", /praxarch\.json is unreadable or not valid JSON/);
 });

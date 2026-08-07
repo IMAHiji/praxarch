@@ -18,7 +18,7 @@ test("returns defaults when no global or project config exists", async () => {
   const prevHome = process.env["PRAXARCH_HOME"];
   process.env["PRAXARCH_HOME"] = home;
   try {
-    const config = await loadConfig(cwd);
+    const { config } = await loadConfig(cwd);
     assert.deepEqual(config, DEFAULT_CONFIG);
   } finally {
     if (prevHome === undefined) delete process.env["PRAXARCH_HOME"];
@@ -44,7 +44,7 @@ test("project config overrides global config which overrides defaults", async ()
       JSON.stringify({ verifyGate: { minChangedLines: 10 } }),
     );
 
-    const config = await loadConfig(cwd);
+    const { config } = await loadConfig(cwd);
     // project wins over global for the key both set
     assert.equal(config.verifyGate.minChangedLines, 10);
     // global value not overridden by project persists
@@ -70,8 +70,142 @@ test("securityKeywords from project config are additive, not replacing the built
       join(cwd, ".claude", "praxarch.json"),
       JSON.stringify({ routeGuard: { securityKeywords: ["billing-ledger"] } }),
     );
-    const config = await loadConfig(cwd);
+    const { config } = await loadConfig(cwd);
     assert.deepEqual(config.routeGuard.securityKeywords, ["billing-ledger"]);
+  } finally {
+    if (prevHome === undefined) delete process.env["PRAXARCH_HOME"];
+    else process.env["PRAXARCH_HOME"] = prevHome;
+    await rm(home, { recursive: true, force: true });
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("malformed global config.json falls back to defaults with a warning, never throws", async () => {
+  const home = await mkdtemp(join(tmpdir(), "praxarch-config-"));
+  const cwd = await mkdtemp(join(tmpdir(), "praxarch-config-cwd-"));
+  const prevHome = process.env["PRAXARCH_HOME"];
+  process.env["PRAXARCH_HOME"] = home;
+  try {
+    await writeFile(join(home, "config.json"), "{not json");
+    const { config, warnings } = await loadConfig(cwd);
+    assert.deepEqual(config, DEFAULT_CONFIG);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0] ?? "", /config\.json is unreadable or not valid JSON/);
+  } finally {
+    if (prevHome === undefined) delete process.env["PRAXARCH_HOME"];
+    else process.env["PRAXARCH_HOME"] = prevHome;
+    await rm(home, { recursive: true, force: true });
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("routeGuard.strict as a string is dropped in favor of the default, with a warning", async () => {
+  const home = await mkdtemp(join(tmpdir(), "praxarch-config-"));
+  const cwd = await mkdtemp(join(tmpdir(), "praxarch-config-cwd-"));
+  const prevHome = process.env["PRAXARCH_HOME"];
+  process.env["PRAXARCH_HOME"] = home;
+  try {
+    await mkdir(join(cwd, ".claude"), { recursive: true });
+    await writeFile(
+      join(cwd, ".claude", "praxarch.json"),
+      JSON.stringify({ routeGuard: { strict: "false" } }),
+    );
+    const { config, warnings } = await loadConfig(cwd);
+    assert.equal(config.routeGuard.strict, DEFAULT_CONFIG.routeGuard.strict);
+    assert.equal(config.routeGuard.strict, true);
+    assert.ok(warnings.some((w) => /routeGuard\.strict must be a boolean/.test(w)));
+  } finally {
+    if (prevHome === undefined) delete process.env["PRAXARCH_HOME"];
+    else process.env["PRAXARCH_HOME"] = prevHome;
+    await rm(home, { recursive: true, force: true });
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a non-string element inside securityKeywords is dropped, the rest kept, with a warning", async () => {
+  const home = await mkdtemp(join(tmpdir(), "praxarch-config-"));
+  const cwd = await mkdtemp(join(tmpdir(), "praxarch-config-cwd-"));
+  const prevHome = process.env["PRAXARCH_HOME"];
+  process.env["PRAXARCH_HOME"] = home;
+  try {
+    await mkdir(join(cwd, ".claude"), { recursive: true });
+    await writeFile(
+      join(cwd, ".claude", "praxarch.json"),
+      JSON.stringify({ routeGuard: { securityKeywords: ["billing-ledger", 42, "payroll"] } }),
+    );
+    const { config, warnings } = await loadConfig(cwd);
+    assert.deepEqual(config.routeGuard.securityKeywords, ["billing-ledger", "payroll"]);
+    assert.ok(warnings.some((w) => /routeGuard\.securityKeywords contains non-string element/.test(w)));
+  } finally {
+    if (prevHome === undefined) delete process.env["PRAXARCH_HOME"];
+    else process.env["PRAXARCH_HOME"] = prevHome;
+    await rm(home, { recursive: true, force: true });
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a non-string element inside verifyGate.verdictRoles is dropped, the rest kept, with a warning", async () => {
+  const home = await mkdtemp(join(tmpdir(), "praxarch-config-"));
+  const cwd = await mkdtemp(join(tmpdir(), "praxarch-config-cwd-"));
+  const prevHome = process.env["PRAXARCH_HOME"];
+  process.env["PRAXARCH_HOME"] = home;
+  try {
+    await mkdir(join(cwd, ".claude"), { recursive: true });
+    await writeFile(
+      join(cwd, ".claude", "praxarch.json"),
+      JSON.stringify({ verifyGate: { verdictRoles: ["plan-reviewer", 7] } }),
+    );
+    const { config, warnings } = await loadConfig(cwd);
+    // "plan-reviewer" survives (non-string 7 dropped); default "verifier" always retained via additive merge.
+    assert.deepEqual(config.verifyGate.verdictRoles, ["verifier", "plan-reviewer"]);
+    assert.ok(warnings.some((w) => /verifyGate\.verdictRoles contains non-string element/.test(w)));
+  } finally {
+    if (prevHome === undefined) delete process.env["PRAXARCH_HOME"];
+    else process.env["PRAXARCH_HOME"] = prevHome;
+    await rm(home, { recursive: true, force: true });
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("verifyGate.verdictRoles as a non-array is dropped in favor of the default, with a warning", async () => {
+  const home = await mkdtemp(join(tmpdir(), "praxarch-config-"));
+  const cwd = await mkdtemp(join(tmpdir(), "praxarch-config-cwd-"));
+  const prevHome = process.env["PRAXARCH_HOME"];
+  process.env["PRAXARCH_HOME"] = home;
+  try {
+    await mkdir(join(cwd, ".claude"), { recursive: true });
+    await writeFile(
+      join(cwd, ".claude", "praxarch.json"),
+      JSON.stringify({ verifyGate: { verdictRoles: "plan-reviewer" } }),
+    );
+    const { config, warnings } = await loadConfig(cwd);
+    assert.deepEqual(config.verifyGate.verdictRoles, DEFAULT_CONFIG.verifyGate.verdictRoles);
+    assert.ok(warnings.some((w) => /verifyGate\.verdictRoles must be an array of strings/.test(w)));
+  } finally {
+    if (prevHome === undefined) delete process.env["PRAXARCH_HOME"];
+    else process.env["PRAXARCH_HOME"] = prevHome;
+    await rm(home, { recursive: true, force: true });
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("verdictRoles additivity holds through global + project layers — canonical verifier never dropped", async () => {
+  const home = await mkdtemp(join(tmpdir(), "praxarch-config-"));
+  const cwd = await mkdtemp(join(tmpdir(), "praxarch-config-cwd-"));
+  const prevHome = process.env["PRAXARCH_HOME"];
+  process.env["PRAXARCH_HOME"] = home;
+  try {
+    await writeFile(
+      join(home, "config.json"),
+      JSON.stringify({ verifyGate: { verdictRoles: ["scout"] } }),
+    );
+    await mkdir(join(cwd, ".claude"), { recursive: true });
+    await writeFile(
+      join(cwd, ".claude", "praxarch.json"),
+      JSON.stringify({ verifyGate: { verdictRoles: ["plan-reviewer"] } }),
+    );
+    const { config } = await loadConfig(cwd);
+    assert.deepEqual(config.verifyGate.verdictRoles, ["verifier", "scout", "plan-reviewer"]);
   } finally {
     if (prevHome === undefined) delete process.env["PRAXARCH_HOME"];
     else process.env["PRAXARCH_HOME"] = prevHome;

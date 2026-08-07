@@ -17,6 +17,12 @@
   stop. Roles listed in `verifyGate.verdictRoles` (additive over the default `["verifier"]`) now
   get their verdict blocks recorded; the added role's report contract must end with the verifier
   template's JSON verdict block.
+- **route-guard: `routeGuard.reviewRoles` generalizes the verifier security exemption.** The
+  2026-07-08 exemption was hardcoded to `subagent_type === "verifier"`, so other read-only
+  review agents (pr-review-toolkit's reviewers) hit the identical deadlock: reviewing
+  auth/secrets code mentions the keywords, strict mode denies the dispatch. Config-listed
+  review roles are now exempt alongside verifier; additive merge over the default
+  `["verifier"]`, so the canonical exemption can be extended but never dropped.
 
 ## v0.1.1 — 2026-07-13
 
