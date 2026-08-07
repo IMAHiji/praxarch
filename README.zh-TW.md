@@ -38,7 +38,7 @@ English version: [README.md](README.md)
 需要 Node.js 與 [pnpm](https://pnpm.io)。
 
 ```sh
-git clone git@github.com:IMAHiji/praxarch.git
+git clone git@gitlab.com:IMAHiji/praxarch.git
 cd praxarch
 pnpm install
 pnpm build

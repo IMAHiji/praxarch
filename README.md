@@ -41,7 +41,7 @@ for the full rationale and the delta from pilotfish.
 Requires Node.js and [pnpm](https://pnpm.io).
 
 ```sh
-git clone git@github.com:IMAHiji/praxarch.git
+git clone git@gitlab.com:IMAHiji/praxarch.git
 cd praxarch
 pnpm install
 pnpm build
