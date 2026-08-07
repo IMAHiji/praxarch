@@ -2,10 +2,11 @@
   "$comment": "Copy to <project>/.claude/praxarch.json to override praxarch defaults for this project. Every key is optional — omit anything you don't want to override. Project config merges over global (~/.claude/praxarch/config.json), which merges over built-in defaults. To retune a role's MODEL for one project, don't use this file — copy the role's agent file into <project>/.claude/agents/ and change its model frontmatter; project agents shadow user agents by name.",
 
   "verifyGate": {
-    "$comment": "Thresholds that trigger the Stop-hook verification requirement, and paths excluded from the size calculation.",
+    "$comment": "Thresholds that trigger the Stop-hook verification requirement, and paths excluded from the size calculation. verdictRoles are ADDED to the default [\"verifier\"] (unlike this section's other keys, which override wholesale): roles whose trailing JSON verdict telemetry records for the gate — add e.g. \"plan-reviewer\" so an /orchestrate review satisfies the gate; the role's report must end with the verifier template's JSON verdict block.",
     "minChangedLines": 80,
     "minChangedFiles": 3,
-    "ignorePatterns": ["package-lock.json", "pnpm-lock.yaml", "yarn.lock", ".min.js", "dist/"]
+    "ignorePatterns": ["package-lock.json", "pnpm-lock.yaml", "yarn.lock", ".min.js", "dist/"],
+    "verdictRoles": []
   },
 
   "routeGuard": {
