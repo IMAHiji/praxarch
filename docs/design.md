@@ -37,8 +37,9 @@ hooks that check the two rules most worth enforcing mechanically:
   (keyword-matched) but isn't routed to `security-executor`. Both checks are deliberately narrow:
   broad "is this a good delegation" judgment stays a policy matter, not a hook matter, because
   that judgment needs context a keyword match can't have.
-- **`verify-gate`** (Stop) blocks session completion when the working-tree diff is large enough to
-  count as non-trivial (configurable thresholds) and no `CONFIRMED` verifier record with zero
+- **`verify-gate`** (Stop) blocks session completion when the diff since the session's baseline
+  commit (falling back to HEAD, plus untracked new files) is large enough to count as non-trivial
+  (configurable thresholds) and no `CONFIRMED` verifier record with zero
   critical/major findings is on file for the session. Two escape hatches exist on purpose —
   `PRAXARCH_SKIP_VERIFY=1` and an explicit `PRAXARCH_VERIFY_WAIVED: <reason>` in the final
   message — because a hard gate with no escape becomes something users route around by lying to
