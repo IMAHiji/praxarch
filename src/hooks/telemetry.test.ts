@@ -144,7 +144,7 @@ test("records a verdict from a config-added verdictRole", async () => {
   await withPraxarchHome(async (home) => {
     await writeFile(
       join(home, "config.json"),
-      JSON.stringify({ verifyGate: { verdictRoles: ["plan-reviewer"] } }),
+      JSON.stringify({ verifyGate: { verdictRoles: ["spec-reviewer"] } }),
     );
     const reviewText = [
       "Task 1: OK",
@@ -160,7 +160,7 @@ test("records a verdict from a config-added verdictRole", async () => {
       cwd: process.cwd(),
       hook_event_name: "PostToolUse",
       tool_name: "Agent",
-      tool_input: { subagent_type: "plan-reviewer" },
+      tool_input: { subagent_type: "spec-reviewer" },
       tool_response: { status: "completed", content: [{ type: "text", text: reviewText }] },
     });
 
@@ -184,7 +184,7 @@ test("ignores a verdict block from a role outside verdictRoles", async () => {
       cwd: process.cwd(),
       hook_event_name: "PostToolUse",
       tool_name: "Agent",
-      tool_input: { subagent_type: "plan-reviewer" },
+      tool_input: { subagent_type: "ghost-role" },
       tool_response: { status: "completed", content: [{ type: "text", text: reviewText }] },
     });
 

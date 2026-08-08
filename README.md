@@ -15,9 +15,10 @@ for the full rationale and the delta from pilotfish.
 
 ## What you get
 
-- **Six role-based subagents** (`scout`, `Explore` override, `mech-executor`, `executor`,
-  `verifier`, `security-executor`), each pinned to a cost-appropriate model tier via frontmatter,
-  named in policy — never by model ID — so the whole thing survives model deprecations untouched.
+- **Nine role-based subagents** (`scout`, `Explore` override, `mech-executor`, `executor`,
+  `verifier`, `security-executor`, `planner`, `implementer`, `plan-reviewer`), each pinned to a
+  cost-appropriate model tier via frontmatter, named in policy — never by model ID — so the whole
+  thing survives model deprecations untouched.
 - **Enforcement hooks**, not just policy text:
   - `route-guard` hard-denies ad-hoc fan-out delegations with no explicit model, and
     security-flavored work not routed to `security-executor`.
@@ -35,6 +36,10 @@ for the full rationale and the delta from pilotfish.
   native way instead: shadow the agent file in `<project>/.claude/agents/`.
 - **`/fan-out` skill**: the pattern for running several independent, fully-specified units of work
   concurrently in isolated git worktrees, with a single verification pass over the merged result.
+- **`/orchestrate` skill**: a tiered plan/implement/review pipeline — a high-tier `planner` writes
+  an implementation plan, you approve it, `implementer` executes it task-by-task (dispatching
+  independent tasks in parallel via worktree isolation, same as `/fan-out`), and a high-tier
+  `plan-reviewer` verifies the merged result.
 
 ## Install
 
@@ -86,12 +91,13 @@ Removes praxarch's hook entries, role/skill files, and `~/.claude/praxarch/`. Le
 
 ## Using it
 
-Once installed, delegate from your main Claude Code session using the six roles — see the
+Once installed, delegate from your main Claude Code session using the nine roles — see the
 orchestration policy praxarch adds to your global `CLAUDE.md` for the full delegation protocol
 (complete specs, cheapest-role-first, bounded escalation, mandatory security routing, verify
 before claiming done). Run `/praxarch-report` any time to see what's actually been delegated
 and how verification is going. Use `/fan-out` when you have three or more independent,
-fully-specifiable units of work to run in parallel.
+fully-specifiable units of work to run in parallel, or `/orchestrate <task>` for a full
+plan/implement/review pipeline on a larger task.
 
 ## Per-project configuration
 

@@ -7,8 +7,8 @@ import { readHookInput, type PostToolUseInput } from "./lib/hook-io.js";
 
 /**
  * PostToolUse(Agent) — appends a delegation record to the monthly JSONL log and, for verdict
- * roles (config verifyGate.verdictRoles, default ["verifier"]), parses the required trailing
- * JSON verdict block into session state so verify-gate can check it later.
+ * roles (config verifyGate.verdictRoles, default ["verifier", "plan-reviewer"]), parses the
+ * required trailing JSON verdict block into session state so verify-gate can check it later.
  *
  * tool_response carries the subagent's resolved model, token usage, and duration (verified
  * against a live capture — see fixtures/post-tool-use.agent.json), so each record includes real
