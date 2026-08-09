@@ -4,25 +4,33 @@
 
 ### Added
 
-- **route-guard: `routeGuard.knownRoles` config extends the defined-role set.** The built-in six
+- **`/orchestrate` skill and pipeline roles ported in-repo.** praxarch now ships its own
+  plan/implement/review pipeline: `planner` (writes an implementation plan), `implementer`
+  (executes one task from it), and `plan-reviewer` (verifies the merged result) — previously an
+  external dependency on the cognex-agents work repo. Independent tasks (`Depends on: independent`
+  in the plan) are dispatched in parallel worktrees when there are two or more ready at once, same
+  isolation pattern as `/fan-out`, with a single `plan-reviewer` pass over the merged result rather
+  than one per task. `plan-reviewer`'s JSON verdict block is now a built-in `verifyGate.verdictRoles`
+  and `routeGuard.reviewRoles` entry, so a project's own config no longer needs to add it. (Note:
+  `README.zh-TW.md` hasn't been updated for this change yet.)
+- **route-guard: `routeGuard.knownRoles` config extends the defined-role set.** The built-in nine
   roles are praxarch's own; agents installed by other tools with their own frontmatter bindings
-  (orchestrate's planner/implementer/plan-reviewer, plugin agents) were caught by the ad-hoc rule:
-  strict mode denied them for lacking `model`, and passing `model` to satisfy it overrides the
-  binding the guard exists to protect. Config-listed roles now get the same treatment as built-ins
-  (frontmatter owns the model; explicit `model` is denied). Additive merge, like
-  `securityKeywords`.
+  (plugin agents) were caught by the ad-hoc rule: strict mode denied them for lacking `model`,
+  and passing `model` to satisfy it overrides the binding the guard exists to protect.
+  Config-listed roles now get the same treatment as built-ins (frontmatter owns the model;
+  explicit `model` is denied). Additive merge, like `securityKeywords`.
 - **telemetry/verify-gate: `verifyGate.verdictRoles` lets non-verifier reviews satisfy the gate.**
   Telemetry recorded trailing JSON verdicts only from the `verifier` role, so an /orchestrate
   run's plan-reviewer pass went unrecorded and verify-gate demanded a second review at session
-  stop. Roles listed in `verifyGate.verdictRoles` (additive over the default `["verifier"]`) now
-  get their verdict blocks recorded; the added role's report contract must end with the verifier
-  template's JSON verdict block.
+  stop. Roles listed in `verifyGate.verdictRoles` (additive over the default
+  `["verifier", "plan-reviewer"]`) now get their verdict blocks recorded; the added role's report
+  contract must end with the verifier template's JSON verdict block.
 - **route-guard: `routeGuard.reviewRoles` generalizes the verifier security exemption.** The
   2026-07-08 exemption was hardcoded to `subagent_type === "verifier"`, so other read-only
   review agents (pr-review-toolkit's reviewers) hit the identical deadlock: reviewing
   auth/secrets code mentions the keywords, strict mode denies the dispatch. Config-listed
   review roles are now exempt alongside verifier; additive merge over the default
-  `["verifier"]`, so the canonical exemption can be extended but never dropped.
+  `["verifier", "plan-reviewer"]`, so the canonical exemption can be extended but never dropped.
 
 ## v0.1.1 — 2026-07-13
 

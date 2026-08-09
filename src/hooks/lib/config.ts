@@ -28,18 +28,22 @@ export interface RouteGuardConfig {
    */
   securityKeywords: string[];
   /**
-   * Extra subagent types (beyond the built-in six roles) treated as defined roles: their model
+   * Extra subagent types (beyond the built-in nine roles) treated as defined roles: their model
    * comes from agent-file frontmatter, so delegations to them must omit `model`. For agents
-   * praxarch doesn't install (orchestrate-pipeline roles, plugin agents with frontmatter
-   * bindings) — without this, strict mode denies them for lacking an explicit `model`, and
-   * adding `model` to satisfy the guard overrides the very binding it exists to protect.
+   * praxarch doesn't install (plugin agents with frontmatter bindings) — without this, strict
+   * mode denies them for lacking an explicit `model`, and adding `model` to satisfy the guard
+   * overrides the very binding it exists to protect.
    */
   knownRoles: string[];
   /**
    * Read-only review roles exempt from the security-keyword redirect. A reviewer of
    * auth/secrets/crypto code necessarily mentions those keywords, and denying it deadlocks
    * against verify-gate — the hardcoded verifier exemption (approved 2026-07-08), generalized.
-   * Additive over the default ["verifier"], so a config can add reviewers but never drop it.
+   * Additive over the default ["verifier", "plan-reviewer", "planner"], so a config can add
+   * reviewers but never drop the canonical set. The `planner` entry exists because the planner
+   * writes only a plan file (never touches source), and blocking it on security-flavored task
+   * text deadlocks /orchestrate on security-sensitive tasks — same rationale as the original
+   * verifier exemption.
    */
   reviewRoles: string[];
 }
@@ -63,13 +67,13 @@ export const DEFAULT_CONFIG: PraxarchConfig = {
     minChangedLines: 80,
     minChangedFiles: 3,
     ignorePatterns: ["package-lock.json", "pnpm-lock.yaml", "yarn.lock", ".min.js", "dist/"],
-    verdictRoles: ["verifier"],
+    verdictRoles: ["verifier", "plan-reviewer"],
   },
   routeGuard: {
     strict: true,
     securityKeywords: [],
     knownRoles: [],
-    reviewRoles: ["verifier"],
+    reviewRoles: ["verifier", "plan-reviewer", "planner"],
   },
 };
 

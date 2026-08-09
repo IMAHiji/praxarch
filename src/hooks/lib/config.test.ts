@@ -156,8 +156,10 @@ test("a non-string element inside verifyGate.verdictRoles is dropped, the rest k
       JSON.stringify({ verifyGate: { verdictRoles: ["plan-reviewer", 7] } }),
     );
     const { config, warnings } = await loadConfig(cwd);
-    // "plan-reviewer" survives (non-string 7 dropped); default "verifier" always retained via additive merge.
-    assert.deepEqual(config.verifyGate.verdictRoles, ["verifier", "plan-reviewer"]);
+    // "plan-reviewer" survives (non-string 7 dropped); defaults "verifier" and "plan-reviewer" always
+    // retained via additive merge (the override's "plan-reviewer" duplicates the builtin default —
+    // additive merge doesn't dedupe, and the duplicate is harmless).
+    assert.deepEqual(config.verifyGate.verdictRoles, ["verifier", "plan-reviewer", "plan-reviewer"]);
     assert.ok(warnings.some((w) => /verifyGate\.verdictRoles contains non-string element/.test(w)));
   } finally {
     if (prevHome === undefined) delete process.env["PRAXARCH_HOME"];
@@ -205,7 +207,7 @@ test("verdictRoles additivity holds through global + project layers — canonica
       JSON.stringify({ verifyGate: { verdictRoles: ["plan-reviewer"] } }),
     );
     const { config } = await loadConfig(cwd);
-    assert.deepEqual(config.verifyGate.verdictRoles, ["verifier", "scout", "plan-reviewer"]);
+    assert.deepEqual(config.verifyGate.verdictRoles, ["verifier", "plan-reviewer", "scout", "plan-reviewer"]);
   } finally {
     if (prevHome === undefined) delete process.env["PRAXARCH_HOME"];
     else process.env["PRAXARCH_HOME"] = prevHome;

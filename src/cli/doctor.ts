@@ -5,8 +5,8 @@ import { exists, readJsonIfExists, readTextIfExists } from "./lib/fsops.js";
 
 // Lowercase "explore" — the template/installed file is explore.md (the agent's *name* is
 // "Explore", from frontmatter). Checking "Explore.md" only passed on case-insensitive filesystems.
-const ROLE_FILES = ["scout", "explore", "mech-executor", "executor", "verifier", "security-executor"];
-const SKILL_NAMES = ["praxarch-report", "fan-out"];
+const ROLE_FILES = ["scout", "explore", "mech-executor", "executor", "verifier", "security-executor", "planner", "implementer", "plan-reviewer"];
+const SKILL_NAMES = ["praxarch-report", "fan-out", "orchestrate"];
 
 interface Check {
   ok: boolean;

@@ -18,6 +18,9 @@ live in `~/.claude/agents/*.md` frontmatter and shift independently as models ch
 | `executor` | Work needing local design judgment: features, fixes, non-security tradeoffs |
 | `verifier` | Fresh-context adversarial review of non-trivial completed work |
 | `security-executor` | Auth, authz, secrets, crypto, trust-boundary validation — always, no exceptions |
+| `planner` | Decomposes a task into a numbered, self-contained implementation plan (`/orchestrate` pipeline) |
+| `implementer` | Executes exactly one numbered task from a planner's plan file (`/orchestrate` pipeline) |
+| `plan-reviewer` | Verifies completed implementation work against the plan file (`/orchestrate` pipeline) |
 
 ### Plan/execute tier rule (hard rule)
 

@@ -158,7 +158,7 @@ test("treats a config-extended knownRole as defined: no explicit model → allow
       cwd: knownRolesProject,
       hook_event_name: "PreToolUse",
       tool_name: "Agent",
-      tool_input: { subagent_type: "planner", prompt: "decompose the dashboard feature into a plan" },
+      tool_input: { subagent_type: "spec-writer", prompt: "decompose the dashboard feature into a plan" },
     },
     HERMETIC_ENV,
   );
@@ -173,7 +173,7 @@ test("applies the no-explicit-model rule to config-extended knownRoles", async (
       hook_event_name: "PreToolUse",
       tool_name: "Agent",
       tool_input: {
-        subagent_type: "planner",
+        subagent_type: "spec-writer",
         model: "sonnet",
         prompt: "decompose the dashboard feature into a plan",
       },
@@ -221,7 +221,7 @@ test("still denies a role absent from both builtin and config knownRoles", async
       cwd: knownRolesProject,
       hook_event_name: "PreToolUse",
       tool_name: "Agent",
-      tool_input: { subagent_type: "implementer", prompt: "build task 3 from the plan file" },
+      tool_input: { subagent_type: "ghost-role", prompt: "build task 3 from the plan file" },
     },
     HERMETIC_ENV,
   );

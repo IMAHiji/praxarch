@@ -1,5 +1,5 @@
 {
   "routeGuard": {
-    "knownRoles": ["planner"]
+    "knownRoles": ["spec-writer"]
   }
 }
