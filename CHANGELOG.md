@@ -32,6 +32,55 @@
   review roles are now exempt alongside verifier; additive merge over the default
   `["verifier", "plan-reviewer"]`, so the canonical exemption can be extended but never dropped.
 
+### Fixed
+
+- **verify-gate: the loop-guard counter and the recorded verdict are now both self-invalidating.**
+  Two related holes let the Stop gate silently stop enforcing: (1) the consecutive-block counter
+  was never cleared on a genuine allow path, so it could accumulate across unrelated stop cycles;
+  worse, a *stale but unrelated* trip count could suppress enforcement of a batch of new,
+  unverified work the guard had never actually seen — the counter is now cleared on every genuine
+  allow path and whenever `stop_hook_active` is false, and additionally reset whenever the diff
+  fingerprint (below) shows the tree has changed since the blocks that tripped it, so a fresh diff
+  always gets its own count. It deliberately still does **not** clear on the loop-guard's own
+  fail-open: once tripped in a cycle it stays tripped against an *unchanged* diff, by design —
+  that's the bounded "2 blocks then quiet" guarantee working, not a bug. (2) a CONFIRMED verdict
+  authorized every later diff in the session regardless of how much changed after it was recorded
+  — telemetry now fingerprints the diff (a content hash, computed with a 64MB `maxBuffer` so large
+  patches don't silently fail closed to "no change," plus changed-lines/changed-files counts)
+  alongside the verdict, and verify-gate treats it as stale (falls through to blocking) once the
+  hash differs *or is unknown* (e.g. the patch still exceeded the buffer) *and* the size delta
+  since it was recorded clears `minChangedLines`/`minChangedFiles`. Verdicts recorded before this
+  change (the `diffHash` field is entirely absent) are accepted unchanged — only in-flight
+  sessions can hold one; a verdict whose hash was recorded but couldn't be computed (`diffHash`
+  present but `null`) does *not* get that same pass. Known residual limit: the size-delta rule
+  detects growth, not same-size in-place rewrites — documented in `docs/design.md`. Every fail-open
+  (loop-guard or crash) is now logged to the monthly JSONL and surfaced via `systemMessage`, and
+  `praxarch report` excludes those log rows from delegation stats and adds a
+  `Verify-gate fail-opens: N` line.
+- **verify-gate: the loop guard now has a second counter that continuous tree churn can't reset.**
+  The consecutive-block counter above resets whenever the diff fingerprint changes, which is
+  correct for a genuinely new batch of unverified work — but it also meant a session touching one
+  file per round (a scratch edit, a formatter run) could block every single round without the
+  counter ever reaching its limit: an unsatisfiable gate that never failed open, worse than the
+  under-enforcement the whole change exists to fix. `verifyGateCycleBlocks` totals blocks across
+  the whole stop cycle regardless of tree movement (limit 5) and fails open alongside the per-diff
+  counter (limit 2, unchanged); the two reasons are distinguishable in both `systemMessage` and the
+  JSONL row (`reason: "loop-guard"` vs `"loop-guard-cycle"`).
+- **git-diff: `--no-ext-diff`/`--no-textconv` on every `git diff` call.** A `diff.external` config
+  or an inherited `GIT_EXTERNAL_DIFF` env var replaced the patch text with whatever the external
+  driver printed — including nothing — while `--numstat` was unaffected, collapsing the
+  fingerprint to a real, constant value and silently reopening the exact hole the verdict-staleness
+  fingerprint exists to close (600 unverified lines allowed past a CONFIRMED verdict, reproduced
+  via both the git-config and env-var routes).
+- **git-diff: untracked file contents are hashed as bytes, not decoded to utf8 first.** A lossy
+  utf8 decode collapsed invalid byte sequences to U+FFFD before hashing, so distinct binary
+  content could hash identically.
+- **git-diff: the fingerprint is now lazy.** `diffStat` (counts only) and `diffFingerprint` (the
+  hash — a full patch fetch plus every untracked file's contents, the expensive half) are separate
+  functions; verify-gate only fingerprints past its trivial-diff early return, and telemetry only
+  fingerprints when a verdict was actually parsed, instead of paying the cost of both on every
+  Stop and every recorded verdict regardless of whether either was needed.
+
 ## v0.1.1 — 2026-07-13
 
 Fixes driven by the first week of live telemetry (includes the previously uncommitted

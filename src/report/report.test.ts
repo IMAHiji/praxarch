@@ -52,3 +52,25 @@ test("summarizes role distribution and verifier pass rate", async () => {
     assert.match(out, /Fan-out batches: 1/);
   });
 });
+
+test("excludes fail-open event rows from delegation stats and reports the fail-open total", async () => {
+  await withPraxarchHome(async (home) => {
+    const logDir = join(home, "logs");
+    await mkdir(logDir, { recursive: true });
+    const now = new Date();
+    const file = join(logDir, `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}.jsonl`);
+    const lines = [
+      { at: "t1", sessionId: "s1", role: "mech-executor", model: "sonnet", batchId: null, verdict: null, criticalOrMajorCount: null },
+      { at: "t2", sessionId: "s1", event: "verifyGateFailOpen", reason: "loop-guard", detail: "2 consecutive blocks" },
+      { at: "t3", sessionId: "s2", event: "verifyGateFailOpen", reason: "error", detail: "boom" },
+    ];
+    await writeFile(file, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+
+    const out = run(home);
+    // Only the one real delegation counts — the two event rows must not inflate this or produce
+    // an "undefined"/"unset" role bucket.
+    assert.match(out, /Delegations: 1/);
+    assert.doesNotMatch(out, /undefined/);
+    assert.match(out, /Verify-gate fail-opens: 2/);
+  });
+});
