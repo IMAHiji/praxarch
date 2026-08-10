@@ -22,6 +22,23 @@ interface DelegationLogRecord {
   criticalOrMajorCount: number | null;
 }
 
+// Event rows (currently just verify-gate fail-opens) share the same monthly JSONL but aren't
+// delegations — they carry `event` instead of `role`. Kept as a separate shape so they can't
+// silently pass the DelegationLogRecord checks below and pollute role/verdict stats.
+interface EventLogRecord {
+  at: string;
+  sessionId: string;
+  event: string;
+  reason?: string;
+  detail?: string;
+}
+
+type LogRecord = DelegationLogRecord | EventLogRecord;
+
+function isEventRecord(record: LogRecord): record is EventLogRecord {
+  return "event" in record && typeof (record as EventLogRecord).event === "string";
+}
+
 interface Args {
   session: "current" | "all";
   since: string | null;
@@ -36,7 +53,7 @@ function parseArgs(argv: string[]): Args {
   return args;
 }
 
-async function loadRecords(since: string | null): Promise<DelegationLogRecord[]> {
+async function loadRecords(since: string | null): Promise<LogRecord[]> {
   let files: string[];
   try {
     files = (await readdir(logDir())).filter((f) => f.endsWith(".jsonl"));
@@ -44,15 +61,18 @@ async function loadRecords(since: string | null): Promise<DelegationLogRecord[]>
     return [];
   }
   const relevant = since ? files.filter((f) => f >= `${since}.jsonl`) : files;
-  const all: DelegationLogRecord[] = [];
+  const all: LogRecord[] = [];
   for (const file of relevant.sort()) {
-    all.push(...(await readJsonl<DelegationLogRecord>(`${logDir()}/${file}`)));
+    all.push(...(await readJsonl<LogRecord>(`${logDir()}/${file}`)));
   }
   return all;
 }
 
-function render(records: DelegationLogRecord[]): string {
-  if (records.length === 0) {
+function render(records: LogRecord[]): string {
+  const delegations = records.filter((r): r is DelegationLogRecord => !isEventRecord(r));
+  const failOpens = records.filter(isEventRecord).filter((r) => r.event === "verifyGateFailOpen");
+
+  if (delegations.length === 0 && failOpens.length === 0) {
     return "No delegations recorded for the requested window.";
   }
 
@@ -61,7 +81,7 @@ function render(records: DelegationLogRecord[]): string {
   let confirmedCount = 0;
   let refutedCount = 0;
 
-  for (const r of records) {
+  for (const r of delegations) {
     byRole.set(r.role, (byRole.get(r.role) ?? 0) + 1);
     if (r.batchId) byBatch.add(r.batchId);
     if (r.verdict === "CONFIRMED") confirmedCount += 1;
@@ -69,7 +89,7 @@ function render(records: DelegationLogRecord[]): string {
   }
 
   const lines: string[] = [];
-  lines.push(`Delegations: ${records.length}`);
+  lines.push(`Delegations: ${delegations.length}`);
   lines.push("Role distribution:");
   for (const [role, count] of [...byRole.entries()].sort((a, b) => b[1] - a[1])) {
     lines.push(`  ${role}: ${count}`);
@@ -84,6 +104,10 @@ function render(records: DelegationLogRecord[]): string {
   }
 
   lines.push(`Fan-out batches: ${byBatch.size}`);
+  // Surfaces what would otherwise be invisible: a fail-open leaves no trace to the user beyond
+  // stderr/a systemMessage at the time, so this is the only durable record of the gate having
+  // gone quiet (issue #1, defect 3).
+  lines.push(`Verify-gate fail-opens: ${failOpens.length}`);
 
   return lines.join("\n");
 }

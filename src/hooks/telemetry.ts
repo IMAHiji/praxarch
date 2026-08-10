@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { loadConfig } from "./lib/config.js";
+import { diffFingerprint, diffStat } from "./lib/git-diff.js";
 import { appendJsonl } from "./lib/jsonl.js";
 import { logFileForDate } from "./lib/paths.js";
 import { readSessionState, writeSessionState, type VerifierRecord } from "./lib/session-state.js";
@@ -62,7 +63,11 @@ async function main(): Promise<void> {
     process.stderr.write(`praxarch telemetry: ${warnings.join(" ")}\n`);
   }
 
-  let verifierRecord: VerifierRecord | null = null;
+  // Parse the verdict (if any) and log the delegation row *before* touching session state — a
+  // corrupt state file (readSessionState throws on anything but ENOENT) must not cost the JSONL
+  // log its only record of this delegation having happened at all.
+  let parsedVerdict: { verdict: "CONFIRMED" | "REFUTED"; findingsCount: number; criticalOrMajorCount: number } | null =
+    null;
   const text = responseText(input.tool_response);
   if (role !== undefined && config.verifyGate.verdictRoles.includes(role) && text) {
     const parsed = extractTrailingJson(text);
@@ -70,11 +75,10 @@ async function main(): Promise<void> {
       const criticalOrMajor = (parsed.findings ?? []).filter(
         (f) => f.severity === "critical" || f.severity === "major",
       ).length;
-      verifierRecord = {
+      parsedVerdict = {
         verdict: parsed.verdict,
         findingsCount: parsed.findings?.length ?? 0,
         criticalOrMajorCount: criticalOrMajor,
-        recordedAt: at,
       };
     }
   }
@@ -92,11 +96,48 @@ async function main(): Promise<void> {
     totalTokens,
     durationMs,
     batchId: batchMatch?.[1] ?? null,
-    verdict: verifierRecord?.verdict ?? null,
-    criticalOrMajorCount: verifierRecord?.criticalOrMajorCount ?? null,
+    verdict: parsedVerdict?.verdict ?? null,
+    criticalOrMajorCount: parsedVerdict?.criticalOrMajorCount ?? null,
   });
 
   const state = await readSessionState(input.session_id);
+
+  let verifierRecord: VerifierRecord | null = null;
+  if (parsedVerdict) {
+    // Fingerprint the tree this verdict was recorded against, so verify-gate can later tell
+    // whether it's still current. Only computed here (a verdict was actually parsed) — the far
+    // more common PostToolUse(Agent) call, for a non-verdict role, never needs it. diffStat and
+    // diffFingerprint both fail open to zeros/null rather than throwing, but this is wrapped
+    // anyway — telemetry must stay non-blocking even if that contract ever changes.
+    let diffHash: string | null = null;
+    let changedLines: number | null = null;
+    let changedFiles: number | null = null;
+    try {
+      const counts = await diffStat(input.cwd, config.verifyGate.ignorePatterns, state.baselineHead);
+      changedLines = counts.changedLines;
+      changedFiles = counts.changedFiles;
+    } catch {
+      // Leave nulls.
+    }
+    try {
+      diffHash = await diffFingerprint(input.cwd, state.baselineHead);
+    } catch {
+      // Leave null — verify-gate treats a present-but-null diffHash as unverifiable (no free
+      // pass), unlike a record that omits the key entirely (genuinely predates this feature).
+    }
+    // Invariant verify-gate relies on: diffHash must be a real `string | null` here, never
+    // `undefined` — it distinguishes a legacy record (key absent) from a failed fingerprint
+    // (key present, null) only because JSON.stringify drops undefined-valued keys but keeps
+    // null ones. `diffHash` above is always assigned string|null, so this holds.
+    verifierRecord = {
+      ...parsedVerdict,
+      recordedAt: at,
+      diffHash,
+      changedLines,
+      changedFiles,
+    };
+  }
+
   state.delegations.push({
     role: role ?? "unset",
     model: model ?? "inherited",

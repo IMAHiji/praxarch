@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { loadConfig } from "./lib/config.js";
-import { diffStat } from "./lib/git-diff.js";
+import { diffFingerprint, diffStat } from "./lib/git-diff.js";
+import { appendJsonl } from "./lib/jsonl.js";
+import { logFileForDate } from "./lib/paths.js";
 import { readSessionState, writeSessionState } from "./lib/session-state.js";
 import { emit, readHookInput, type StopInput, type StopOutput } from "./lib/hook-io.js";
 
@@ -23,6 +25,14 @@ const WAIVER_PATTERN = /PRAXARCH_VERIFY_WAIVED:\s*(.+)/;
 // trap a session that can't (or won't) satisfy the gate in an infinite stop loop.
 const MAX_CONSECUTIVE_BLOCKS = 2;
 
+// Hard backstop against continuous tree churn defeating MAX_CONSECUTIVE_BLOCKS: that counter
+// resets whenever the diff hash changes, so a session that touches one file per round never lets
+// it reach its limit even though every round blocks. This second counter totals blocks across the
+// whole stop cycle regardless of tree movement, so an unsatisfiable gate still terminates.
+// Deliberately generous — big enough that genuine remediation work spanning several rounds is
+// never cut off mid-flight, small enough that a churning, unsatisfiable gate still ends.
+const MAX_CYCLE_BLOCKS = 5;
+
 function allow(warnings: string[] = []): StopOutput {
   return warnings.length > 0 ? { systemMessage: warnings.join(" ") } : {};
 }
@@ -38,64 +48,185 @@ function withConfigWarnings(output: StopOutput, warnings: string[]): StopOutput 
   };
 }
 
+// Clears both loop-guard counters (the per-diff one, and its paired block-hash — see
+// `verifyGateBlockHash` on SessionState — plus the per-cycle total) and persists it, but only
+// when something actually changes — a quiet stop shouldn't rewrite the state file every time.
+async function clearBlockCounters(state: Awaited<ReturnType<typeof readSessionState>>): Promise<void> {
+  const hasCounter = (state.verifyGateConsecutiveBlocks ?? 0) !== 0;
+  const hasBlockHash = state.verifyGateBlockHash !== undefined && state.verifyGateBlockHash !== null;
+  const hasCycleCounter = (state.verifyGateCycleBlocks ?? 0) !== 0;
+  if (hasCounter || hasBlockHash || hasCycleCounter) {
+    state.verifyGateConsecutiveBlocks = 0;
+    state.verifyGateBlockHash = null;
+    state.verifyGateCycleBlocks = 0;
+    await writeSessionState(state);
+  }
+}
+
+// Set as soon as the hook input is parsed, so the crash handler at the bottom of this file can
+// still attribute its fail-open log line to a session even though the exception it's handling
+// happened well past main()'s own scope.
+let sessionIdForCrashLog: string | null = null;
+
+async function logFailOpen(sessionId: string | null, reason: "loop-guard" | "loop-guard-cycle" | "error", detail: string): Promise<void> {
+  await appendJsonl(logFileForDate(), {
+    at: new Date().toISOString(),
+    sessionId,
+    event: "verifyGateFailOpen",
+    reason,
+    detail,
+  });
+}
+
 async function main(): Promise<void> {
   const input = await readHookInput<StopInput>();
+  sessionIdForCrashLog = input.session_id;
+
+  // Read (and clear) state before any early return, so every allow path — including the escape
+  // hatches below — scopes the loop-guard counter to this stop cycle rather than leaking a stale
+  // value into a later, unrelated cycle (issue #1, defect 1).
+  const state = await readSessionState(input.session_id);
+  // A new stop cycle always starts from zero, regardless of what this invocation ends up doing —
+  // Claude Code guarantees stop_hook_active is false on the first round of any new stop attempt.
+  if (!input.stop_hook_active) await clearBlockCounters(state);
 
   if (process.env["PRAXARCH_SKIP_VERIFY"] === "1") {
+    await clearBlockCounters(state);
     emit(allow());
     return;
   }
 
   const waiverMatch = input.last_assistant_message ? WAIVER_PATTERN.exec(input.last_assistant_message) : null;
   if (waiverMatch) {
+    await clearBlockCounters(state);
     emit(allow());
     return;
   }
 
-  const state = await readSessionState(input.session_id);
-
   const { config, warnings } = await loadConfig(input.cwd);
-  const { changedLines, changedFiles } = await diffStat(
-    input.cwd,
-    config.verifyGate.ignorePatterns,
-    state.baselineHead,
-  );
+  const current = await diffStat(input.cwd, config.verifyGate.ignorePatterns, state.baselineHead);
+  const { changedLines, changedFiles } = current;
 
   const isNonTrivial =
     changedLines >= config.verifyGate.minChangedLines || changedFiles >= config.verifyGate.minChangedFiles;
   if (!isNonTrivial) {
+    await clearBlockCounters(state);
     emit(allow(warnings));
     return;
   }
+
+  // Only fetched past this point: the trivial-diff early return above is the common case, and it
+  // never needs a fingerprint — diffFingerprint can cost a full patch fetch (up to 64MB) plus a
+  // read of every untracked file, where diffStat's counts above are cheap by comparison.
+  const currentHash = await diffFingerprint(input.cwd, state.baselineHead);
 
   const verifier = state.lastVerifier;
 
-  const passed = verifier !== null && verifier.verdict === "CONFIRMED" && verifier.criticalOrMajorCount === 0;
+  // Legacy records (predating fingerprint capture) omit `diffHash` entirely and are accepted
+  // unconditionally — deliberate backward compatibility; only in-flight sessions can hold one.
+  // A record that DOES carry the key but with a null value means telemetry attempted to
+  // fingerprint and failed (e.g. a patch too large to buffer) — that must NOT get the same free
+  // pass, or an unhashable diff at record time would make a verdict immortal the same way an
+  // unhashable diff at read time would (see `currentHash === null` below).
+  // Invariant this rests on: telemetry.ts assigns `diffHash` a real `string | null` on every
+  // branch, never `undefined` — `"diffHash" in verifier` only tells legacy and failed records
+  // apart because `JSON.stringify` drops `undefined`-valued keys but keeps `null` ones. Any
+  // future write path that assigns `diffHash: undefined` (an object spread, an optional-property
+  // assignment) would silently reclassify a failed fingerprint as legacy and hand it the free pass.
+  const verifierHasFingerprint = verifier !== null && "diffHash" in verifier;
+  const verifierHash = verifier?.diffHash ?? null;
+  // Missing counts (the whole fingerprint attempt failed, not just the hash) compare against 0 —
+  // maximally conservative, since we have no real baseline to diff against.
+  const verifierChangedLines = verifier?.changedLines ?? 0;
+  const verifierChangedFiles = verifier?.changedFiles ?? 0;
+  const lineDelta = current.changedLines - verifierChangedLines;
+  const fileDelta = current.changedFiles - verifierChangedFiles;
+
+  const stale =
+    verifierHasFingerprint &&
+    // "Differs" includes "unknown": currentHash === null (the patch itself couldn't be
+    // fingerprinted this time) must not read as "unchanged" — that's exactly the failure this
+    // fingerprinting exists to catch. Negative deltas (work reverted) never satisfy the size
+    // clause below, so this can't cause a spurious block on a shrinking diff.
+    (currentHash === null || verifierHash !== currentHash) &&
+    (lineDelta >= config.verifyGate.minChangedLines || fileDelta >= config.verifyGate.minChangedFiles);
+
+  const passed = verifier !== null && verifier.verdict === "CONFIRMED" && verifier.criticalOrMajorCount === 0 && !stale;
   if (passed) {
+    await clearBlockCounters(state);
     emit(allow(warnings));
     return;
   }
 
-  const priorBlocks = input.stop_hook_active ? (state.verifyGateConsecutiveBlocks ?? 0) : 0;
-  if (priorBlocks >= MAX_CONSECUTIVE_BLOCKS) {
-    emit(
-      withConfigWarnings(
-        {
-          systemMessage:
-            `praxarch verify-gate: diff is still unverified after ${MAX_CONSECUTIVE_BLOCKS} blocks — ` +
-            `failing open rather than trapping the session in a stop loop.`,
-        },
-        warnings,
-      ),
-    );
+  const priorBlocksRaw = state.verifyGateConsecutiveBlocks ?? 0;
+  // If the tree has moved since the blocks that tripped this counter, those blocks no longer
+  // describe "the same unsatisfiable diff" — treat this as a fresh start rather than letting a
+  // stale count suppress enforcement of new, unverified work (this is what actually closes the
+  // "fails open even after a fresh batch of unverified changes" hole). An unknown current hash
+  // does NOT reset — that would hand back an infinite-loop vector via a diff the gate can no
+  // longer see.
+  const treeChangedSinceLastBlock =
+    currentHash !== null && state.verifyGateBlockHash != null && state.verifyGateBlockHash !== currentHash;
+  const priorBlocks = treeChangedSinceLastBlock ? 0 : priorBlocksRaw;
+
+  // Never reset by tree movement (unlike priorBlocks above) — this is the backstop that catches a
+  // churning tree defeating MAX_CONSECUTIVE_BLOCKS by resetting it before it ever trips.
+  const priorCycleBlocks = state.verifyGateCycleBlocks ?? 0;
+
+  if (priorBlocks >= MAX_CONSECUTIVE_BLOCKS || priorCycleBlocks >= MAX_CYCLE_BLOCKS) {
+    // Deliberately NOT cleared here: once the loop guard trips in a cycle it stays tripped for
+    // the rest of that cycle — only a stop_hook_active: false cycle boundary, or (for the
+    // per-diff counter only) the tree changing, resets it. Clearing here would turn the bounded
+    // "N blocks then quiet" guarantee into block, block, allow forever.
+    const cycleCeilingHit = priorCycleBlocks >= MAX_CYCLE_BLOCKS;
+    if (cycleCeilingHit) {
+      await logFailOpen(
+        input.session_id,
+        "loop-guard-cycle",
+        `${MAX_CYCLE_BLOCKS} total blocks in one stop cycle (cycle ceiling)`,
+      );
+      emit(
+        withConfigWarnings(
+          {
+            systemMessage:
+              `praxarch verify-gate: hit the per-cycle ceiling (${MAX_CYCLE_BLOCKS} blocks total this cycle, ` +
+              `cycle ceiling reached even though the diff kept changing) — failing open rather than trapping ` +
+              `the session in a stop loop.`,
+          },
+          warnings,
+        ),
+      );
+    } else {
+      await logFailOpen(
+        input.session_id,
+        "loop-guard",
+        `${MAX_CONSECUTIVE_BLOCKS} consecutive blocks in one stop cycle`,
+      );
+      emit(
+        withConfigWarnings(
+          {
+            systemMessage:
+              `praxarch verify-gate: diff is still unverified after ${MAX_CONSECUTIVE_BLOCKS} blocks against ` +
+              `an unchanged diff — failing open rather than trapping the session in a stop loop.`,
+          },
+          warnings,
+        ),
+      );
+    }
     return;
   }
   state.verifyGateConsecutiveBlocks = priorBlocks + 1;
+  state.verifyGateBlockHash = currentHash;
+  state.verifyGateCycleBlocks = priorCycleBlocks + 1;
   await writeSessionState(state);
 
-  const reasonDetail = verifier
-    ? `last verifier pass was ${verifier.verdict} with ${verifier.criticalOrMajorCount} critical/major finding(s)`
-    : "no verifier pass is on record for this session";
+  const reasonDetail =
+    verifier === null
+      ? "no verifier pass is on record for this session"
+      : stale
+        ? `last verifier pass (${verifier.verdict}) is stale — ${lineDelta} lines across ${fileDelta} files ` +
+          `changed since it was recorded`
+        : `last verifier pass was ${verifier.verdict} with ${verifier.criticalOrMajorCount} critical/major finding(s)`;
 
   const output: StopOutput = withConfigWarnings(
     {
@@ -117,8 +248,18 @@ async function main(): Promise<void> {
   emit(output);
 }
 
-main().catch((err: unknown) => {
-  // A verify-gate crash must never trap the session in an unstoppable loop — fail open.
-  process.stderr.write(`praxarch verify-gate error (failing open): ${String(err)}\n`);
-  emit(allow());
+main().catch(async (err: unknown) => {
+  // A verify-gate crash must never trap the session in an unstoppable loop — fail open. Nothing
+  // in this handler may throw: stderr isn't shown to the user, so the systemMessage is what
+  // actually surfaces this, and the log line is best-effort on top of that.
+  const detail = String(err);
+  process.stderr.write(`praxarch verify-gate error (failing open): ${detail}\n`);
+  try {
+    await logFailOpen(sessionIdForCrashLog, "error", detail);
+  } catch {
+    // Best-effort — a logging failure must not compound the original crash.
+  }
+  emit({
+    systemMessage: `praxarch verify-gate: crashed and is failing open rather than blocking the session (${detail}).`,
+  });
 });

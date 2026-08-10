@@ -44,6 +44,62 @@ hooks that check the two rules most worth enforcing mechanically:
   `PRAXARCH_SKIP_VERIFY=1` and an explicit `PRAXARCH_VERIFY_WAIVED: <reason>` in the final
   message — because a hard gate with no escape becomes something users route around by lying to
   it, which is worse than no gate.
+  - A recorded verdict expires if the tree has moved past it: `telemetry` fingerprints the diff
+    (a content hash plus changed-lines/changed-files counts) alongside every verdict it records,
+    and `verify-gate` treats the verdict as stale — falling through to the normal block path —
+    once the current tree's hash differs from (or can't be compared to) the recorded one *and*
+    the size delta since it was recorded clears `minChangedLines`/`minChangedFiles`. Both
+    conditions are required deliberately: a hash difference alone (e.g. lockfile churn
+    `verify-gate` doesn't filter out of the hash) can't expire a verdict on its own, and a
+    shrinking diff (work reverted since the pass) is never treated as stale. An unfingerprintable
+    diff (the patch itself failed to fetch — see maxBuffer below) counts as "differs," never as
+    "unchanged," since treating an unknown as fresh is exactly the failure mode this exists to
+    close. Verdicts recorded before this existed omit the hash field entirely and are accepted
+    unconditionally — only in-flight sessions can hold one; a verdict whose hash was recorded but
+    couldn't be computed (present, `null`) does *not* get that same pass. Patch fetches use a 64MB
+    `maxBuffer` — generous, but a diff can still in principle exceed it, in which case the
+    fingerprint is `null` (unknown) rather than a value that looks like "no change." Every `git
+    diff` call passes `--no-ext-diff --no-textconv`, so a `diff.external` config or an inherited
+    `GIT_EXTERNAL_DIFF` can't silently blank the patch text `git diff --numstat` still sees fine —
+    without those flags the fingerprint collapses to a constant value and the staleness check
+    above never fires. Untracked file contents are hashed as raw bytes, not decoded to utf8 first
+    — a lossy decode would collapse distinct binary content to the same run of U+FFFD replacement
+    characters before it ever reached the hash. `git-diff.ts` splits this into two functions:
+    `diffStat` (counts only, cheap) and `diffFingerprint` (the hash, expensive — a full patch
+    fetch plus every untracked file's contents); callers only pay for the fingerprint once they've
+    established they actually need one, which is why the two are separate rather than one
+    combined call that always does both.
+  - The loop guard runs two independent counters, and fails open when *either* clears its limit.
+    `verifyGateConsecutiveBlocks` (limit 2) is scoped to a single stop cycle *and* to a single
+    diff: it's cleared on every genuine allow path and whenever `stop_hook_active` is false, so a
+    stale count from an earlier cycle can't leak into a later one and cause an immediate, unearned
+    fail-open, and it's additionally reset if the tree has changed since the blocks that tripped
+    it (compared by the same diff fingerprint above) — new, unverified work doesn't inherit a trip
+    count run up against a *different* diff. That per-diff reset is also its blind spot:
+    `verifyGateCycleBlocks` (limit 5) is the backstop — a per-stop-cycle total that is **never**
+    reset by tree movement, only by the same cycle-boundary/genuine-allow events as the per-diff
+    counter. Without it, a session that touches one file per round (a scratch edit, a formatter
+    run, anything that changes the hash) resets the per-diff counter before it ever reaches its
+    limit, even though every single round blocks — an unsatisfiable gate that never fails open.
+    What neither counter does: clear on the loop-guard's own fail-open. Once tripped in a cycle,
+    it stays tripped for the rest of that cycle — that's the guard working as designed, not a
+    residual bug; clearing there would turn the bounded "N blocks then quiet" guarantee into
+    block, block, allow forever. An unfingerprintable current diff never resets the per-diff
+    counter either, for the same reason: treating "unknown" as "changed" here would hand back an
+    infinite-loop vector. The two fail-open reasons are distinguishable in both the
+    `systemMessage` and the JSONL row (`reason: "loop-guard"` for the per-diff limit,
+    `"loop-guard-cycle"` for the per-cycle ceiling) — a stuck session (same diff, repeatedly
+    unverified) and a churning one (diff keeps moving, never gets verified either) are different
+    failure modes worth telling apart when reading the log. Every fail-open — either loop-guard
+    reason, or a crash — is logged to the monthly JSONL (`event: "verifyGateFailOpen"`) and
+    surfaced via `systemMessage`, and `praxarch report` totals them separately from delegation
+    stats so a gate that's gone quiet doesn't look identical to one that's passing.
+  - **Known limit of the size-delta rule**: it detects *growth* (or a hash-unknown situation),
+    not just any change. A same-size in-place rewrite after the verdict was recorded — the file
+    count and line count both stay flat, only the content differs — passes as fresh, because its
+    hash-differs condition alone isn't enough without an accompanying size delta. This is the
+    accepted tradeoff of the hash+delta approach (a `git write-tree` snapshot would close it, but
+    was ruled out as too heavy for a hook) — worth knowing rather than discovering by surprise.
 - **`telemetry`** (PostToolUse) and **`session-init`** (SessionStart) don't enforce anything; they
   observe and warn. Enforcement only applies to the two rules where a false negative (an
   unenforced violation) is worse than a false positive (an occasional unnecessary block).
@@ -131,3 +187,8 @@ a hook can't safely make.
   on prose that happens to mention a keyword without being security-sensitive work; `strict: false`
   in a project's `praxarch.json` downgrades denials to warnings if this proves too noisy for a
   given codebase.
+- **Verdict-expiry's size-delta rule detects growth, not any change** — a same-size in-place
+  rewrite of the diff after a verdict was recorded (file/line counts stay flat, only content
+  differs) passes as fresh, since the hash-differs condition alone isn't sufficient without an
+  accompanying size delta past `minChangedLines`/`minChangedFiles`. Accepted tradeoff of the
+  hash+delta approach over a heavier `git write-tree` snapshot; see the `verify-gate` bullet above.

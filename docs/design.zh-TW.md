@@ -41,6 +41,15 @@ pilotfish 自己的設計文件相當坦誠地說明了刻意省略的部分：�
   刻意保留兩個逃生閥——`PRAXARCH_SKIP_VERIFY=1` 與在最終訊息中明確寫出
   `PRAXARCH_VERIFY_WAIVED: <原因>`——因為完全沒有逃生閥的硬性關卡，
   最終會變成使用者對它說謊來繞過，這比沒有關卡還糟。
+  <!-- TRANSLATION PENDING: the English design.md verify-gate bullet gained three new
+       sub-points here as part of the issue #1 fix and its follow-up round: (1) verdict expiry
+       via a diff fingerprint (content hash + size delta, with maxBuffer and unknown-hash
+       handling), (2) loop-guard counter scoping — cleared on genuine allow paths and on a
+       tree-hash change, but deliberately NOT cleared on the loop-guard's own fail-open — plus
+       fail-open logging, and (3) a documented known limit of the size-delta rule (same-size
+       in-place rewrites aren't caught). Not yet translated — see design.md's "verify-gate"
+       bullet for the current source text. The "Known limitations" section there also gained a
+       matching bullet, not yet mirrored here. -->
 - **`telemetry`**（PostToolUse）與 **`session-init`**（SessionStart）不做任何強制執行，
   只負責觀察與警告。強制執行只用在「未被強制執行的違規」比「偶爾誤擋一次」
   後果更嚴重的那兩條規則上。
@@ -124,3 +133,6 @@ hook 真正可能需要依專案調整的兩件事：verify-gate 門檻
   文字中恰好提到某個關鍵字但實際上與安全性無關的工作可能誤判；
   若某個程式庫覺得這樣太吵，可在該專案的 `praxarch.json` 中設定 `strict: false`，
   把拒絕降級為警告。
+<!-- TRANSLATION PENDING: design.md gained a new "Known limitations" bullet here — verdict-expiry's
+     size-delta rule detects growth, not any change (a same-size in-place rewrite passes as
+     fresh). Not yet translated. -->
