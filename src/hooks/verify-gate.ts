@@ -116,9 +116,9 @@ async function main(): Promise<void> {
   }
 
   // Only fetched past this point: the trivial-diff early return above is the common case, and it
-  // never needs a fingerprint — diffFingerprint can cost a full patch fetch (up to 64MB) plus a
-  // read of every untracked file, where diffStat's counts above are cheap by comparison.
-  const currentHash = await diffFingerprint(input.cwd, state.baselineHead);
+  // never needs a fingerprint — diffFingerprint reads every dirty/untracked file's full current
+  // contents, where diffStat's counts above are cheap by comparison.
+  const currentHash = await diffFingerprint(input.cwd);
 
   const verifier = state.lastVerifier;
 
@@ -220,12 +220,23 @@ async function main(): Promise<void> {
   state.verifyGateCycleBlocks = priorCycleBlocks + 1;
   await writeSessionState(state);
 
+  // Only one of lineDelta/fileDelta needs to clear its threshold for `stale` to trip (see the
+  // clause above) — the other can independently be negative (e.g. files reverted while an
+  // existing file's line count grew past the threshold). A signed number read literally as
+  // "grew by -3" or pluralized as "-1 lines" doesn't read as English, so each delta gets its own
+  // sign-aware phrasing instead of printing the raw (possibly negative) number.
+  const lineDeltaPhrase =
+    lineDelta < 0
+      ? `${-lineDelta} line${-lineDelta === 1 ? "" : "s"} reverted`
+      : `${lineDelta} line${lineDelta === 1 ? "" : "s"} changed`;
+  const fileDeltaPhrase = fileDelta < 0 ? `shrank by ${-fileDelta}` : `grew by ${fileDelta}`;
+
   const reasonDetail =
     verifier === null
       ? "no verifier pass is on record for this session"
       : stale
-        ? `last verifier pass (${verifier.verdict}) is stale — ${lineDelta} lines across ${fileDelta} files ` +
-          `changed since it was recorded`
+        ? `last verifier pass (${verifier.verdict}) is stale — ${lineDeltaPhrase} and the file count ` +
+          `${fileDeltaPhrase} since it was recorded`
         : `last verifier pass was ${verifier.verdict} with ${verifier.criticalOrMajorCount} critical/major finding(s)`;
 
   const output: StopOutput = withConfigWarnings(

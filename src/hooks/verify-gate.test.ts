@@ -10,8 +10,9 @@ const here = dirname(fileURLToPath(import.meta.url));
 const script = join(here, "..", "..", "dist", "hooks", "verify-gate.js");
 
 // A fake `git` on PATH that behaves like the real one for --numstat and ls-files, but always
-// fails the bare patch fetch — simulating a real, black-box failure of exactly the call that can
-// hit maxBuffer on a huge diff (see git-diff.test.ts for the unit-level version of this).
+// fails `git status` outright — simulating a real, black-box failure of the call
+// diffFingerprint's null contract exists to cover (see git-diff.test.ts for the unit-level
+// version of this; that file also covers the maxBuffer-overflow variant).
 async function makeFakeGitDir(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "praxarch-verifygate-fakegit-"));
   const realGit = execFileSync("which", ["git"]).toString("utf8").trim();
@@ -20,7 +21,7 @@ async function makeFakeGitDir(): Promise<string> {
     'case "$*" in',
     `  *--numstat*) exec "${realGit}" "$@" ;;`,
     `  *ls-files*) exec "${realGit}" "$@" ;;`,
-    '  *diff*) echo "fake git: patch fetch failed" >&2; exit 1 ;;',
+    '  status*) echo "fake git: status failed" >&2; exit 1 ;;',
     `  *) exec "${realGit}" "$@" ;;`,
     "esac",
   ].join("\n");
@@ -617,7 +618,7 @@ test("CONFIRMED verdict whose fingerprint matches the current tree allows", asyn
     await makeNonTrivialDiff(fixture.repo);
     const { diffStat, diffFingerprint } = (await import(join(here, "..", "..", "dist", "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
     const { changedLines, changedFiles } = await diffStat(fixture.repo, [], null);
-    const hash = await diffFingerprint(fixture.repo, null);
+    const hash = await diffFingerprint(fixture.repo);
     await seedVerifierState(fixture.home, "s1", {
       verdict: "CONFIRMED",
       criticalOrMajorCount: 0,
@@ -643,7 +644,7 @@ test("CONFIRMED verdict with a differing hash but a below-threshold size delta s
     await makeNonTrivialDiff(fixture.repo);
     const { diffStat, diffFingerprint } = (await import(join(here, "..", "..", "dist", "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
     const { changedLines, changedFiles } = await diffStat(fixture.repo, [], null);
-    const hash = await diffFingerprint(fixture.repo, null);
+    const hash = await diffFingerprint(fixture.repo);
     await seedVerifierState(fixture.home, "s1", {
       verdict: "CONFIRMED",
       criticalOrMajorCount: 0,
@@ -674,7 +675,7 @@ test("CONFIRMED verdict with a differing hash and a threshold-clearing size delt
     await makeNonTrivialDiff(fixture.repo);
     const { diffStat, diffFingerprint } = (await import(join(here, "..", "..", "dist", "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
     const { changedLines, changedFiles } = await diffStat(fixture.repo, [], null);
-    const hash = await diffFingerprint(fixture.repo, null);
+    const hash = await diffFingerprint(fixture.repo);
     await seedVerifierState(fixture.home, "s1", {
       verdict: "CONFIRMED",
       criticalOrMajorCount: 0,
@@ -694,6 +695,77 @@ test("CONFIRMED verdict with a differing hash and a threshold-clearing size delt
     }) as { decision?: string; reason?: string };
     assert.equal(result.decision, "block");
     assert.match(result.reason ?? "", /stale/);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("a zero file-count delta still reads as a real change, not as nothing happened", async () => {
+  const fixture = await setupFixture();
+  try {
+    await makeNonTrivialDiff(fixture.repo);
+    const { diffStat, diffFingerprint } = (await import(join(here, "..", "..", "dist", "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
+    const { changedLines, changedFiles } = await diffStat(fixture.repo, [], null);
+    const hash = await diffFingerprint(fixture.repo);
+    await seedVerifierState(fixture.home, "s1", {
+      verdict: "REFUTED",
+      criticalOrMajorCount: 1,
+      findingsCount: 1,
+      diffHash: hash,
+      changedLines,
+      changedFiles,
+    });
+
+    // Substantial further work, but all to the SAME file that was already changed -- the file
+    // count doesn't grow (fileDelta stays 0), only the line count does. This is the case that
+    // used to render as "... across 0 files changed", which reads as if nothing changed even
+    // though the line count says otherwise.
+    await writeFile(join(fixture.repo, "file.txt"), "changed line\n".repeat(1027));
+
+    const result = run(fixture, {
+      session_id: "s1",
+      cwd: fixture.repo,
+      hook_event_name: "Stop",
+    }) as { decision?: string; reason?: string };
+    assert.equal(result.decision, "block");
+    assert.match(result.reason ?? "", /stale — \d+ lines? changed and the file count grew by 0 since it was recorded/);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("a negative file delta alongside a positive line delta reads as English, not '-1 lines' or 'grew by -1'", async () => {
+  const fixture = await setupFixture();
+  try {
+    // Two files present when the (REFUTED) verdict was recorded.
+    await writeFile(join(fixture.repo, "extra.txt"), "line\n".repeat(50));
+    await makeNonTrivialDiff(fixture.repo);
+    const { diffStat, diffFingerprint } = (await import(join(here, "..", "..", "dist", "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
+    const { changedLines, changedFiles } = await diffStat(fixture.repo, [], null);
+    const hash = await diffFingerprint(fixture.repo);
+    await seedVerifierState(fixture.home, "s1", {
+      verdict: "REFUTED",
+      criticalOrMajorCount: 1,
+      findingsCount: 1,
+      diffHash: hash,
+      changedLines,
+      changedFiles,
+    });
+
+    // One of the two files is removed (fileDelta negative), but the remaining file grows enough
+    // to clear minChangedLines on its own (lineDelta positive) -- exactly the mixed-sign case
+    // that used to render as "the file count grew by -1" and, for a lineDelta of -1, "-1 lines".
+    await rm(join(fixture.repo, "extra.txt"));
+    await writeFile(join(fixture.repo, "file.txt"), "changed line\n".repeat(300));
+
+    const result = run(fixture, {
+      session_id: "s1",
+      cwd: fixture.repo,
+      hook_event_name: "Stop",
+    }) as { decision?: string; reason?: string };
+    assert.equal(result.decision, "block");
+    assert.match(result.reason ?? "", /stale — \d+ lines? changed and the file count shrank by 1 since it was recorded/);
+    assert.doesNotMatch(result.reason ?? "", /grew by -/);
   } finally {
     await teardownFixture(fixture);
   }
@@ -729,7 +801,7 @@ test("reverted work (negative delta) with a differing hash still allows", async 
     await writeFile(join(fixture.repo, "file.txt"), "changed line\n".repeat(100));
     const { diffStat, diffFingerprint } = (await import(join(here, "..", "..", "dist", "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
     const { changedLines, changedFiles } = await diffStat(fixture.repo, [], null);
-    const hash = await diffFingerprint(fixture.repo, null);
+    const hash = await diffFingerprint(fixture.repo);
     await seedVerifierState(fixture.home, "s1", {
       verdict: "CONFIRMED",
       criticalOrMajorCount: 0,
@@ -788,7 +860,7 @@ test("a stale REFUTED verdict is reported with its own verdict, not hardcoded CO
     await writeFile(join(fixture.repo, "file.txt"), "changed line\n".repeat(100));
     const { diffStat, diffFingerprint } = (await import(join(here, "..", "..", "dist", "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
     const { changedLines, changedFiles } = await diffStat(fixture.repo, [], null);
-    const hash = await diffFingerprint(fixture.repo, null);
+    const hash = await diffFingerprint(fixture.repo);
     await seedVerifierState(fixture.home, "s1", {
       verdict: "REFUTED",
       criticalOrMajorCount: 1,
@@ -821,7 +893,7 @@ test("an unhashable current diff (patch fetch failed) is treated as unknown, not
     await makeNonTrivialDiff(fixture.repo);
     const { diffStat, diffFingerprint } = (await import(join(here, "..", "..", "dist", "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
     const { changedLines, changedFiles } = await diffStat(fixture.repo, [], null);
-    const hash = await diffFingerprint(fixture.repo, null);
+    const hash = await diffFingerprint(fixture.repo);
     await seedVerifierState(fixture.home, "s1", {
       verdict: "CONFIRMED",
       criticalOrMajorCount: 0,
@@ -858,7 +930,7 @@ test("an unhashable current diff still allows when the size delta stays below bo
     await makeNonTrivialDiff(fixture.repo);
     const { diffStat, diffFingerprint } = (await import(join(here, "..", "..", "dist", "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
     const { changedLines, changedFiles } = await diffStat(fixture.repo, [], null);
-    const hash = await diffFingerprint(fixture.repo, null);
+    const hash = await diffFingerprint(fixture.repo);
     await seedVerifierState(fixture.home, "s1", {
       verdict: "CONFIRMED",
       criticalOrMajorCount: 0,
@@ -882,6 +954,41 @@ test("an unhashable current diff still allows when the size delta stays below bo
         { PATH: `${fakeGitDir}:${process.env["PATH"] ?? ""}` },
       ) as { decision?: string };
       assert.equal(result.decision, undefined);
+    });
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("a null current hash against a recorded null diffHash is still stale, not treated as matching -- kills the `currentHash === null ||` mutant", async () => {
+  // Both sides of the equality are null here. `verifierHash !== currentHash` alone would read
+  // `null !== null` as false and let the verdict pass -- deleting `currentHash === null ||` from
+  // the stale condition survives the rest of the suite (round 4's finding) because every other
+  // test either has a real currentHash or a real verifierHash, never both null at once.
+  const fixture = await setupFixture();
+  try {
+    await makeNonTrivialDiff(fixture.repo);
+    await seedVerifierState(fixture.home, "s1", {
+      verdict: "CONFIRMED",
+      criticalOrMajorCount: 0,
+      findingsCount: 0,
+      diffHash: null,
+      changedLines: 0,
+      changedFiles: 0,
+    });
+
+    await withFakeGitOnPath(async (fakeGitDir) => {
+      const result = run(
+        fixture,
+        {
+          session_id: "s1",
+          cwd: fixture.repo,
+          hook_event_name: "Stop",
+        },
+        { PATH: `${fakeGitDir}:${process.env["PATH"] ?? ""}` },
+      ) as { decision?: string; reason?: string };
+      assert.equal(result.decision, "block");
+      assert.match(result.reason ?? "", /stale/);
     });
   } finally {
     await teardownFixture(fixture);

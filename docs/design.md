@@ -52,23 +52,83 @@ hooks that check the two rules most worth enforcing mechanically:
     conditions are required deliberately: a hash difference alone (e.g. lockfile churn
     `verify-gate` doesn't filter out of the hash) can't expire a verdict on its own, and a
     shrinking diff (work reverted since the pass) is never treated as stale. An unfingerprintable
-    diff (the patch itself failed to fetch — see maxBuffer below) counts as "differs," never as
-    "unchanged," since treating an unknown as fresh is exactly the failure mode this exists to
-    close. Verdicts recorded before this existed omit the hash field entirely and are accepted
-    unconditionally — only in-flight sessions can hold one; a verdict whose hash was recorded but
-    couldn't be computed (present, `null`) does *not* get that same pass. Patch fetches use a 64MB
-    `maxBuffer` — generous, but a diff can still in principle exceed it, in which case the
-    fingerprint is `null` (unknown) rather than a value that looks like "no change." Every `git
-    diff` call passes `--no-ext-diff --no-textconv`, so a `diff.external` config or an inherited
-    `GIT_EXTERNAL_DIFF` can't silently blank the patch text `git diff --numstat` still sees fine —
-    without those flags the fingerprint collapses to a constant value and the staleness check
-    above never fires. Untracked file contents are hashed as raw bytes, not decoded to utf8 first
-    — a lossy decode would collapse distinct binary content to the same run of U+FFFD replacement
-    characters before it ever reached the hash. `git-diff.ts` splits this into two functions:
-    `diffStat` (counts only, cheap) and `diffFingerprint` (the hash, expensive — a full patch
-    fetch plus every untracked file's contents); callers only pay for the fingerprint once they've
-    established they actually need one, which is why the two are separate rather than one
-    combined call that always does both.
+    diff counts as "differs," never as "unchanged," since treating an unknown as fresh is exactly
+    the failure mode this exists to close. Verdicts recorded before this existed omit the hash
+    field entirely and are accepted unconditionally — only in-flight sessions can hold one; a
+    verdict whose hash was recorded but couldn't be computed (present, `null`) does *not* get that
+    same pass.
+    - **The fingerprint never generates a patch.** Four rounds of adversarial review each found
+      the same defect in a different coat: a multi-MB `git diff` patch fetch, piped through a
+      child process with layered fallbacks, has an open-ended failure surface (a `maxBuffer`
+      overflow, a `diff.external`/`GIT_EXTERNAL_DIFF`/textconv driver blanking the output while
+      `--numstat` kept working, a HEAD-fallback laundering a baseline overflow into a real-looking
+      empty diff) and any miss anywhere silently collapses the fingerprint to a constant value.
+      The fingerprint is now `sha256(HEAD sha, then each entry of git status --porcelain -z
+      --no-renames --untracked-files=all, sorted by path, contributing path + status code + a
+      kind-dispatched read of that path)`. Committed work is covered entirely by the HEAD sha —
+      any commit moves HEAD, which moves the fingerprint — so there is no patch-text baseline to
+      fetch and the whole class of failure above is structurally impossible rather than defended
+      against: nothing in `diffFingerprint` ever runs `git diff`. Dirty and untracked files are
+      covered by reading their current on-disk state directly in Node, dispatched by `fs.lstat`
+      (never `stat` — a symlink is inspected as itself, not followed) rather than assumed from the
+      status code:
+      The dispatch is now genuinely total: every branch below emits its own kind marker or the
+      regular-file length prefix, never an implicit fallthrough into another branch's encoding.
+      - `lstat` `ENOENT` → path + status code + the `"ABSENT"` marker. This covers a real
+        deletion (no content by definition) and a delete-between-status-and-read race
+        identically — the fingerprint describes the tree as it is now. There is no longer a
+        status-code-driven deletion shortcut: an unmerged delete/modify conflict (`UD`/`DU`) is a
+        single status entry with full working-tree content — the file a session edits to resolve
+        the conflict — and it naturally falls through to the regular-file case below instead of
+        being misread as a deletion. (Five rounds of review lived with this gap; round 6 found it
+        by reproducing a conflicted file with 201 unreviewed lines and a fingerprint that never
+        moved.)
+      - Any other `lstat` failure → `null`.
+      - A symlink → path + status code + the `"SYMLINK"` marker + the `readlink` target string,
+        never the followed content. Not following means a dangling target is no longer a read
+        failure, a retargeted link still moves the hash (the target string changes), and content
+        outside the repo can never be read through a symlink planted inside it.
+      - A directory → path + status code + the `"DIR"` marker, nothing else. A dirty submodule and
+        an untracked embedded repo both surface as a single directory-path status entry; git
+        itself collapses their inner content the same way, so a fingerprint that can't see past
+        that entry is inherited blindness, not a gap — the same blindness `diffStat`'s numstat
+        already has.
+      - Anything else non-regular (FIFO, socket, block/character device) → path + status code +
+        the `"SPECIAL"` marker. Streaming below is reached only through an explicit `st.isFile()`
+        check, never as an implicit fallback: round 6's dispatch tested symlink then directory
+        and fell straight through to `createReadStream` for everything else, so a tracked file
+        replaced by a FIFO (`mkfifo` over an existing path, reported by porcelain as an ordinary
+        modification) blocked the read stream forever with no writer on the other end — the Stop
+        hook hung until the harness killed it at timeout, which then treats a timed-out hook as
+        non-blocking: a session stall plus a silent fail-open with no log line. `"SPECIAL"` is a
+        marker, not `null` — a special file in the tree is a persistent state, and `null` would
+        leave the fingerprint permanently unknown for as long as it stays that kind, the same
+        degradation the dangling-symlink fix closed for symlinks. One marker covers every such
+        kind; which specific special kind sits at a path isn't a state worth distinguishing.
+      - A regular file → path + status code + byte length + content, streamed through the hash
+        (`createReadStream`, not a buffered `readFile`) so memory use stays bounded regardless of
+        file size.
+      Kind markers (`"ABSENT"`, `"SYMLINK"`, `"DIR"`, `"SPECIAL"`) are non-numeric and
+      NUL-terminated, so no marker can be read as a length and no two markers — or a marker and
+      the numeric length prefix — can collide: every branch's encoding is prefix-free by
+      construction, not merely undisproven.
+    - **Failure is loud by construction, not by fallback.** `git status` failing or exceeding the
+      64MB `MAX_GIT_BUFFER` (status output is paths, not patch text, so hitting this is
+      pathological) → `null`, never an empty or truncated listing. `git rev-parse --show-toplevel`
+      failing while `git status` succeeded → `null` — porcelain paths are repo-root-relative, not
+      cwd-relative, and joining them against `cwd` instead (the round-6 major) silently produced
+      wrong paths, and a permanently inert fingerprint, for any session run from a subdirectory;
+      falling back to `cwd` on a resolution failure would just reproduce the same bug more rarely,
+      so it isn't done. `git rev-parse --verify HEAD` failing *while `git status` succeeded* is
+      treated as a genuinely unborn HEAD — status succeeding proves a working repo, so a HEAD that
+      won't resolve in a working repo means there is no HEAD, not that something went wrong — and
+      contributes the sentinel `"NOHEAD"` instead of a real sha; a transient split between the two
+      calls makes the fingerprint read as "differs," the conservative direction.
+    - `git-diff.ts` splits this into two functions: `diffStat` (counts only, cheap, still
+      `baseline`-relative via `--numstat` against the session's recorded HEAD) and
+      `diffFingerprint` (the hash — a pure function of the current tree, no baseline parameter);
+      callers only pay for the fingerprint once they've established they actually need one, which
+      is why the two are separate rather than one combined call that always does both.
   - The loop guard runs two independent counters, and fails open when *either* clears its limit.
     `verifyGateConsecutiveBlocks` (limit 2) is scoped to a single stop cycle *and* to a single
     diff: it's cleared on every genuine allow path and whenever `stop_hook_active` is false, so a
