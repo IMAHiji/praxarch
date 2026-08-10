@@ -253,12 +253,14 @@ test("stores nulls (without throwing) when the fingerprint can't be computed, bu
       await writeFile(join(repo, "file.txt"), "changed line\n".repeat(5));
 
       const realGit = execFileSync("which", ["git"]).toString("utf8").trim();
+      // Fails `git status` — the call diffFingerprint's null contract depends on — while leaving
+      // --numstat and ls-files (diffStat's calls) working, so the counts below still come through.
       const fakeGitScript = [
         "#!/bin/sh",
         'case "$*" in',
         `  *--numstat*) exec "${realGit}" "$@" ;;`,
         `  *ls-files*) exec "${realGit}" "$@" ;;`,
-        '  *diff*) echo "fake git: patch fetch failed" >&2; exit 1 ;;',
+        '  status*) echo "fake git: status failed" >&2; exit 1 ;;',
         `  *) exec "${realGit}" "$@" ;;`,
         "esac",
       ].join("\n");
@@ -290,7 +292,7 @@ test("stores nulls (without throwing) when the fingerprint can't be computed, bu
           changedFiles: number | null;
         };
       };
-      // The verdict itself and the counts (from --numstat, unaffected by the patch failure) are
+      // The verdict itself and the counts (from --numstat, unaffected by the status failure) are
       // still recorded correctly — only the hash comes back null.
       assert.equal(state.lastVerifier.verdict, "CONFIRMED");
       assert.equal(state.lastVerifier.diffHash, null);

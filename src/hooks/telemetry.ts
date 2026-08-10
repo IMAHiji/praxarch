@@ -120,7 +120,7 @@ async function main(): Promise<void> {
       // Leave nulls.
     }
     try {
-      diffHash = await diffFingerprint(input.cwd, state.baselineHead);
+      diffHash = await diffFingerprint(input.cwd);
     } catch {
       // Leave null — verify-gate treats a present-but-null diffHash as unverifiable (no free
       // pass), unlike a record that omits the key entirely (genuinely predates this feature).

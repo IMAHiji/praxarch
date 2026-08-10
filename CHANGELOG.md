@@ -45,18 +45,72 @@
   fail-open: once tripped in a cycle it stays tripped against an *unchanged* diff, by design —
   that's the bounded "2 blocks then quiet" guarantee working, not a bug. (2) a CONFIRMED verdict
   authorized every later diff in the session regardless of how much changed after it was recorded
-  — telemetry now fingerprints the diff (a content hash, computed with a 64MB `maxBuffer` so large
-  patches don't silently fail closed to "no change," plus changed-lines/changed-files counts)
+  — telemetry now fingerprints the diff (a content hash, plus changed-lines/changed-files counts)
   alongside the verdict, and verify-gate treats it as stale (falls through to blocking) once the
-  hash differs *or is unknown* (e.g. the patch still exceeded the buffer) *and* the size delta
-  since it was recorded clears `minChangedLines`/`minChangedFiles`. Verdicts recorded before this
-  change (the `diffHash` field is entirely absent) are accepted unchanged — only in-flight
-  sessions can hold one; a verdict whose hash was recorded but couldn't be computed (`diffHash`
-  present but `null`) does *not* get that same pass. Known residual limit: the size-delta rule
-  detects growth, not same-size in-place rewrites — documented in `docs/design.md`. Every fail-open
-  (loop-guard or crash) is now logged to the monthly JSONL and surfaced via `systemMessage`, and
-  `praxarch report` excludes those log rows from delegation stats and adds a
-  `Verify-gate fail-opens: N` line.
+  hash differs *or is unknown* *and* the size delta since it was recorded clears
+  `minChangedLines`/`minChangedFiles`. Verdicts recorded before this change (the `diffHash` field
+  is entirely absent) are accepted unchanged — only in-flight sessions can hold one; a verdict
+  whose hash was recorded but couldn't be computed (`diffHash` present but `null`) does *not* get
+  that same pass. Known residual limit: the size-delta rule detects growth, not same-size
+  in-place rewrites — documented in `docs/design.md`. Every fail-open (loop-guard or crash) is now
+  logged to the monthly JSONL and surfaced via `systemMessage`, and `praxarch report` excludes
+  those log rows from delegation stats and adds a `Verify-gate fail-opens: N` line.
+  - **The fingerprint's basis: `git status`, never `git diff`.** Four adversarial review rounds
+    each found the same defect in a different coat — a `maxBuffer` overflow, a
+    `diff.external`/`GIT_EXTERNAL_DIFF`/textconv driver blanking the patch while `--numstat` kept
+    working, a HEAD-fallback laundering a baseline overflow into a real-looking empty diff — all
+    of them symptoms of measuring the diff by fetching multi-MB patch text through a child
+    process. The fingerprint is now `sha256(HEAD sha, or "NOHEAD" for an unborn HEAD, then every
+    entry of git status --porcelain -z --no-renames --untracked-files=all, sorted by path, each
+    contributing its path, status code, and a kind-dispatched read of that path)`. Committed work
+    is covered entirely by the HEAD sha; dirty and untracked files are covered by reading their
+    current on-disk state directly in Node. `diffFingerprint` no longer runs `git diff` at all, so
+    the whole class of failure above is structurally impossible rather than defended against, and
+    it no longer takes a `baseline` parameter — it's a pure function of the current tree.
+    `git status` failing or exceeding the 64MB `MAX_GIT_BUFFER` still yields `null`, never a
+    truncated listing. Untracked/dirty file contents are hashed as raw bytes, not decoded to utf8
+    first — a lossy decode would collapse distinct binary content to the same run of U+FFFD
+    replacement characters before it ever reached the hash.
+  - **Round 6: the read loop was dispatching on the status code, not the filesystem, and that lied
+    twice.** Deleted paths (`D` in either status column) were assumed to have no content and
+    skipped — true for an ordinary delete, false for an unmerged delete/modify conflict (`UD`/
+    `DU`), which is a single status entry with the full, unreviewed working-tree content a session
+    edits to resolve it; the fingerprint held constant across edits to a conflicted file. Status
+    paths were also joined against `cwd`, not the repo root porcelain paths are actually relative
+    to, so any session running from a subdirectory of a dirty repo got a permanently `null`
+    fingerprint. Both are fixed by resolving the repo root via `git rev-parse --show-toplevel`
+    (failure while `status` succeeded → `null`, never a `cwd` fallback) and replacing the
+    status-code assumption with an `fs.lstat` dispatch per entry: `ENOENT` → path + status code
+    + an `"ABSENT"` marker (a real deletion and a delete-between-status-and-read race read
+    identically); any other `lstat` failure → `null`; a symlink → path + status code + a
+    `"SYMLINK"` marker + its `readlink` target (never followed — a dangling target isn't a
+    failure, a retarget still moves the hash, and content outside the repo can never be read
+    through it); a directory → path + status code + a `"DIR"` marker only (a dirty submodule and
+    an untracked embedded repo both collapse to one directory-path status entry in git itself, so
+    this is inherited blindness, not a new gap); a regular file → path + status code + byte length
+    + content, now streamed through the hash instead of buffered via `readFile`, so memory use no
+    longer scales with file size.
+  - **Round 7: the dispatch fell through to streaming for every kind it hadn't named, and the
+    ENOENT entry left no trace of its own boundary.** Round 6's dispatch tested `isSymbolicLink()`
+    then `isDirectory()` and treated everything else as a regular file — a tracked file replaced
+    by a FIFO (`mkfifo` over an existing path, reported by porcelain as an ordinary modification)
+    reached `createReadStream`, which blocks forever with no writer on the other end: the Stop
+    hook hung until the harness killed it at timeout, and a timed-out hook reads as non-blocking —
+    a session stall plus a silent fail-open with no log line. The dispatch is now total: streaming
+    only happens under an explicit `st.isFile()` check, and every other non-regular,
+    non-symlink, non-directory kind (FIFO, socket, block/character device) hashes as path + status
+    code + a `"SPECIAL"` marker — a marker, not `null`, because a special file in the tree is a
+    persistent state and `null` would leave the fingerprint unknown for as long as it stays that
+    kind. Separately, the `ENOENT` branch previously contributed nothing beyond the already-hashed
+    path and status code, so its entry's byte image had no boundary of its own — a symlink entry
+    could in principle share bytes with two adjacent ENOENT entries, undermining the doc's
+    prefix-free claim (no reachable collision was ever constructed; this closes the gap on
+    principle rather than in response to a proven exploit). `ENOENT` now emits its own `"ABSENT"`
+    marker alongside the existing `"SYMLINK"`/`"DIR"`/new `"SPECIAL"` markers, so every branch is
+    prefix-free by construction. This changes fingerprints for any tree containing a deletion
+    recorded before this change; only in-flight sessions can hold such a verdict, and a changed
+    fingerprint reads as "differs" — the conservative direction — so no compatibility shim was
+    added.
 - **verify-gate: the loop guard now has a second counter that continuous tree churn can't reset.**
   The consecutive-block counter above resets whenever the diff fingerprint changes, which is
   correct for a genuinely new batch of unverified work — but it also meant a session touching one
@@ -66,15 +120,9 @@
   the whole stop cycle regardless of tree movement (limit 5) and fails open alongside the per-diff
   counter (limit 2, unchanged); the two reasons are distinguishable in both `systemMessage` and the
   JSONL row (`reason: "loop-guard"` vs `"loop-guard-cycle"`).
-- **git-diff: `--no-ext-diff`/`--no-textconv` on every `git diff` call.** A `diff.external` config
-  or an inherited `GIT_EXTERNAL_DIFF` env var replaced the patch text with whatever the external
-  driver printed — including nothing — while `--numstat` was unaffected, collapsing the
-  fingerprint to a real, constant value and silently reopening the exact hole the verdict-staleness
-  fingerprint exists to close (600 unverified lines allowed past a CONFIRMED verdict, reproduced
-  via both the git-config and env-var routes).
-- **git-diff: untracked file contents are hashed as bytes, not decoded to utf8 first.** A lossy
-  utf8 decode collapsed invalid byte sequences to U+FFFD before hashing, so distinct binary
-  content could hash identically.
+- **verify-gate: negative size deltas now read as English.** A reverted file count or line count
+  rendered literally (`"the file count grew by -3"`, `"-1 lines"`); each delta now gets its own
+  sign-aware phrasing (`"N lines changed"`/`"N lines reverted"`, `"grew by N"`/`"shrank by N"`).
 - **git-diff: the fingerprint is now lazy.** `diffStat` (counts only) and `diffFingerprint` (the
   hash — a full patch fetch plus every untracked file's contents, the expensive half) are separate
   functions; verify-gate only fingerprints past its trivial-diff early return, and telemetry only

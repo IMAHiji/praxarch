@@ -1,15 +1,20 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { lstat, readFile, readlink } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-// Patches can be large; Node's default 1MB maxBuffer would reject the exec call outright (caught
-// below, turning into hash: null) well before anything worth calling a "large diff" is reached.
-// Generous rather than tuned — this is a safety margin, not a limit anyone should expect to hit.
-const MAX_DIFF_BUFFER = 64 * 1024 * 1024;
+// Git output (numstat lines, ls-files paths, status entries) can be large; Node's default 1MB
+// maxBuffer would reject the exec call outright well before anything worth calling "large" is
+// reached. Generous rather than tuned — this is a safety margin, not a limit anyone should expect
+// to hit. Shared across every git invocation in this file, including diffFingerprint's `git
+// status` call — status output is paths, not patch text, so hitting this ceiling is pathological,
+// and pathological means the fingerprint becomes unknown (`null`), never a hash silently computed
+// from a truncated listing.
+const MAX_GIT_BUFFER = 64 * 1024 * 1024;
 
 // Both flags neutralize config-driven nondeterminism that would otherwise blank the diff we're
 // measuring: `diff.external` (or an inherited GIT_EXTERNAL_DIFF) can replace `git diff`'s output
@@ -53,30 +58,52 @@ function countNewlines(buf: Buffer): number {
   return count;
 }
 
+// True only for the specific failure the HEAD fallback below exists to handle: `target` doesn't
+// resolve to an object git can diff against (a baseline sha the repo no longer has — e.g. a reset
+// or a shallow clone). Matched on git's stderr, not on exit code: `git diff` exits non-zero for a
+// bad revision *and* for a maxBuffer overflow alike, and those two failures must be told apart —
+// only the former has a legitimate fallback. A failure that doesn't match this must propagate, so
+// the caller's fingerprint becomes `null` rather than silently measuring the wrong diff.
+function isBadObjectError(err: unknown): boolean {
+  const stderr = (err as { stderr?: unknown } | null | undefined)?.stderr;
+  const message = typeof stderr === "string" ? stderr : stderr instanceof Buffer ? stderr.toString("utf8") : String(err);
+  return /bad object|unknown revision|bad revision/i.test(message);
+}
+
 async function trackedDiff(cwd: string, target: string, args: string[]): Promise<string> {
   try {
     const { stdout } = await execFileAsync("git", ["diff", ...NEUTRALIZE_DIFF_CONFIG, target, ...args], {
       cwd,
-      maxBuffer: MAX_DIFF_BUFFER,
+      maxBuffer: MAX_GIT_BUFFER,
     });
     return stdout;
   } catch (err) {
-    if (target === "HEAD") throw err;
-    // Baseline sha may be stale/unknown (e.g. repo reset) — fall back to HEAD diff.
+    // Fall back to HEAD only when `target` itself was the problem (bad-object baseline) and we
+    // aren't already diffing against HEAD. Any other failure — most notably a maxBuffer overflow
+    // on a huge patch — must propagate: falling back would "succeed" against a different diff
+    // than the one that failed, turning a fetch failure into a wrong (but real-looking) answer.
+    if (target === "HEAD" || !isBadObjectError(err)) throw err;
     const { stdout } = await execFileAsync("git", ["diff", ...NEUTRALIZE_DIFF_CONFIG, "HEAD", ...args], {
       cwd,
-      maxBuffer: MAX_DIFF_BUFFER,
+      maxBuffer: MAX_GIT_BUFFER,
     });
     return stdout;
   }
 }
 
-async function listUntracked(cwd: string): Promise<string[]> {
+// `null` means the listing could not be fetched (distinct from a real, empty listing) — same
+// contract as diffFingerprint's return value, and for the same reason: an untracked-file count
+// that silently degrades to "none" on failure would hide new files from the fingerprint just as
+// surely as a swallowed patch-fetch failure would.
+async function listUntracked(cwd: string): Promise<string[] | null> {
   try {
-    const { stdout } = await execFileAsync("git", ["ls-files", "--others", "--exclude-standard"], { cwd });
+    const { stdout } = await execFileAsync("git", ["ls-files", "--others", "--exclude-standard"], {
+      cwd,
+      maxBuffer: MAX_GIT_BUFFER,
+    });
     return stdout.split("\n").filter((line) => line.trim().length > 0);
   } catch {
-    return [];
+    return null;
   }
 }
 
@@ -106,7 +133,10 @@ export async function diffStat(cwd: string, ignorePatterns: string[], baseline?:
 
   let changedLines = tracked.changedLines;
   let changedFiles = tracked.changedFiles;
-  for (const path of await listUntracked(cwd)) {
+  // A failed listing (null) degrades to the same "contributes nothing" behaviour as an empty one
+  // — diffStat's counts are documented to degrade to zero on failure; only diffFingerprint's null
+  // contract distinguishes the two.
+  for (const path of (await listUntracked(cwd)) ?? []) {
     let contents: Buffer | null = null;
     try {
       contents = await readFile(join(cwd, path));
@@ -121,87 +151,241 @@ export async function diffStat(cwd: string, ignorePatterns: string[], baseline?:
   return { changedLines, changedFiles };
 }
 
+interface StatusEntry {
+  path: string;
+  statusCode: string;
+}
+
+// Parses `git status --porcelain -z --no-renames --untracked-files=all` output. Each entry is
+// "XY <path>" NUL-terminated (NUL instead of newline, and — unlike the default porcelain format —
+// paths are never quoted/escaped, so this is git's stable scripting interface for this data).
+// --no-renames guarantees every entry is a single self-contained "XY path" — no second,
+// NUL-delimited "orig path" segment to account for, which the default (rename-detecting) format
+// would otherwise interleave for R/C entries.
+function parseStatusZ(stdout: string): StatusEntry[] {
+  return stdout
+    .split("\0")
+    .filter((entry) => entry.length > 0)
+    .map((entry) => ({ statusCode: entry.slice(0, 2), path: entry.slice(3) }));
+}
+
 /**
- * Fingerprint of the diff: sha256 over the full (unfiltered) patch text plus, for each untracked
- * path in sorted order, the path and its raw byte contents. Deliberately ignores ignorePatterns —
- * see the doc comment on diffStat's caller (verify-gate) for why that's safe: a hash difference
- * alone never expires a verdict, only a hash difference paired with a size delta past the
- * configured thresholds does, so lockfile-only churn can't spuriously expire a verdict.
+ * Fingerprint of the current tree: sha256 over the HEAD sha (or the sentinel `"NOHEAD"` when HEAD
+ * is unborn), followed by every entry of `git status --porcelain -z --no-renames
+ * --untracked-files=all`, sorted by path, each contributing its path, status code, and — for
+ * paths that still have on-disk content — a length-prefixed raw byte read of that content.
+ * Deliberately ignores ignorePatterns — see the doc comment on diffStat's caller (verify-gate) for
+ * why that's safe: a hash difference alone never expires a verdict, only a hash difference paired
+ * with a size delta past the configured thresholds does, so lockfile-only churn can't spuriously
+ * expire a verdict.
  *
- * `null` means the fingerprint could not be computed — either the patch fetch failed (e.g. it
- * exceeded maxBuffer) or the cheap --numstat probe that precedes it failed for a reason other than
- * "genuinely nothing to diff" (not a git repo, or a repo with no commits, which still yields the
- * deterministic hash of the empty patch below). Callers must treat `null` as "unknown", never as
- * "unchanged" — a hash that silently stopped tracking a diff would make a recorded verdict
- * immortal against exactly the diffs most likely to need re-verification.
+ * Never generates a patch. Committed work is covered entirely by the HEAD sha — any commit moves
+ * HEAD, which moves the fingerprint — so this function never fetches or measures patch text the
+ * way the previous implementation did, and the entire class of failure that broke four rounds of
+ * review (a maxBuffer overflow on patch text, or a `diff.external`/`GIT_EXTERNAL_DIFF`/textconv
+ * driver blanking `git diff`'s output while `--numstat` kept working) is structurally impossible
+ * here rather than defended against: nothing in this function ever runs `git diff`. Dirty and
+ * untracked files are covered by reading their current on-disk bytes directly in Node, not by
+ * diffing them.
  *
- * Split out from diffStat (which returns counts only) because this is the expensive half: it can
- * fetch up to 64MB of patch text and read every untracked file's full contents, where diffStat's
- * counts already served the common case (a trivial diff that returns at verify-gate's early
- * allow, or a Stop where no verifier verdict was even parsed in telemetry) far more cheaply.
- * Callers invoke this only after establishing they actually need a fingerprint.
+ * `null` means the fingerprint could not be computed and must never be treated as "unchanged":
+ * - `git status` itself failing or exceeding `MAX_GIT_BUFFER` (status output is paths, not patch
+ *   text, so overflowing this is pathological) → `null`. Never an empty or truncated listing.
+ * - `git rev-parse --show-toplevel` failing while `git status` succeeded → `null`. Porcelain paths
+ *   are repo-root-relative, not cwd-relative; joining them against `cwd` instead silently produces
+ *   wrong (usually nonexistent) paths whenever the hook runs from a subdirectory, which reads as
+ *   permanent ENOENT rather than as the wrong-base bug it is. A resolvable root is required before
+ *   any entry is read — falling back to `cwd` would just reproduce the same bug more rarely.
+ * - Each status entry is dispatched by `fs.lstat` (not `stat` — a symlink must never be followed),
+ *   and the dispatch is total: every branch below emits either a kind marker or the regular-file
+ *   length prefix, never silently falling through to another branch's encoding.
+ *   - `ENOENT` → path + status code + the `"ABSENT"` marker. This covers both a real deletion
+ *     (no on-disk content to read, by definition) and a delete-between-status-and-read race
+ *     identically: either way the fingerprint describes the tree as it is right now. There is no
+ *     `D`-status special case — an unmerged delete/modify conflict (`UD`/`DU`) is a single status
+ *     entry with full working-tree content (the file a session edits to resolve the conflict), and
+ *     `lstat` naturally falls through to the regular-file branch for it.
+ *   - Any other `lstat` failure (permissions, etc.) → `null`.
+ *   - A symlink → path + status code + the `"SYMLINK"` marker + the `readlink` target string,
+ *     never the link's followed content. Not following means a dangling target is no longer a read
+ *     failure, a retargeted link still moves the hash (the target string changes), and the hook
+ *     can never be made to read file content outside the repo by a symlink planted inside it.
+ *   - A directory → path + status code + the `"DIR"` marker, nothing else. Porcelain reports a
+ *     dirty submodule and an untracked embedded repo identically as a single directory-path entry;
+ *     git itself collapses their inner content the same way in `git status`, so this is inherited
+ *     blindness, not a gap introduced here — content changes inside such an entry are invisible to
+ *     the fingerprint exactly as they're invisible to `diffStat`'s numstat.
+ *   - Anything else non-regular (FIFO, socket, block/character device — gated on `st.isFile()`,
+ *     not inferred from having failed the earlier checks) → path + status code + the `"SPECIAL"`
+ *     marker. Streaming is reached only through an explicit `isFile()` branch, never as an
+ *     implicit fallback: a tracked file replaced by a FIFO used to fall through to
+ *     `createReadStream`, which blocks forever with no writer on the other end, hanging the hook
+ *     until the harness kills it at timeout — a stall and a silent fail-open, not a fingerprint
+ *     defect. `"SPECIAL"` rather than `null` because a special file sitting in the tree is a
+ *     persistent state (the same reasoning as the dangling-symlink fix): `null` would leave the
+ *     fingerprint permanently unknown for as long as the file stays that kind, where the marker
+ *     keeps it moving as the kind changes. One marker covers every non-regular, non-symlink,
+ *     non-directory kind — which specific special kind sits at a path is not a state worth
+ *     distinguishing.
+ *   - A regular file → path + status code + byte length + content, streamed through the hash
+ *     (`createReadStream`, not a buffered `readFile`) so memory use stays bounded regardless of
+ *     file size. A read error mid-stream → `null`.
+ *   Kind markers (`"ABSENT"`, `"SYMLINK"`, `"DIR"`, `"SPECIAL"`) are non-numeric and
+ *   NUL-terminated, so no marker can be read as a regular file's numeric length prefix and no two
+ *   markers can collide with each other — every branch's encoding is prefix-free by construction.
+ *
+ * `git rev-parse --verify HEAD` failing *while `git status` succeeded* is treated as a genuinely
+ * unborn HEAD (the `"NOHEAD"` sentinel), not as unknown — status succeeding proves a working repo,
+ * so rev-parse failing in a working repo means there's no HEAD to resolve, not that something went
+ * wrong. A transient split between the two calls (status succeeds, HEAD resolves a moment later)
+ * would make the fingerprint read as "differs" against a real recorded hash, which is the
+ * conservative direction: it can cause an extra block, never a falsely-certified stale verdict.
+ *
+ * Split out from diffStat (which returns counts only, and keeps its own `baseline`-relative
+ * behaviour and degrade-to-zero-on-failure contract untouched) because this is the expensive half:
+ * it reads every dirty/untracked file's full current contents, where diffStat's counts already
+ * serve the common case (a trivial diff that returns at verify-gate's early allow, or a Stop where
+ * no verifier verdict was even parsed in telemetry) far more cheaply. Callers invoke this only
+ * after establishing they actually need a fingerprint.
  */
-export async function diffFingerprint(cwd: string, baseline?: string | null): Promise<string | null> {
-  const target = baseline ? baseline : "HEAD";
-  const hash = createHash("sha256");
-
-  let noUsableDiff = false;
-  let hashUnknown = false;
+export async function diffFingerprint(cwd: string): Promise<string | null> {
+  let statusOut: string;
   try {
-    // A cheap call first (small output even on a huge diff) just to distinguish "no usable
-    // committed diff" (no commits yet / not a git repo — a real, deterministic hash of nothing)
-    // from a genuine fetch failure on the full patch text below (most likely maxBuffer on a very
-    // large diff — hash must become null, not silently hash nothing).
-    await trackedDiff(cwd, target, ["--numstat"]);
+    const { stdout } = await execFileAsync(
+      "git",
+      ["status", "--porcelain", "-z", "--no-renames", "--untracked-files=all"],
+      { cwd, maxBuffer: MAX_GIT_BUFFER },
+    );
+    statusOut = stdout;
   } catch {
-    // The probe itself failed. That's ambiguous on its own — it must not be assumed to mean "no
-    // usable committed diff" (which is only true when there's structurally nothing to diff: not a
-    // git repo, or a repo with no commits yet) — a probe failure for some other reason (corrupt
-    // repo state, a transient git failure) could be hiding a real diff, and falling through to the
-    // deterministic empty-patch hash below would be exactly the "unknown masquerading as
-    // unchanged" bug this function exists to prevent. Disambiguate with an independent, cheap
-    // check: if HEAD itself doesn't resolve, there's genuinely nothing to diff and the
-    // deterministic hash is correct; if HEAD resolves fine, something else made the probe fail and
-    // the fingerprint must become null instead.
-    try {
-      await execFileAsync("git", ["rev-parse", "--verify", "HEAD"], { cwd });
-      hashUnknown = true;
-    } catch {
-      noUsableDiff = true;
-    }
+    return null;
   }
 
-  if (!noUsableDiff) {
-    try {
-      hash.update(await trackedDiff(cwd, target, []));
-    } catch {
-      hashUnknown = true;
-    }
+  // Consulted only after `status` has already proven this is a working repo — see the doc
+  // comment above for why a rev-parse failure at this point means "unborn HEAD," not "unknown."
+  let head: string;
+  try {
+    const { stdout } = await execFileAsync("git", ["rev-parse", "--verify", "HEAD"], { cwd });
+    head = stdout.trim();
+  } catch {
+    head = "NOHEAD";
   }
 
-  if (!hashUnknown) {
-    for (const path of [...(await listUntracked(cwd))].sort()) {
-      let contents: Buffer | null = null;
-      try {
-        contents = await readFile(join(cwd, path));
-      } catch {
-        // Unreadable file (race, permissions, binary) — contributes its path only.
-      }
-      // NUL can't appear in a path, so it's a safe delimiter; the content length prefix plus a
-      // second delimiter makes the path/content boundary unambiguous even when one path is a
-      // prefix of another path's content (e.g. path "afile" + content "b" vs path "afileb" +
-      // content "" previously hashed identically with no delimiter at all). Bytes, not a utf8
-      // decode: decoding first would collapse invalid byte sequences to U+FFFD and hash the
-      // *decoded* length, making distinct binary contents collide.
-      hash.update(path);
-      hash.update("\0");
-      if (contents !== null) {
-        hash.update(String(contents.length));
+  // Porcelain paths are repo-root-relative, not cwd-relative — resolved once here rather than
+  // joined against `cwd` below. See the doc comment above for why a failure here is `null`, not a
+  // silent fallback to `cwd`.
+  let root: string;
+  try {
+    const { stdout } = await execFileAsync("git", ["rev-parse", "--show-toplevel"], {
+      cwd,
+      maxBuffer: MAX_GIT_BUFFER,
+    });
+    root = stdout.trim();
+  } catch {
+    return null;
+  }
+
+  const entries = parseStatusZ(statusOut).sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+
+  const hash = createHash("sha256");
+  hash.update(head);
+  hash.update("\0");
+
+  for (const { path, statusCode } of entries) {
+    hash.update(path);
+    hash.update("\0");
+    hash.update(statusCode);
+    hash.update("\0");
+
+    const fullPath = join(root, path);
+
+    // lstat, never stat: a symlink must be inspected as itself, not followed, so its branch below
+    // can decide what "not following" means rather than transparently reading through it.
+    let st;
+    try {
+      st = await lstat(fullPath);
+    } catch (err) {
+      // ENOENT covers a real deletion (no on-disk content by definition) and a race where the
+      // path vanished between the status call and this lstat identically — either way, the
+      // fingerprint describes the tree as it is right now. "ABSENT" makes the entry's boundary
+      // explicit in the byte stream (see the kind-marker note below the regular-file branch) —
+      // without it, an ENOENT entry's bytes are just "path\0code\0", indistinguishable from a
+      // prefix of any other branch's encoding. Any other lstat failure (permissions, etc.) is
+      // genuinely unknown and must not be silently omitted from the hash.
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        hash.update("ABSENT");
         hash.update("\0");
-        hash.update(contents);
+        continue;
       }
+      return null;
+    }
+
+    if (st.isSymbolicLink()) {
+      // Never follow: a dangling target stops being a read failure, a retargeted link still moves
+      // the hash (the target string changes), and content outside the repo can never be read
+      // through a symlink planted inside it. "SYMLINK" is non-numeric, so it can't collide with a
+      // regular file's numeric length prefix below; NUL-terminated like every other field, and
+      // safe as a terminator because a symlink target — like a path — can't itself contain NUL.
+      let target: string;
+      try {
+        target = await readlink(fullPath);
+      } catch {
+        return null;
+      }
+      hash.update("SYMLINK");
+      hash.update("\0");
+      hash.update(target);
+      hash.update("\0");
+      continue;
+    }
+
+    if (st.isDirectory()) {
+      // A dirty submodule and an untracked embedded repo both surface in porcelain status as a
+      // single directory-path entry — git itself collapses their inner content the same way, so
+      // this is inherited blindness (see the function doc comment), not a gap introduced here.
+      // Path + status code (already hashed above) is all there is to say about the entry.
+      hash.update("DIR");
+      hash.update("\0");
+      continue;
+    }
+
+    if (!st.isFile()) {
+      // Everything that isn't a symlink, a directory, or a regular file: FIFO, socket, block or
+      // character device. A tracked file replaced with a FIFO (`mkfifo` over an existing path,
+      // reported by porcelain as an ordinary modification) used to fall through to the streaming
+      // branch below unconditionally — createReadStream blocks forever on a FIFO with no writer,
+      // hanging the Stop hook until Claude Code kills it at timeout, which then treats the
+      // timed-out hook as non-blocking: a session stall plus a silent fail-open with no log line.
+      // Making the dispatch total on `st.isFile()` closes that off structurally rather than by
+      // special-casing FIFOs: streaming only ever happens under an explicit "this is a regular
+      // file" check. "SPECIAL" is not `null` — a special file sitting in the tree is a persistent
+      // state, not a transient failure, and `null` would leave the fingerprint permanently unknown
+      // for as long as it exists (the same degradation round 6 fixed for dangling symlinks). The
+      // marker still moves the hash when a file becomes a FIFO and back, which is the sensitivity
+      // wanted. One marker covers every non-regular kind; distinguishing a FIFO from a socket at
+      // the same path is not a state worth engineering for.
+      hash.update("SPECIAL");
+      hash.update("\0");
+      continue;
+    }
+
+    // Regular file: streamed through the hash rather than buffered via readFile, so memory use
+    // stays bounded regardless of file size. The length prefix (from the lstat already taken —
+    // not a symlink, so its size is the real file size) plus its own delimiter make the
+    // path/content boundary unambiguous even when one path is a prefix of another path's content
+    // (e.g. path "afile" + content "b" vs path "afileb" + content "" would otherwise hash
+    // identically). Bytes, not a utf8 decode: decoding first would collapse invalid byte
+    // sequences to U+FFFD and hash the *decoded* length, making distinct binary contents collide.
+    hash.update(String(st.size));
+    hash.update("\0");
+    try {
+      for await (const chunk of createReadStream(fullPath)) {
+        hash.update(chunk as Buffer);
+      }
+    } catch {
+      return null;
     }
   }
 
-  return hashUnknown ? null : hash.digest("hex");
+  return hash.digest("hex");
 }
