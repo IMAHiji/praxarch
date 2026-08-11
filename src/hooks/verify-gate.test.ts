@@ -391,6 +391,10 @@ test("counter is reset to 0 after a waiver allows a non-trivial diff", async () 
     }) as { decision?: string };
     assert.equal(first.decision, undefined);
 
+    // The waiver covers the diff it was granted against, so move the tree before asserting that a
+    // genuine block still fires — otherwise this would be testing waiver stickiness, not the
+    // counter reset it exists to cover.
+    await writeFile(join(fixture.repo, "more.txt"), "new work\n".repeat(100));
     const second = run(fixture, {
       session_id: "s1",
       cwd: fixture.repo,
@@ -398,6 +402,85 @@ test("counter is reset to 0 after a waiver allows a non-trivial diff", async () 
       stop_hook_active: true,
     }) as { decision?: string };
     assert.equal(second.decision, "block");
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+// --- Waiver stickiness --------------------------------------------------------------------------
+//
+// The gate measures the session's cumulative diff against baselineHead, so a waiver that only
+// allowed a single stop re-blocked on every later stop for the rest of the session — including
+// turns that changed nothing, and including turns whose work was already committed and pushed. A
+// waiver now stands until the diff it was granted against actually moves.
+
+test("a waiver still stands on a later stop when the diff has not moved", async () => {
+  const fixture = await setupFixture();
+  try {
+    await makeNonTrivialDiff(fixture.repo);
+    const first = run(fixture, {
+      session_id: "s1",
+      cwd: fixture.repo,
+      hook_event_name: "Stop",
+      last_assistant_message: "PRAXARCH_VERIFY_WAIVED: docs only",
+    }) as { decision?: string };
+    assert.equal(first.decision, undefined);
+
+    // No waiver in this message, and nothing changed in the tree.
+    const second = run(fixture, {
+      session_id: "s1",
+      cwd: fixture.repo,
+      hook_event_name: "Stop",
+      last_assistant_message: "Both PRs are open and green.",
+    }) as { decision?: string };
+    assert.equal(second.decision, undefined);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("a waiver stops applying once the diff moves", async () => {
+  const fixture = await setupFixture();
+  try {
+    await makeNonTrivialDiff(fixture.repo);
+    run(fixture, {
+      session_id: "s1",
+      cwd: fixture.repo,
+      hook_event_name: "Stop",
+      last_assistant_message: "PRAXARCH_VERIFY_WAIVED: docs only",
+    });
+
+    await writeFile(join(fixture.repo, "more.txt"), "unverified new work\n".repeat(100));
+    const after = run(fixture, {
+      session_id: "s1",
+      cwd: fixture.repo,
+      hook_event_name: "Stop",
+      last_assistant_message: "Done.",
+    }) as { decision?: string };
+    assert.equal(after.decision, "block");
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("a waiver granted in one session does not leak into another", async () => {
+  const fixture = await setupFixture();
+  try {
+    await makeNonTrivialDiff(fixture.repo);
+    run(fixture, {
+      session_id: "s1",
+      cwd: fixture.repo,
+      hook_event_name: "Stop",
+      last_assistant_message: "PRAXARCH_VERIFY_WAIVED: docs only",
+    });
+
+    const other = run(fixture, {
+      session_id: "s2",
+      cwd: fixture.repo,
+      hook_event_name: "Stop",
+      last_assistant_message: "Done.",
+    }) as { decision?: string };
+    assert.equal(other.decision, "block");
   } finally {
     await teardownFixture(fixture);
   }

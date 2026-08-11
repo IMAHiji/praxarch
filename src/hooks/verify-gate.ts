@@ -98,7 +98,19 @@ async function main(): Promise<void> {
 
   const waiverMatch = input.last_assistant_message ? WAIVER_PATTERN.exec(input.last_assistant_message) : null;
   if (waiverMatch) {
-    await clearBlockCounters(state);
+    // Remember which diff was waived. The gate measures the session's whole diff against
+    // baselineHead, so a waiver that only allowed this one stop would re-block on every later
+    // stop — including turns that changed nothing, because the cumulative diff hasn't shrunk.
+    // A null fingerprint is deliberately not stored: an unhashable diff would otherwise be
+    // waived forever, since the "has it moved?" test below could never disprove it.
+    const waivedHash = await diffFingerprint(input.cwd);
+    if (waivedHash !== null) state.verifyGateWaivedHash = waivedHash;
+    // Written unconditionally rather than via clearBlockCounters, which skips the write when no
+    // counter was set — that would drop the waiver on a first-round stop, the common case.
+    state.verifyGateConsecutiveBlocks = 0;
+    state.verifyGateBlockHash = null;
+    state.verifyGateCycleBlocks = 0;
+    await writeSessionState(state);
     emit(allow());
     return;
   }
@@ -119,6 +131,18 @@ async function main(): Promise<void> {
   // never needs a fingerprint — diffFingerprint reads every dirty/untracked file's full current
   // contents, where diffStat's counts above are cheap by comparison.
   const currentHash = await diffFingerprint(input.cwd);
+
+  // A waiver stands until the work moves. Without this the gate re-blocks on every stop for the
+  // rest of the session, because it measures the cumulative diff against baselineHead — so even a
+  // turn that changed nothing still presents the same non-trivial diff and gets blocked again.
+  // An unknown current hash never matches (diffFingerprint returns null, and the stored value is
+  // never null), so an unhashable diff falls through to normal enforcement rather than riding a
+  // stale waiver.
+  if (currentHash !== null && state.verifyGateWaivedHash === currentHash) {
+    await clearBlockCounters(state);
+    emit(allow(warnings));
+    return;
+  }
 
   const verifier = state.lastVerifier;
 
