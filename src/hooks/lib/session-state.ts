@@ -53,6 +53,15 @@ export interface SessionState {
    * cwd wasn't a git repo (or had no commits yet) at session start.
    */
   baselineHead?: string | null;
+  /**
+   * Diff fingerprint at the moment a `PRAXARCH_VERIFY_WAIVED:` waiver was accepted. The gate
+   * measures the whole session's diff against `baselineHead`, so without this a waived diff
+   * re-blocks on every subsequent stop — including turns that changed nothing at all, since the
+   * cumulative diff is still there. Holding the fingerprint lets the waiver stand until the work
+   * actually moves; the moment the diff differs, the waiver no longer applies and the gate blocks
+   * again on its own. Never set to null: an unhashable diff must not become permanently waived.
+   */
+  verifyGateWaivedHash?: string;
 }
 
 function emptyState(sessionId: string): SessionState {
