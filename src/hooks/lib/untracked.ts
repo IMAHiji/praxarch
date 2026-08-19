@@ -140,7 +140,13 @@ export async function repoRoot(cwd: string): Promise<string | null> {
       cwd,
       maxBuffer: MAX_GIT_BUFFER,
     });
-    return stdout.trim();
+    // Strips only git's single terminating newline, not `.trim()`'s arbitrary trailing
+    // whitespace: a repo whose directory name itself ends in a space (or other whitespace) would
+    // otherwise come back truncated to a path that doesn't exist. readUntrackedEntry then builds
+    // every Buffer path against that wrong root, lstat ENOENTs on all of them, and every
+    // untracked entry reads as the fixed self-matching `{key: "a:", readable: true}` — the exact
+    // defect this module exists to close, reached through the root instead of a leaf.
+    return stdout.replace(/\r?\n$/, "");
   } catch {
     return null;
   }

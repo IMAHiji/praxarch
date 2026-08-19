@@ -147,6 +147,42 @@ test("repoRoot resolves the toplevel for a real repo and is null outside one", a
   }
 });
 
+test("repoRoot preserves a trailing space in the repo's own directory name (not stripped like .trim() would)", async () => {
+  // `.trim()` strips every kind of trailing whitespace, not just git's single terminating
+  // newline -- a repo whose own directory name ends in a space comes back truncated to a path
+  // that doesn't exist. readUntrackedEntry then builds every Buffer path against that wrong root,
+  // lstat ENOENTs on all of them, and every untracked entry reads as the fixed self-matching
+  // `{key: "a:", readable: true}` -- the exact defect this module exists to close, reached
+  // through the root instead of a leaf.
+  const parent = await mkdtemp(join(tmpdir(), "praxarch-untracked-trim-"));
+  const repo = join(parent, "dirspace ");
+  try {
+    await mkdir(repo);
+    execFileSync("git", ["init", "-q"], { cwd: repo });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: repo });
+    await writeFile(join(repo, "file.txt"), "line\n".repeat(400));
+
+    const root = await repoRoot(repo);
+    assert.notEqual(root, null);
+    assert.ok(
+      root?.endsWith("dirspace "),
+      `expected repoRoot to preserve the trailing space in the directory name, got: ${JSON.stringify(root)}`,
+    );
+
+    const paths = await listUntrackedPaths(repo);
+    assert.notEqual(paths, null);
+    const found = (paths ?? []).find((p) => p.path === "file.txt");
+    assert.ok(found, `expected "file.txt" in the listing, got: ${JSON.stringify(paths)}`);
+
+    const entry = await readUntrackedEntry(root as string, found.raw);
+    assert.equal(entry.readable, true);
+    assert.equal(entry.lines, 400, "a repo root ending in whitespace must not be truncated to a nonexistent path");
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
 test("readUntrackedEntry on a symlink to an out-of-repo file never follows it: key starts with l:, lines is 0", async () => {
   // The security-relevant case: an untracked symlink pointing outside the repo must never have
   // its target's content read into the count. A 50-line file outside the repo, followed, would
