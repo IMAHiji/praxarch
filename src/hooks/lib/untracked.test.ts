@@ -1,10 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { getMkfifoProbe as GetMkfifoProbe } from "./fixtures/mkfifo-probe.js";
 // Imports the compiled output, not the sibling .ts source — same convention as git-diff.test.ts
 // (see the comment there): tests resolve modules the way Node does at runtime. Written against the
 // current `main` dist-path convention deliberately, per the plan's note on the in-flight
@@ -15,6 +16,70 @@ const here = dirname(fileURLToPath(import.meta.url));
 const { listUntrackedPaths, readUntrackedEntry, repoRoot } = (await import(
   join(here, "..", "..", "..", "dist", "hooks", "lib", "untracked.js")
 )) as typeof import("./untracked.js");
+// Same dist-path convention as above (this is test infra, not product code, and a bare
+// "./fixtures/mkfifo-probe.ts" specifier fails tsc (TS5097) since this project emits).
+const { getMkfifoProbe } = (await import(
+  join(here, "..", "..", "..", "dist", "hooks", "lib", "fixtures", "mkfifo-probe.js")
+)) as { getMkfifoProbe: typeof GetMkfifoProbe };
+
+// See git-diff.test.ts's matching comment for the full rationale -- `which mkfifo` only proves the
+// binary is on PATH, not that mkfifo(2) actually works in this sandbox.
+const mkfifoProbeResult = await getMkfifoProbe();
+const hasMkfifo = mkfifoProbeResult.ok;
+const mkfifoSkipReason = mkfifoProbeResult.reason ?? "mkfifo not available on this platform";
+const untrackedFifoRunnerPath = join(
+  here,
+  "..",
+  "..",
+  "..",
+  "dist",
+  "hooks",
+  "lib",
+  "fixtures",
+  "untracked-fifo-runner.js",
+);
+
+interface UntrackedFifoRunnerResult {
+  entry: { key: string; lines: number; readable: boolean };
+}
+
+// Reusable deadline-bound child-process runner -- see git-diff.test.ts's matching helper for the
+// full rationale (a regression that made the FIFO branch fall through to createReadStream would
+// hang in libuv's threadpool, unreachable by node:test's own per-test timeout).
+async function runWithDeadline(
+  scriptPath: string,
+  deadlineMs: number,
+  deadlineMessage: string,
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [scriptPath], { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, deadlineMs);
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (timedOut) {
+        reject(new Error(`${deadlineMessage} (deadline ${deadlineMs}ms exceeded; stdout so far: ${stdout || "<empty>"})`));
+        return;
+      }
+      resolve({ code, stdout, stderr });
+    });
+  });
+}
 
 async function makeRepo(): Promise<string> {
   const repo = await mkdtemp(join(tmpdir(), "praxarch-untracked-repo-"));
@@ -180,3 +245,84 @@ test("readUntrackedEntry on a path that has vanished since listing (ENOENT) yiel
     await rm(repo, { recursive: true, force: true });
   }
 });
+
+// --- -z / quoting: non-ASCII and whitespace-only paths must round-trip exactly ------------------
+
+test("listUntrackedPaths returns a non-ASCII filename unquoted, and readUntrackedEntry reads it correctly (core.quotePath fail-case)", async () => {
+  // Without -z, core.quotePath's default of true makes git print a file named "naïve.md" as the
+  // *string* `"na\303\257ve.md"` -- a path that does not exist on disk. lstat on that string then
+  // ENOENTs, landing on the { key: "a:", readable: true } branch, which is a fixed key that
+  // matches itself on every future measurement: the real file would silently stop counting after
+  // its first appearance. This is the exact defect verified end-to-end (500-line file measured as
+  // 0/0) before the -z fix.
+  const repo = await makeRepo();
+  try {
+    const fileName = "naïve.md";
+    await writeFile(join(repo, fileName), "line\n".repeat(500));
+
+    const paths = await listUntrackedPaths(repo);
+    assert.notEqual(paths, null);
+    assert.ok(
+      (paths ?? []).includes(fileName),
+      `expected the exact on-disk name "${fileName}" in the listing (not a C-quoted string), got: ${JSON.stringify(paths)}`,
+    );
+
+    const entry = await readUntrackedEntry(repo, fileName);
+    assert.equal(entry.readable, true);
+    assert.ok(entry.key.startsWith("f:"), `expected a real "f:" content key, got: ${entry.key}`);
+    assert.equal(entry.lines, 500, "the file's real line count must be measured, not silently dropped to 0");
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test("listUntrackedPaths includes a whitespace-only filename (not discarded by the emptiness filter)", async () => {
+  // A path that is entirely whitespace is a real, on-disk untracked entry that git lists. Filtering
+  // on `.trim().length > 0` instead of raw `.length > 0` would silently discard it, the same
+  // direction of defect as the quoting bug above, caught by the same fix (a raw-length filter on
+  // NUL-split entries).
+  const repo = await makeRepo();
+  try {
+    execFileSync("touch", [" "], { cwd: repo });
+
+    const paths = await listUntrackedPaths(repo);
+    assert.notEqual(paths, null);
+    assert.ok(
+      (paths ?? []).includes(" "),
+      `expected the whitespace-only filename " " in the listing, got: ${JSON.stringify(paths)}`,
+    );
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test(
+  "readUntrackedEntry on a FIFO reads as key s:, lines 0, readable: true -- never opening it",
+  { skip: hasMkfifo ? false : mkfifoSkipReason },
+  async () => {
+    // Coverage for the !st.isFile() branch, which the whole "a FIFO can never reach
+    // createReadStream" argument rests on and which nothing else in this file exercises. Run in a
+    // spawned, deadline-bound child per this file's FIFO-test convention (see the runWithDeadline
+    // helper above): the branch never opens the FIFO today, but a regression that made it fall
+    // through to the streaming path would hang in libuv's threadpool where node:test's own
+    // per-test timeout cannot reach it.
+    const { code, stdout, stderr } = await runWithDeadline(
+      untrackedFifoRunnerPath,
+      15_000,
+      "readUntrackedEntry hung on a FIFO: the !st.isFile() dispatch gate has likely regressed",
+    );
+    assert.equal(code, 0, `runner exited non-zero (code ${code}); stderr: ${stderr}`);
+
+    const lastLine = stdout.trim().split("\n").pop() ?? "";
+    let result: UntrackedFifoRunnerResult;
+    try {
+      result = JSON.parse(lastLine) as UntrackedFifoRunnerResult;
+    } catch {
+      assert.fail(`runner did not print parseable JSON; stdout: ${stdout || "<empty>"}, stderr: ${stderr}`);
+    }
+
+    assert.equal(result.entry.key, "s:");
+    assert.equal(result.entry.lines, 0);
+    assert.equal(result.entry.readable, true);
+  },
+);

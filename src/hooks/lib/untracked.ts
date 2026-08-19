@@ -7,11 +7,12 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-// Shared with git-diff.ts (which imports this constant rather than re-declaring it — one
-// definition, not two). See git-diff.ts's own comment on this value for the full rationale: git
-// output here is untracked-path listings and `rev-parse` output, not patch text, so hitting this
-// ceiling is pathological and pathological means the caller must treat the listing as unknown
-// (`null`), never silently truncated.
+// Exported so a later change can have git-diff.ts import this constant instead of re-declaring
+// its own (one definition, not two) — git-diff.ts still declares it separately today. See
+// git-diff.ts's own comment on this value for the full rationale: git output here is
+// untracked-path listings and `rev-parse` output, not patch text, so hitting this ceiling is
+// pathological and pathological means the caller must treat the listing as unknown (`null`),
+// never silently truncated.
 export const MAX_GIT_BUFFER = 64 * 1024 * 1024;
 
 // Counts 0x0A bytes directly rather than decoding to a string first — a buffer read must not be
@@ -34,6 +35,15 @@ export function countNewlines(buf: Buffer): number {
  * disagree with `diffFingerprint`'s whole-repo, root-relative `git status` output on the exact
  * path strings a SessionStart snapshot and a Stop-time measurement need to key on identically.
  *
+ * `-z` (NUL-terminated, unquoted output) is required, not cosmetic: `core.quotePath` defaults to
+ * true, so without it git C-quotes any path containing a non-ASCII byte, `"`, `\`, a tab, or a
+ * newline — e.g. `naïve.md` prints as the *string* `"na\303\257ve.md"`, a path that does not exist
+ * on disk. `readUntrackedEntry` would then `lstat` a nonexistent path, land on the ENOENT branch,
+ * and report `{key: "a:", readable: true}` — a fixed key that matches itself on every subsequent
+ * measurement, so the real file silently never counts again. `-z` returns the exact on-disk bytes
+ * with no quoting, which is also why splitting on `\0` (not `\n`) is required below: a quoted
+ * path could itself have contained a literal `\n`.
+ *
  * `null` means the listing could not be fetched — never an empty list. A swallowed listing
  * failure read as "no untracked files" would hide every new file in the tree from the count; that
  * silent under-count is precisely what the `null` contract exists to prevent, so a failure here
@@ -43,14 +53,17 @@ export async function listUntrackedPaths(cwd: string): Promise<string[] | null> 
   try {
     const { stdout } = await execFileAsync(
       "git",
-      ["ls-files", "--others", "--exclude-standard", "--full-name", "--", ":/"],
+      ["ls-files", "--others", "--exclude-standard", "--full-name", "-z", "--", ":/"],
       { cwd, maxBuffer: MAX_GIT_BUFFER },
     );
     // Entries for an embedded repo / nested worktree arrive with a trailing slash (e.g.
     // "nested/"). That's kept verbatim — it's the exact string `readUntrackedEntry` is called
     // with, the exact string a baseline snapshot keys on, and the exact string `ignorePatterns`
-    // matches against, so trimming it here would silently disagree with all three.
-    return stdout.split("\n").filter((line) => line.trim().length > 0);
+    // matches against, so trimming it here would silently disagree with all three. Filtered on
+    // raw length, not `.trim().length` — a path that is entirely whitespace (`touch ' '`) is a
+    // real, git-tracked-as-untracked entry, and trimming it to empty would silently drop it from
+    // the listing the same way an un-quoted-path bug would.
+    return stdout.split("\0").filter((entry) => entry.length > 0);
   } catch {
     return null;
   }
@@ -101,8 +114,15 @@ export interface UntrackedEntry {
  * `readFile` forever with no writer on the other end — a hung Stop hook, which the harness then
  * kills at timeout and treats as non-blocking: a silent fail-open on the enforcement gate. Never
  * following the link, and recording only its target string, makes both of those structurally
- * unreachable rather than merely unlikely: nothing in this function ever opens what a symlink
- * points at, so it does not matter what kind of thing that is.
+ * unreachable for `relPath`'s final path component: this function never opens what the leaf
+ * itself points at, so it does not matter what kind of thing that leaf is. `lstat`/`readlink`
+ * still resolve *intermediate* path components normally (that's POSIX path resolution, not a
+ * choice this function makes) — a `relPath` like `"outdir/secret.txt"` where `outdir` is a
+ * symlinked directory would read through that intermediate link. The intended caller cannot reach
+ * that shape: `git ls-files` never descends into a symlinked directory, so `listUntrackedPaths`
+ * only ever hands this function directory-shaped entries as a single opaque leaf (see the `d:`
+ * branch below). `relPath` values must come from `listUntrackedPaths` in the same measurement for
+ * that guarantee to hold — this function does not itself validate that precondition.
  *
  * The regular-file branch is what makes that hold up under the streaming path too: `lstat` proves
  * a path is a regular file *before* `createReadStream` is ever called on it, so a FIFO can only
