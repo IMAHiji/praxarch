@@ -1,11 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { execFileSync, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { getMkfifoProbe as GetMkfifoProbe } from "./fixtures/mkfifo-probe.js";
+import type {
+  getNonUtf8FilenameProbe as GetNonUtf8FilenameProbe,
+  nonUtf8FilenameBytes as NonUtf8FilenameBytes,
+} from "./fixtures/non-utf8-filename-probe.js";
 // Imports the compiled output, not the sibling .ts source — same convention as git-diff.test.ts
 // (see the comment there): tests resolve modules the way Node does at runtime. Written against the
 // current `main` dist-path convention deliberately, per the plan's note on the in-flight
@@ -21,12 +25,22 @@ const { listUntrackedPaths, readUntrackedEntry, repoRoot } = (await import(
 const { getMkfifoProbe } = (await import(
   join(here, "..", "..", "..", "dist", "hooks", "lib", "fixtures", "mkfifo-probe.js")
 )) as { getMkfifoProbe: typeof GetMkfifoProbe };
+const { getNonUtf8FilenameProbe, nonUtf8FilenameBytes } = (await import(
+  join(here, "..", "..", "..", "dist", "hooks", "lib", "fixtures", "non-utf8-filename-probe.js")
+)) as { getNonUtf8FilenameProbe: typeof GetNonUtf8FilenameProbe; nonUtf8FilenameBytes: typeof NonUtf8FilenameBytes };
 
 // See git-diff.test.ts's matching comment for the full rationale -- `which mkfifo` only proves the
 // binary is on PATH, not that mkfifo(2) actually works in this sandbox.
 const mkfifoProbeResult = await getMkfifoProbe();
 const hasMkfifo = mkfifoProbeResult.ok;
 const mkfifoSkipReason = mkfifoProbeResult.reason ?? "mkfifo not available on this platform";
+
+// APFS (macOS) rejects a filename containing invalid-UTF-8 bytes outright (EILSEQ); ext4/xfs
+// (Linux, including GitLab CI) permit it. This is the exact asymmetry that let the Node-decode
+// bypass ship invisibly from local development -- see the non-UTF-8 filename test below.
+const nonUtf8ProbeResult = await getNonUtf8FilenameProbe();
+const hasNonUtf8Filenames = nonUtf8ProbeResult.ok;
+const nonUtf8SkipReason = nonUtf8ProbeResult.reason ?? "non-UTF-8 filenames not supported on this filesystem";
 const untrackedFifoRunnerPath = join(
   here,
   "..",
@@ -324,5 +338,55 @@ test(
     assert.equal(result.entry.key, "s:");
     assert.equal(result.entry.lines, 0);
     assert.equal(result.entry.readable, true);
+  },
+);
+
+// --- Node's own execFile utf8-decode bypass (a second half of the -z quoting fix) ---------------
+
+test(
+  "a filename with invalid-UTF-8 bytes is never self-matching: always readable: false, so it always counts",
+  { skip: hasNonUtf8Filenames ? false : nonUtf8SkipReason },
+  async () => {
+    // Round 3's finding: -z stops GIT from quoting, but execFile's default utf8 decode still
+    // mangles a genuinely non-UTF-8 filename into U+FFFD before this module ever sees it -- the
+    // exact same self-matching "a:" bypass as the quoting bug, reached through Node's decoder
+    // instead of git's. Fixed by reading stdout as a raw buffer and round-tripping each entry
+    // individually; an entry that can't round-trip losslessly must come back readable: false
+    // (never snapshotted, always counted), not a fixed "a:" key that matches itself forever.
+    const repo = await makeRepo();
+    try {
+      const nameBytes = nonUtf8FilenameBytes();
+      const filePath = Buffer.concat([Buffer.from(`${repo}/`), nameBytes]);
+      await writeFile(filePath, "line\n".repeat(250));
+
+      const paths = await listUntrackedPaths(repo);
+      assert.notEqual(paths, null);
+      assert.equal((paths ?? []).length, 1, `expected exactly one untracked entry, got: ${JSON.stringify(paths)}`);
+      const listedPath = (paths as string[])[0] as string;
+
+      const t0 = await readUntrackedEntry(repo, listedPath);
+      assert.equal(t0.readable, false, "an unrepresentable path must never be marked readable (never snapshottable)");
+
+      await appendFile(filePath, "line\n".repeat(250));
+
+      // Re-measure exactly as diffStat's loop would: re-list, then re-read at the (possibly
+      // re-decoded) current path string.
+      const pathsAfter = await listUntrackedPaths(repo);
+      const listedPathAfter = ((pathsAfter ?? [])[0] ?? listedPath) as string;
+      const t1 = await readUntrackedEntry(repo, listedPathAfter);
+
+      // The bypass this test guards against was `readable: true` at both T0 and T1 with an
+      // identical fixed "a:" key -- Task 3's captureUntrackedBaseline would snapshot it, and the
+      // 250 new lines above would compare equal and contribute nothing. readable: false at T1
+      // (not just T0) is what proves it: the path is never cached into a baseline, so it has no
+      // way to self-match and keeps counting on every future measurement, unconditionally.
+      assert.equal(
+        t1.readable,
+        false,
+        "an unrepresentable path must stay unreadable after content changes too, or it could be snapshotted and then self-match",
+      );
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
   },
 );

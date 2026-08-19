@@ -27,6 +27,46 @@ export function countNewlines(buf: Buffer): number {
   return count;
 }
 
+// No real filename can contain a NUL byte -- POSIX forbids it in every filesystem git runs on --
+// so a leading NUL can never collide with a genuine git-printed path. Used below to mark an entry
+// whose raw bytes could not be represented as a lossless UTF-8 string, so `readUntrackedEntry` can
+// recognize it without attempting an fs call that would silently target the wrong bytes.
+const UNREPRESENTABLE_PREFIX = "\0raw:";
+
+// Splits on the raw 0x00 byte rather than decoding to a string and splitting on "\0" -- decoding
+// first is exactly the bug this module exists to close (see decodeUntrackedEntry below), so the
+// delimiter search itself must run on the untouched bytes.
+function splitOnNul(buf: Buffer): Buffer[] {
+  const entries: Buffer[] = [];
+  let start = 0;
+  for (let i = 0; i < buf.length; i++) {
+    if (buf[i] === 0x00) {
+      if (i > start) entries.push(buf.subarray(start, i));
+      start = i + 1;
+    }
+  }
+  if (start < buf.length) entries.push(buf.subarray(start));
+  return entries;
+}
+
+// Converts one raw path entry to a string, entry-by-entry rather than decoding the whole stdout
+// buffer at once -- so one malformed filename's replacement bytes can't shift where later NUL
+// delimiters appear to be. A JS string is UTF-16; a byte sequence that isn't valid UTF-8 cannot be
+// represented in one losslessly (Node's default decode replaces it with U+FFFD, and re-encoding
+// U+FFFD does not reproduce the original bytes). The round-trip check below is how that's
+// detected: decode, then re-encode, then compare against the original bytes. When it fails, the
+// entry is marked with UNREPRESENTABLE_PREFIX instead of returned as a path Node would then
+// silently mis-locate -- see readUntrackedEntry's handling of that prefix for why "give up
+// cleanly" (readable: false, always counts) is the fail-closed choice here, not an attempt to
+// reconstruct the real bytes through some other encoding.
+function decodeUntrackedEntry(bytes: Buffer): string {
+  const decoded = bytes.toString("utf8");
+  if (Buffer.from(decoded, "utf8").equals(bytes)) {
+    return decoded;
+  }
+  return `${UNREPRESENTABLE_PREFIX}${bytes.toString("base64")}`;
+}
+
 /**
  * Untracked paths, repo-root-relative, whole-repo regardless of which directory inside the repo
  * `cwd` is. `--full-name` plus the `:/` pathspec (rather than a bare `git ls-files --others
@@ -40,9 +80,18 @@ export function countNewlines(buf: Buffer): number {
  * newline — e.g. `naïve.md` prints as the *string* `"na\303\257ve.md"`, a path that does not exist
  * on disk. `readUntrackedEntry` would then `lstat` a nonexistent path, land on the ENOENT branch,
  * and report `{key: "a:", readable: true}` — a fixed key that matches itself on every subsequent
- * measurement, so the real file silently never counts again. `-z` returns the exact on-disk bytes
- * with no quoting, which is also why splitting on `\0` (not `\n`) is required below: a quoted
- * path could itself have contained a literal `\n`.
+ * measurement, so the real file silently never counts again.
+ *
+ * `-z` closes git's half of that (git itself never quotes with it), but not Node's: `execFile`'s
+ * default encoding decodes the child's entire stdout as UTF-8 text before this function ever sees
+ * it, and a filename containing bytes that are not valid UTF-8 (permitted by ext4/xfs on Linux;
+ * rejected outright by APFS on macOS, which is why this half is invisible in local development)
+ * gets silently replaced with U+FFFD by that decode — the same self-matching-`"a:"` bypass as the
+ * quoting bug above, reached through Node's decoding instead of git's. `encoding: "buffer"` below
+ * keeps `execFile` from decoding anything; `splitOnNul` finds delimiters on the raw bytes, and
+ * `decodeUntrackedEntry` converts each entry individually with a UTF-8 round-trip check, so a
+ * path that cannot be represented losslessly as a string is flagged (`UNREPRESENTABLE_PREFIX`)
+ * rather than silently corrupted.
  *
  * `null` means the listing could not be fetched — never an empty list. A swallowed listing
  * failure read as "no untracked files" would hide every new file in the tree from the count; that
@@ -54,16 +103,15 @@ export async function listUntrackedPaths(cwd: string): Promise<string[] | null> 
     const { stdout } = await execFileAsync(
       "git",
       ["ls-files", "--others", "--exclude-standard", "--full-name", "-z", "--", ":/"],
-      { cwd, maxBuffer: MAX_GIT_BUFFER },
+      { cwd, maxBuffer: MAX_GIT_BUFFER, encoding: "buffer" },
     );
     // Entries for an embedded repo / nested worktree arrive with a trailing slash (e.g.
     // "nested/"). That's kept verbatim — it's the exact string `readUntrackedEntry` is called
     // with, the exact string a baseline snapshot keys on, and the exact string `ignorePatterns`
-    // matches against, so trimming it here would silently disagree with all three. Filtered on
-    // raw length, not `.trim().length` — a path that is entirely whitespace (`touch ' '`) is a
-    // real, git-tracked-as-untracked entry, and trimming it to empty would silently drop it from
-    // the listing the same way an un-quoted-path bug would.
-    return stdout.split("\0").filter((entry) => entry.length > 0);
+    // matches against, so decoding or trimming it here would silently disagree with all three.
+    // `splitOnNul` already drops zero-length segments (a path that is entirely whitespace, e.g.
+    // `touch ' '`, is a real entry and survives this; only genuinely empty segments are dropped).
+    return splitOnNul(stdout).map(decodeUntrackedEntry);
   } catch {
     return null;
   }
@@ -131,6 +179,17 @@ export interface UntrackedEntry {
  * the exact hang this function exists to close, just moved one line later.
  */
 export async function readUntrackedEntry(root: string, relPath: string): Promise<UntrackedEntry> {
+  // A path flagged by listUntrackedPaths as unrepresentable (its raw bytes were not valid UTF-8,
+  // so this string is a base64 escape, not a real path — see UNREPRESENTABLE_PREFIX above). An fs
+  // call on it would UTF-8-encode the string back to bytes that don't match what's actually on
+  // disk, almost certainly ENOENT, landing on the "vanished" branch below and reading as
+  // `{key: "a:", readable: true}` — a fixed key that self-matches forever, making the real file
+  // invisible to every future measurement. Short-circuiting here instead means the entry is never
+  // snapshotted (`readable: false`) and always counts as a full file in the meantime.
+  if (relPath.startsWith(UNREPRESENTABLE_PREFIX)) {
+    return { key: "u:", lines: 0, readable: false };
+  }
+
   const fullPath = join(root, relPath);
 
   let st;
