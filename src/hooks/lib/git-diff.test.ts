@@ -5,8 +5,11 @@ import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import type { DiffCounts } from "./git-diff.js";
 import type { getMkfifoProbe as GetMkfifoProbe } from "./fixtures/mkfifo-probe.js";
+import type { getNonUtf8FilenameProbe as GetNonUtf8FilenameProbe } from "./fixtures/non-utf8-filename-probe.js";
+import type { getUnreadableFileProbe as GetUnreadableFileProbe } from "./fixtures/unreadable-file-probe.js";
 import { TEST_DIST_DIR } from "../../test-support/dist-dir.js";
 // Imports the compiled output, not the sibling .ts source — matches the convention in
 // config.test.ts (see the comment there): tests resolve modules the way Node does at runtime.
@@ -21,6 +24,12 @@ const { diffStat, diffFingerprint } = (await import(
 const { getMkfifoProbe } = (await import(
   join(TEST_DIST_DIR, "hooks", "lib", "fixtures", "mkfifo-probe.js")
 )) as { getMkfifoProbe: typeof GetMkfifoProbe };
+const { getNonUtf8FilenameProbe } = (await import(
+  join(TEST_DIST_DIR, "hooks", "lib", "fixtures", "non-utf8-filename-probe.js")
+)) as { getNonUtf8FilenameProbe: typeof GetNonUtf8FilenameProbe };
+const { getUnreadableFileProbe } = (await import(
+  join(TEST_DIST_DIR, "hooks", "lib", "fixtures", "unreadable-file-probe.js")
+)) as { getUnreadableFileProbe: typeof GetUnreadableFileProbe };
 
 // `diffStat` returns `DiffCounts | null` (null means "could not measure"). Every call site below
 // that expects a real measurement (a healthy repo, no simulated failure) routes through this so a
@@ -47,6 +56,23 @@ const mkfifoProbeResult = await getMkfifoProbe();
 const hasMkfifo = mkfifoProbeResult.ok;
 const mkfifoSkipReason = mkfifoProbeResult.reason ?? "mkfifo not available on this platform";
 
+// APFS (macOS) rejects a filename containing invalid-UTF-8 bytes outright (EILSEQ); ext4/xfs
+// (Linux, including GitLab CI) permit it -- see untracked.test.ts's matching comment. Used below
+// to prove diffStat's untracked loop never treats a null (unrepresentable) path as ignore-matched.
+const nonUtf8ProbeResult = await getNonUtf8FilenameProbe();
+const hasNonUtf8Filenames = nonUtf8ProbeResult.ok;
+const nonUtf8SkipReason = nonUtf8ProbeResult.reason ?? "non-UTF-8 filenames not supported on this filesystem";
+
+// `process.getuid() === 0` is the wrong guard here: CI can run test containers as root, and root
+// bypasses Unix permission bits outright, which is exactly the platform this test needs to prove
+// the unreadable-entry behavior on (a chmod-000 file under a non-root session process is the
+// reachable, non-root shape of this bug -- see fixtures/unreadable-file-probe.ts). Functional
+// probe, same pattern as hasMkfifo/hasNonUtf8Filenames above: actually chmod a throwaway file to
+// 0o000 and confirm a real read attempt was refused, rather than inferring it from uid.
+const unreadableProbeResult = await getUnreadableFileProbe();
+const hasUnreadablePermissions = unreadableProbeResult.ok;
+const unreadableSkipReason = unreadableProbeResult.reason ?? "chmod 0o000 does not block reads in this process";
+
 // The real-FIFO scenario runs in a spawned child rather than in-process: a regressed isFile()
 // gate makes createReadStream block forever on a writerless FIFO, and that block happens inside
 // libuv's threadpool where node:test can neither abort it nor finish reporting -- an in-process
@@ -56,6 +82,13 @@ const mkfifoSkipReason = mkfifoProbeResult.reason ?? "mkfifo not available on th
 const fifoRunnerPath = join(TEST_DIST_DIR, "hooks", "lib", "fixtures", "fifo-fingerprint-runner.js");
 const specialRunnerPath = join(TEST_DIST_DIR, "hooks", "lib", "fixtures", "special-fingerprint-runner.js");
 const diffStatFifoRunnerPath = join(TEST_DIST_DIR, "hooks", "lib", "fixtures", "diffstat-fifo-runner.js");
+const diffStatSymlinkFifoRunnerPath = join(
+  TEST_DIST_DIR,
+  "hooks",
+  "lib",
+  "fixtures",
+  "diffstat-symlink-fifo-runner.js",
+);
 
 interface FifoRunnerResult {
   before: string | null;
@@ -139,9 +172,13 @@ async function makeRepo(): Promise<string> {
 //   15k real files: the shim just emits a large synthetic blob for that one call.
 // - `"ls-files"` fails the untracked-file listing specifically, with `--numstat` passing through —
 //   diffStat's null contract for a failed listing inside an otherwise-successful measurement.
+// - `"show-toplevel"` fails `git rev-parse --show-toplevel` specifically, with `--numstat` and
+//   `ls-files` passing through — diffStat's null contract for a failed root resolution, so a
+//   `root ?? cwd` regression (silently measuring against the wrong base from a subdirectory
+//   instead of surfacing unknown) has something to fail against.
 async function makeFakeGitDir(
   logPath?: string,
-  failOn: "diff" | "numstat" | "status" | "oversizedStatus" | "ls-files" = "diff",
+  failOn: "diff" | "numstat" | "status" | "oversizedStatus" | "ls-files" | "show-toplevel" = "diff",
 ): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "praxarch-gitdiff-fakegit-"));
   // Resolve the real git's absolute path up front — the script below must never call "git" by
@@ -187,6 +224,15 @@ async function makeFakeGitDir(
           `  *) exec "${realGit}" "$@" ;;`,
           "esac",
         ];
+      case "show-toplevel":
+        return [
+          'case "$*" in',
+          `  *--numstat*) exec "${realGit}" "$@" ;;`,
+          `  *ls-files*) exec "${realGit}" "$@" ;;`,
+          `  *show-toplevel*) echo "fake git: show-toplevel failed" >&2; exit 1 ;;`,
+          `  *) exec "${realGit}" "$@" ;;`,
+          "esac",
+        ];
       case "diff":
       default:
         return [
@@ -208,7 +254,7 @@ async function makeFakeGitDir(
 async function withFakeGitOnPath<T>(
   fn: () => Promise<T>,
   logPath?: string,
-  failOn: "diff" | "numstat" | "status" | "oversizedStatus" | "ls-files" = "diff",
+  failOn: "diff" | "numstat" | "status" | "oversizedStatus" | "ls-files" | "show-toplevel" = "diff",
 ): Promise<T> {
   const fakeGitDir = await makeFakeGitDir(logPath, failOn);
   const prevPath = process.env["PATH"];
@@ -336,6 +382,36 @@ test("diffStat returns null when ls-files fails in a real repo, even though --nu
       },
       undefined,
       "ls-files",
+    );
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test("diffStat returns null when repoRoot fails (rev-parse --show-toplevel), not silently falling back to cwd", async () => {
+  // Guards against `const root = (await repoRoot(cwd)) ?? cwd;` -- a root-resolution failure must
+  // surface as unknown, never as a silent fallback to `cwd`. Run from a subdirectory so a fallback
+  // would be concretely wrong (not just coincidentally equal to the real root): under the bug,
+  // `listUntrackedPaths`' root-relative paths would be joined against the subdirectory instead,
+  // every entry would ENOENT to the fixed 1-file/0-line key, and the untracked half of the count
+  // would silently collapse rather than the whole measurement going null.
+  const repo = await makeRepo();
+  try {
+    const subdir = join(repo, "sub");
+    await mkdir(subdir);
+    await writeFile(join(repo, "untracked.txt"), "line\n".repeat(20));
+
+    await withFakeGitOnPath(
+      async () => {
+        const result = await diffStat(subdir, [], null);
+        assert.equal(
+          result,
+          null,
+          "a failed root resolution must null out the whole measurement, not silently measure from cwd",
+        );
+      },
+      undefined,
+      "show-toplevel",
     );
   } finally {
     await rm(repo, { recursive: true, force: true });
@@ -914,5 +990,353 @@ test("a file larger than a few MB hashes successfully through the streaming path
     assert.equal(typeof result, "string");
   } finally {
     await rm(repo, { recursive: true, force: true });
+  }
+});
+
+// --- Task 2: diffStat's untracked loop uses the kind dispatch (EISDIR, symlinks, hang, ignore-order) --
+
+test("diffStat measures a whole-repo, root-relative untracked file even when called from a subdirectory", async () => {
+  // The fail-open the plan's finding 1 describes: the old `git ls-files --others
+  // --exclude-standard` (no --full-name, no :/ pathspec) run from a subdirectory listed only that
+  // subtree, cwd-relative -- a file in a sibling directory silently never counted. Fails on the
+  // pre-fix loop: 0 files, 0 lines.
+  const repo = await makeRepo();
+  try {
+    await writeFile(join(repo, "root-untracked.txt"), "line\n".repeat(10));
+    const sub = join(repo, "sub");
+    await mkdir(sub);
+
+    const result = assertMeasured(await diffStat(sub, [], null));
+    assert.equal(result.changedFiles, 1, "expected the sibling-directory untracked file to be counted from a subdirectory cwd");
+    assert.equal(result.changedLines, 10);
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test("diffStat never follows an untracked symlink to an out-of-repo file: 1 file, 0 lines", async () => {
+  // The security-relevant defect: the old loop's readFile followed the symlink, reading an
+  // out-of-repo file's content into the count. Fails on the pre-fix loop: changedLines ~= 200.
+  const repo = await makeRepo();
+  const outside = await mkdtemp(join(tmpdir(), "praxarch-gitdiff-outside-"));
+  try {
+    const outsideFile = join(outside, "secret.txt");
+    await writeFile(outsideFile, "line\n".repeat(200));
+    await symlink(outsideFile, join(repo, "link-to-outside"));
+
+    const result = assertMeasured(await diffStat(repo, [], null));
+    assert.equal(result.changedFiles, 1);
+    assert.equal(result.changedLines, 0, "a symlink's followed target content must never be counted");
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test("diffStat measures an untracked embedded git repo as 1 file / 0 lines without throwing (EISDIR fix)", async () => {
+  // The old loop's readFile on a directory-shaped entry ("embedded/") threw EISDIR, which the
+  // catch swallowed into "unreadable" -- coincidentally landing on 1/0 today, but by an accident
+  // of error handling rather than a real dispatch. This proves the kind-dispatched path (the `d:`
+  // branch) reaches the same answer deliberately, and does not throw past diffStat's own try/catch
+  // boundaries doing it.
+  const repo = await makeRepo();
+  const embedded = join(repo, "embedded");
+  try {
+    await mkdir(embedded);
+    execFileSync("git", ["init", "-q"], { cwd: embedded });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: embedded });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: embedded });
+    await writeFile(join(embedded, "inner.txt"), "v1\n".repeat(50));
+    execFileSync("git", ["add", "."], { cwd: embedded });
+    execFileSync("git", ["commit", "-q", "-m", "inner"], { cwd: embedded });
+
+    const result = assertMeasured(await diffStat(repo, [], null));
+    assert.equal(result.changedFiles, 1);
+    assert.equal(result.changedLines, 0, "an embedded repo's inner content must never be descended into");
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test(
+  "diffStat counts an unreadable untracked file (chmod 0o000) as 1 file / 0 lines, then picks up real counts once it becomes readable again",
+  { skip: hasUnreadablePermissions ? false : unreadableSkipReason },
+  async () => {
+    // The deliberate asymmetry: an untracked entry that fails to read still contributes 1 file / 0
+    // lines (readUntrackedEntry's `{key: "u:", lines: 0, readable: false}`), never `0 files` (as a
+    // stray `if (!entry.readable) continue;` would produce) and never a `null` whole-measurement
+    // (as a stray `if (!entry.readable) return null;` would produce) -- a single permanently-
+    // unreadable path must not make the gate permanently unmeasurable for the rest of the session.
+    const repo = await makeRepo();
+    try {
+      const filePath = join(repo, "locked.txt");
+      await writeFile(filePath, "line\n".repeat(300));
+      await chmod(filePath, 0o000);
+
+      const unreadable = assertMeasured(await diffStat(repo, [], null));
+      assert.equal(unreadable.changedFiles, 1, "an unreadable untracked file must still count as 1 file");
+      assert.equal(unreadable.changedLines, 0, "an unreadable untracked file must contribute 0 lines, not throw or null out the whole measurement");
+
+      await chmod(filePath, 0o644);
+      const readable = assertMeasured(await diffStat(repo, [], null));
+      assert.equal(readable.changedFiles, 1);
+      assert.equal(readable.changedLines, 300, "once readable again, the file's real line count must be picked up");
+    } finally {
+      // No chmod-back needed: unlink only requires write+execute permission on the containing
+      // directory, not on the file itself, so `rm` below removes a still-0o000 `locked.txt` fine.
+      await rm(repo, { recursive: true, force: true });
+    }
+  },
+);
+
+test("diffStat tests ignorePatterns before reading an untracked file's content (ignore-before-read)", async () => {
+  const repo = await makeRepo();
+  try {
+    await mkdir(join(repo, "ignored"));
+    await writeFile(join(repo, "ignored", "big.txt"), "line\n".repeat(500));
+
+    const result = assertMeasured(await diffStat(repo, ["ignored/"], null));
+    assert.equal(result.changedFiles, 0, "an ignored untracked file must contribute nothing to the count");
+    assert.equal(result.changedLines, 0);
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test(
+  "diffStat's ignore check runs before readUntrackedEntry, not just before the final count (ignore-before-read is observably enforced)",
+  async (t) => {
+    // The count-based test above ("ignore-before-read") is satisfied identically by a reorder that
+    // moves the ignore check *after* `readUntrackedEntry` and still `continue`s on a match -- the
+    // final counts come out the same either way, so that test alone cannot catch the reorder. This
+    // test instruments `readUntrackedEntry` itself (via `node:test`'s module mock, delegating every
+    // call through to the real implementation so the measurement stays correct) and asserts the
+    // ignored path is never passed to it at all -- the one thing a reorder changes that a count
+    // comparison can't see.
+    const repo = await makeRepo();
+    try {
+      await mkdir(join(repo, "ignored"));
+      await writeFile(join(repo, "ignored", "big.txt"), "line\n".repeat(500));
+      await writeFile(join(repo, "kept.txt"), "line\n".repeat(3));
+
+      const untrackedUrl = pathToFileURL(join(TEST_DIST_DIR, "hooks", "lib", "untracked.js")).href;
+      const real = (await import(untrackedUrl)) as typeof import("./untracked.js");
+      const invokedPaths: string[] = [];
+      t.mock.module(untrackedUrl, {
+        namedExports: {
+          listUntrackedPaths: real.listUntrackedPaths,
+          repoRoot: real.repoRoot,
+          readUntrackedEntry: async (root: string, raw: Buffer) => {
+            invokedPaths.push(raw.toString("utf8"));
+            return real.readUntrackedEntry(root, raw);
+          },
+        },
+      });
+
+      // A cache-busted reimport is required: `git-diff.js` was already loaded (and linked to the
+      // real, unmocked `untracked.js`) at this file's top-level import, before this test ever ran
+      // -- `mock.module` only affects specifiers resolved *after* it's registered, so re-using the
+      // already-cached `diffStat` here would silently exercise the real, unmocked path and this
+      // test would pass regardless of whether the ordering is correct.
+      const gitDiffUrl = `${pathToFileURL(join(TEST_DIST_DIR, "hooks", "lib", "git-diff.js")).href}?ignoreBeforeReadProbe=${Date.now()}`;
+      const freshGitDiff = (await import(gitDiffUrl)) as typeof import("./git-diff.js");
+
+      const result = await freshGitDiff.diffStat(repo, ["ignored/"], null);
+      assert.notEqual(result, null, "expected diffStat to return real counts, not null, on this healthy-path call");
+      assert.equal((result as DiffCounts).changedFiles, 1, "only the non-ignored file should count");
+
+      assert.ok(
+        !invokedPaths.some((p) => p.includes("ignored")),
+        `readUntrackedEntry must never be called for an ignored path; observed calls: ${JSON.stringify(invokedPaths)}`,
+      );
+      assert.ok(
+        invokedPaths.some((p) => p.includes("kept.txt")),
+        "sanity check: the non-ignored file must still reach readUntrackedEntry",
+      );
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  },
+);
+
+test("diffStat's ignorePatterns match is anchored to path segments: 'dist/' ignores 'dist/y.md' but not 'notdist/x.md'", async () => {
+  // The unanchored-substring weakness: "notdist/x.md" genuinely contains the substring "dist/",
+  // but "notdist" is one path segment, not "not" + "dist" -- dropping this file is the exact
+  // fail-open ignorePatterns must never produce. Both directions asserted in one test so a fix
+  // that merely stops matching altogether (breaking the legitimate "dist/y.md" ignore) can't pass
+  // by accident.
+  const repo = await makeRepo();
+  try {
+    await mkdir(join(repo, "notdist"));
+    await writeFile(join(repo, "notdist", "x.md"), "line\n".repeat(3));
+    await mkdir(join(repo, "dist"));
+    await writeFile(join(repo, "dist", "y.md"), "line\n".repeat(7));
+
+    const result = assertMeasured(await diffStat(repo, ["dist/"], null));
+    assert.equal(result.changedFiles, 1, "expected only notdist/x.md to be counted, dist/y.md ignored");
+    assert.equal(result.changedLines, 3);
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test(
+  "diffStat's ignorePatterns match is anchored to path segments for TRACKED paths too, not just untracked ones: 'dist/' ignores tracked 'dist/y.js' but not tracked 'notdist/x.md'",
+  async () => {
+    // parseNumstat's own `matchesIgnorePattern` call (reached via `git diff --numstat`, not the
+    // untracked-file loop) needs the identical anchored-segment guarantee the test above pins for
+    // untracked paths -- both files here are committed and then modified, so the change surfaces
+    // through --numstat, not through listUntrackedPaths. Without anchoring here, an ignorePattern
+    // of "dist/" would previously also suppress a genuinely different, legitimately-named tracked
+    // path like "notdist/x.md" purely because it contains the substring "dist/".
+    const repo = await makeRepo();
+    try {
+      await mkdir(join(repo, "notdist"));
+      await writeFile(join(repo, "notdist", "x.md"), "line\n".repeat(3));
+      await mkdir(join(repo, "dist"));
+      await writeFile(join(repo, "dist", "y.js"), "line\n".repeat(7));
+      execFileSync("git", ["add", "."], { cwd: repo });
+      execFileSync("git", ["commit", "-q", "-m", "add tracked dist/ and notdist/"], { cwd: repo });
+
+      await writeFile(join(repo, "notdist", "x.md"), "line\n".repeat(3) + "more\n");
+      await writeFile(join(repo, "dist", "y.js"), "line\n".repeat(7) + "more\n");
+
+      const result = assertMeasured(await diffStat(repo, ["dist/"], null));
+      assert.equal(result.changedFiles, 1, "expected only tracked notdist/x.md's edit to be counted, tracked dist/y.js ignored");
+      assert.equal(result.changedLines, 1);
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "diffStat counts an untracked path with an invalid-UTF-8 name (path: null) instead of silently ignoring it, even when its bytes could match a pattern",
+  { skip: hasNonUtf8Filenames ? false : nonUtf8SkipReason },
+  async () => {
+    // A null path can never be tested against ignorePatterns with a substring check -- there is no
+    // string. The fail-closed direction is to never skip such an entry, so it always falls through
+    // to being counted. Reuses the exact byte sequence untracked.test.ts proved decodes to a
+    // base64 form containing "dist/", to prove the same defect class is closed at the diffStat
+    // integration level, not just inside listUntrackedPaths.
+    const repo = await makeRepo();
+    const nameBytes = Buffer.from([0xa5, 0x3c, 0x9d, 0x8a, 0xcb, 0x7f, 0x18, 0x93, 0x2e]);
+    try {
+      const filePath = Buffer.concat([Buffer.from(`${repo}/`), nameBytes]);
+      await writeFile(filePath, "line\n".repeat(20));
+
+      const result = assertMeasured(await diffStat(repo, ["dist/"], null));
+      assert.equal(result.changedFiles, 1, "a path this module cannot represent as a string must still count");
+      assert.equal(result.changedLines, 20);
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "diffStat does not hang on an untracked symlink pointing at a FIFO, and still counts a genuine untracked file alongside it",
+  { skip: hasMkfifo ? false : mkfifoSkipReason },
+  async () => {
+    // The mkfifo-via-symlink hang: the old loop's readFile followed the symlink and then blocked
+    // forever opening the FIFO on the other end, with no writer -- a silent fail-open once the
+    // harness kills the timed-out hook. Spawned per this file's FIFO-test convention so the parent
+    // can bound it with a real deadline and SIGKILL rather than wedge the whole suite.
+    const { code, stdout, stderr } = await runWithDeadline(
+      diffStatSymlinkFifoRunnerPath,
+      15_000,
+      "diffStat hung on a symlink to a FIFO: the lstat dispatch has likely regressed",
+    );
+    assert.equal(code, 0, `runner exited non-zero (code ${code}); stderr: ${stderr}`);
+
+    const lastLine = stdout.trim().split("\n").pop() ?? "";
+    let parsed: DiffStatFifoRunnerResult;
+    try {
+      parsed = JSON.parse(lastLine) as DiffStatFifoRunnerResult;
+    } catch {
+      assert.fail(`runner did not print parseable JSON; stdout: ${stdout || "<empty>"}, stderr: ${stderr}`);
+    }
+
+    const result = assertMeasured(parsed.result);
+    assert.equal(result.changedFiles, 2, "expected the symlink (1) and the genuine untracked file (1) both counted");
+    assert.equal(result.changedLines, 5, "only the genuine file's lines count -- the symlink never contributes a followed read");
+  },
+);
+
+test("diffFingerprint preserves a trailing space in the repo's own directory name when resolving --show-toplevel (not stripped like .trim() would)", async () => {
+  // Same defect class as untracked.ts's repoRoot fix, reached through diffFingerprint's own
+  // separate --show-toplevel call: .trim() strips every kind of trailing whitespace, not just
+  // git's single terminating newline, so a repo directory ending in a space would be truncated to
+  // a path that doesn't exist. Every status entry then lstats against that wrong (nonexistent)
+  // root, ENOENTs unconditionally, and lands on the fixed "ABSENT" marker regardless of the file's
+  // real content -- so editing the file would silently stop moving the hash. Asserting `!= null`
+  // alone would not catch this (the ENOENT branch itself still returns a real, non-null hash); the
+  // content-sensitivity check below is what actually exercises the wrong-root path.
+  const parent = await mkdtemp(join(tmpdir(), "praxarch-gitdiff-trim-"));
+  const repo = join(parent, "dirspace ");
+  try {
+    await mkdir(repo);
+    execFileSync("git", ["init", "-q"], { cwd: repo });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: repo });
+    await writeFile(join(repo, "file.txt"), "v0\n".repeat(400));
+    execFileSync("git", ["add", "."], { cwd: repo });
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: repo });
+
+    // Both calls below see the identical "M file.txt" status entry (path + code never change) --
+    // only the on-disk content differs between them. Under the wrong (truncated) root, both lstats
+    // ENOENT identically and both hash to the same fixed "ABSENT" chunk regardless of content, so
+    // this is the one comparison that actually exercises the wrong-root path: a bare `!= null`
+    // check on a single call would pass under the bug too (the ENOENT branch itself still returns
+    // a real, non-null hash; see below for a case where the entry disappears from status entirely
+    // and would also spuriously move the hash for the wrong reason).
+    await writeFile(join(repo, "file.txt"), "v1\n".repeat(400));
+    const first = await diffFingerprint(repo);
+    assert.notEqual(first, null, "a repo directory ending in whitespace must not break root resolution");
+
+    await writeFile(join(repo, "file.txt"), "v2\n".repeat(400));
+    const second = await diffFingerprint(repo);
+    assert.notEqual(
+      first,
+      second,
+      "two different edits to the same still-modified file must produce different hashes, even when the repo directory itself ends in whitespace",
+    );
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+test("diffFingerprint preserves a trailing carriage return in the repo's own directory name when resolving --show-toplevel (not eaten like /\\r?\\n$/ would)", async () => {
+  // Git writes LF through a pipe, never CRLF -- the `\r?` in the strip regex protects nothing
+  // real and instead eats a LEGAL trailing carriage return that's part of the directory name
+  // itself. Under that bug, a repo directory named "dircr\r" resolves to a root truncated to
+  // "dircr" -- a path that doesn't exist -- so every status entry ENOENTs and hashes as the fixed
+  // "ABSENT" marker regardless of on-disk content, and the fingerprint stops moving on edits
+  // entirely. Same content-sensitivity shape as the trailing-space test above: a bare `!= null`
+  // check would pass under the bug too, since the ENOENT branch still returns a real hash.
+  const parent = await mkdtemp(join(tmpdir(), "praxarch-gitdiff-cr-"));
+  const repo = join(parent, "dircr\r");
+  try {
+    await mkdir(repo);
+    execFileSync("git", ["init", "-q"], { cwd: repo });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: repo });
+    await writeFile(join(repo, "file.txt"), "v0\n".repeat(400));
+    execFileSync("git", ["add", "."], { cwd: repo });
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: repo });
+
+    await writeFile(join(repo, "file.txt"), "v1\n".repeat(400));
+    const first = await diffFingerprint(repo);
+    assert.notEqual(first, null, "a repo directory ending in a carriage return must not break root resolution");
+
+    await writeFile(join(repo, "file.txt"), "v2\n".repeat(400));
+    const second = await diffFingerprint(repo);
+    assert.notEqual(
+      first,
+      second,
+      "two different edits to the same still-modified file must produce different hashes, even when the repo directory itself ends in a carriage return",
+    );
+  } finally {
+    await rm(parent, { recursive: true, force: true });
   }
 });

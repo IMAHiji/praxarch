@@ -1,9 +1,10 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { lstat, readFile, readlink } from "node:fs/promises";
+import { lstat, readlink } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { listUntrackedPaths, readUntrackedEntry, repoRoot } from "./untracked.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -31,6 +32,27 @@ export interface DiffCounts {
   changedFiles: number;
 }
 
+// A pattern ending in "/" denotes a whole path segment (a directory name), so it must only match
+// when the occurrence starts at a segment boundary — the beginning of the path, or immediately
+// after a "/" — never mid-segment. Without this, the default pattern "dist/" also matches
+// "notdist/x.md": the substring "dist/" is genuinely present, but "notdist" is one path segment,
+// not "not" + "dist", and silently dropping a legitimately-named file because of that is the exact
+// fail-open ignorePatterns must never produce. A pattern not ending in "/" (an extension suffix
+// like ".min.js", or an exact filename like "package-lock.json") keeps the existing unanchored
+// substring match: it isn't a segment name, and anchoring it the same way would silently stop
+// matching a minified file anywhere but at the very start of a path, breaking every default
+// pattern of that shape.
+function matchesIgnorePattern(path: string, pattern: string): boolean {
+  if (!pattern.endsWith("/")) return path.includes(pattern);
+  let from = 0;
+  for (;;) {
+    const idx = path.indexOf(pattern, from);
+    if (idx === -1) return false;
+    if (idx === 0 || path[idx - 1] === "/") return true;
+    from = idx + 1;
+  }
+}
+
 function parseNumstat(stdout: string, ignorePatterns: string[]): DiffCounts {
   let changedLines = 0;
   let changedFiles = 0;
@@ -38,24 +60,13 @@ function parseNumstat(stdout: string, ignorePatterns: string[]): DiffCounts {
     if (!line.trim()) continue;
     const [added, removed, path] = line.split("\t");
     if (path === undefined) continue;
-    if (ignorePatterns.some((pattern) => path.includes(pattern))) continue;
+    if (ignorePatterns.some((pattern) => matchesIgnorePattern(path, pattern))) continue;
     changedFiles += 1;
     const addedNum = added === "-" ? 0 : Number(added);
     const removedNum = removed === "-" ? 0 : Number(removed);
     changedLines += addedNum + removedNum;
   }
   return { changedLines, changedFiles };
-}
-
-// Counts 0x0A bytes directly rather than decoding to a string first — a buffer read (see
-// diffFingerprint's untracked-file handling) must not be lossily decoded just to count lines,
-// or binary content collapses to indistinguishable replacement characters before it's counted.
-function countNewlines(buf: Buffer): number {
-  let count = 0;
-  for (const byte of buf) {
-    if (byte === 0x0a) count += 1;
-  }
-  return count;
 }
 
 // True only for the specific failure the HEAD fallback below exists to handle: `target` doesn't
@@ -106,48 +117,55 @@ async function trackedDiff(cwd: string, target: string, args: string[]): Promise
   }
 }
 
-// `null` means the listing could not be fetched (distinct from a real, empty listing) — same
-// contract as diffFingerprint's return value, and for the same reason: an untracked-file count
-// that silently degrades to "none" on failure would hide new files from the fingerprint just as
-// surely as a swallowed patch-fetch failure would.
-async function listUntracked(cwd: string): Promise<string[] | null> {
-  try {
-    const { stdout } = await execFileAsync("git", ["ls-files", "--others", "--exclude-standard"], {
-      cwd,
-      maxBuffer: MAX_GIT_BUFFER,
-    });
-    return stdout.split("\n").filter((line) => line.trim().length > 0);
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Sizes the session's real diff: changes against `baseline` (the HEAD sha recorded at
  * SessionStart) when given, so committed work still gets measured — plus untracked new files,
- * which `git diff` never sees. Excludes paths matching any ignorePattern substring.
+ * which `git diff` never sees. Untracked files are listed whole-repo and root-relative (via
+ * `listUntrackedPaths`) and each one dispatched by `readUntrackedEntry`'s total `lstat` kind
+ * dispatch — the same rules `diffFingerprint` uses (git-diff.ts:345-439): a symlink is never
+ * followed (keyed on a hash of its raw target bytes instead), a directory (an embedded repo or
+ * nested worktree) counts as 1 file / 0 lines rather than being descended into or throwing EISDIR,
+ * and a FIFO/socket/device is never opened. `ignorePatterns` is tested before any of that dispatch
+ * runs, not after — an ignored path (default `dist/`) must never be read at all, which is what
+ * keeps a FIFO planted under an ignored directory from ever being opened. See `matchesIgnorePattern`
+ * above for why the match is anchored to path segments rather than an unanchored substring test.
  *
  * `null` means the diff could not be measured — same contract as `diffFingerprint`'s return
  * value, and it must never be treated as "nothing changed": a caller that used to read a swallowed
  * measurement failure as `{0, 0}` was reading a genuinely unmeasured tree as trivially small,
  * which is how a FIFO (or a socket, device node, or any other `unsupported file type` git chokes
  * on) anywhere in the tree used to let a real diff of any size sail past verify-gate's trivial-diff
- * allow with no verdict ever recorded. Three distinguishable outcomes, not two:
+ * allow with no verdict ever recorded. Four distinguishable outcomes, not two:
  * - cwd isn't a git repo at all (`isGitRepo` below, checked positively — never inferred from the
- *   numstat/ls-files calls having failed, which is the conflation that caused the defect this
+ *   numstat/root/listing calls having failed, which is the conflation that caused the defect this
  *   split exists to fix) → `{0, 0}`. Deliberately still fail-open: the verify-gate treats this as
  *   "nothing to gate on" rather than failing the hook, and that's unchanged by this fix.
- * - A real repo whose `--numstat` probe or untracked-file listing fails for any other reason
- *   (the FIFO repro, a numstat failure, an `ls-files` failure) → `null`. The one carve-out is an
- *   unborn HEAD (a real repo, zero commits) diffing against `target`: `trackedDiff` reports that
- *   the same way `diffFingerprint` treats it — as "nothing committed yet," not as unknown — so a
- *   brand-new repo with only untracked work still gets real counts, not `null`.
+ * - A real repo whose `--numstat` probe, root resolution, or untracked-file listing fails for any
+ *   other reason (the FIFO repro, a numstat failure, a `git rev-parse --show-toplevel` failure, an
+ *   `ls-files` failure) → `null`. Root resolution failing while `isGitRepo` already succeeded is
+ *   treated the same as `diffFingerprint`'s own `--show-toplevel` rule (git-diff.ts:325-337):
+ *   unknown, never a silent fallback to `cwd` — that would reproduce the wrong-base bug (untracked
+ *   paths are root-relative, not cwd-relative) just less often. The one carve-out is an unborn HEAD
+ *   (a real repo, zero commits) diffing against `target`: `trackedDiff` reports that the same way
+ *   `diffFingerprint` treats it — as "nothing committed yet," not as unknown — so a brand-new repo
+ *   with only untracked work still gets real counts, not `null`.
+ * - An individual untracked entry that fails to read (`readable: false` — permissions, or a read
+ *   error mid-stream) still contributes its 1 file / 0 lines. Deliberately *not* `diffFingerprint`'s
+ *   `null`-the-whole-measurement treatment of a read failure: a single permanently-unreadable path
+ *   would otherwise make the gate un-measurable — and therefore permanently blocking — for the rest
+ *   of the session, while counting it 1/0 keeps the measurement conservative (it can only ever
+ *   under-count that one path's line total, never hide the fact that something changed there).
  * - Success → real counts.
  *
- * Deliberately cheap: only `--numstat` (tracked) and untracked-file byte-length line counts are
- * computed — no patch text is fetched. Callers that also need the fingerprint (e.g. to detect a
- * stale verdict) call `diffFingerprint` separately, and only when they actually need it — see its
- * doc comment for why that split exists.
+ * Deliberately cheap relative to `diffFingerprint`: only `--numstat` (tracked) is fetched from
+ * git, no patch text. Every untracked regular file still has its full on-disk contents streamed
+ * through `readUntrackedEntry` — which counts newlines *and* sha256-hashes the bytes for its
+ * `key` — but `diffStat` itself only ever keeps the line count off that result; the key is
+ * discarded here; it exists for callers (e.g. a SessionStart snapshot) that need to detect
+ * whether a specific untracked path's content changed, not just how many lines it has. Callers
+ * that also need the fingerprint (e.g. to detect a stale verdict) call `diffFingerprint`
+ * separately, and only when they actually need it — see its doc comment for why that split
+ * exists.
  */
 export async function diffStat(
   cwd: string,
@@ -179,24 +197,61 @@ export async function diffStat(
     }
   }
 
-  const untracked = await listUntracked(cwd);
+  // Resolved before listing, and before any untracked path is read — every entry `readUntrackedEntry`
+  // reads below is joined against this root, never `cwd`, since the paths `listUntrackedPaths`
+  // returns are root-relative. See the doc comment above for why a failure here is unknown
+  // (`null`). Passed straight through to `readUntrackedEntry` with no intermediate stringification
+  // (no template literal, no `String(root)`) so this call site stays correct regardless of
+  // whether `repoRoot` returns a `string` or a raw-byte `Buffer` — the exact representation is
+  // untracked.ts's decision, not this function's.
+  const root = await repoRoot(cwd);
+  if (root === null) return null;
+
+  // `listUntrackedPaths` takes any cwd inside the repo, not specifically the root — that's the
+  // whole point of its `--full-name` + `:/` pathspec (see its doc comment): the listing is
+  // whole-repo and root-relative regardless of which directory it's invoked from. Passing the
+  // original `cwd` here, rather than `root`, means this call never depends on `root`'s
+  // representation either.
+  const untracked = await listUntrackedPaths(cwd);
   // A failed listing means a hidden batch of new files could be sitting uncounted — exactly the
   // under-count this null contract exists to prevent, so it takes the whole measurement down
-  // rather than degrading to "contributes nothing" the way an individual unreadable file does.
+  // rather than degrading to "contributes nothing" the way an individual unreadable entry does.
   if (untracked === null) return null;
 
   let changedLines = tracked.changedLines;
   let changedFiles = tracked.changedFiles;
-  for (const path of untracked) {
-    let contents: Buffer | null = null;
-    try {
-      contents = await readFile(join(cwd, path));
-    } catch {
-      // Unreadable file (race, permissions) — contributes its path only, matching diffFingerprint.
+  // Iterates the whole `UntrackedPath` object, not a `{ path, raw }` destructure — a caller that
+  // also needs to key a snapshot off this entry (e.g. `untrackedSnapshotKey`) needs the object
+  // itself in hand, not just the two fields this loop happens to use today.
+  for (const untrackedPath of untracked) {
+    // A `null` path is a name this module cannot represent as a string (invalid UTF-8 bytes — see
+    // UntrackedPath.path's doc comment in untracked.ts). ignorePatterns is a set of user-authored
+    // strings tested with a substring/segment match; there is no way to run that match against a
+    // path that isn't a string, and no safe synthesized stand-in for one (an earlier design tried
+    // exactly that and reintroduced the bypass it was meant to close — see untracked.ts). The
+    // fail-closed direction is to never treat a null path as ignore-matched, so it always falls
+    // through to being read and counted below rather than silently vanishing into a rule nobody
+    // could have written to catch it.
+    //
+    // This check runs before `readUntrackedEntry` is ever called, not after: an ignored path must
+    // never be `lstat`ed or read at all, only ever matched by name. Moving it after the read would
+    // still land on the same final counts (the `continue` below still discards the entry either
+    // way), but it would mean every ignored path pays for a real filesystem read it has no reason
+    // to trigger, and — for a path this module cannot yet prove is a plain file — no reason to
+    // touch at all.
+    if (
+      untrackedPath.path !== null &&
+      ignorePatterns.some((pattern) => matchesIgnorePattern(untrackedPath.path as string, pattern))
+    ) {
+      continue;
     }
-    if (ignorePatterns.some((pattern) => path.includes(pattern))) continue;
+    const entry = await readUntrackedEntry(root, untrackedPath.raw);
     changedFiles += 1;
-    if (contents !== null) changedLines += countNewlines(contents);
+    // `entry.readable === false` (a permission error, or a read that failed mid-stream) still
+    // contributes 1 file / 0 lines here, deliberately not `diffFingerprint`'s null-the-whole-
+    // measurement treatment of the same failure — see the function doc comment above for why the
+    // two functions diverge on this one point.
+    changedLines += entry.lines;
   }
 
   return { changedLines, changedFiles };
@@ -331,7 +386,16 @@ export async function diffFingerprint(cwd: string): Promise<string | null> {
       cwd,
       maxBuffer: MAX_GIT_BUFFER,
     });
-    root = stdout.trim();
+    // Strips only git's single terminating newline, not `.trim()`'s arbitrary trailing whitespace
+    // — same fix, and same reasoning, as untracked.ts's repoRoot: a repo whose own directory name
+    // ends in whitespace would otherwise come back truncated to a path that doesn't exist, and
+    // every status entry below would then `lstat` ENOENT against that wrong root regardless of its
+    // real on-disk content. Strictly `\n`, not `\r?\n`: git writes LF through a pipe, never CRLF,
+    // so an optional `\r` here protects nothing real and instead eats a LEGAL trailing carriage
+    // return that's part of the directory name itself, reintroducing the exact truncation bug this
+    // line exists to fix (verified: a repo directory named "dircr\r" collapses to a nonexistent
+    // "dircr" root under `\r?\n$`, and the fingerprint stops moving on edits entirely).
+    root = stdout.replace(/\n$/, "");
   } catch {
     return null;
   }
