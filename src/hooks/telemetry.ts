@@ -49,8 +49,16 @@ async function main(): Promise<void> {
   // log its only record of this delegation having happened at all.
   let parsedVerdict: { verdict: "CONFIRMED" | "REFUTED"; findingsCount: number; criticalOrMajorCount: number } | null =
     null;
+  // Issue #15: an async dispatch's `tool_response` here is the dispatch-time launch receipt, not
+  // the subagent's report — it carries no report text at all, only launch metadata (agentId,
+  // resolvedModel, etc). Detect it positively and skip the parse rather than relying on it simply
+  // failing to find a trailing JSON block; the real verdict, if any, is recorded later by
+  // SubagentStop. Left as-is, any report-shaped text the receipt happens to carry (e.g. an echoed
+  // prompt) would otherwise be parsed as if it were a genuine verdict.
+  const isLaunchReceipt =
+    input.tool_response?.status === "async_launched" || input.tool_response?.isAsync === true;
   const text = responseText(input.tool_response);
-  if (role !== undefined && config.verifyGate.verdictRoles.includes(role) && text) {
+  if (!isLaunchReceipt && role !== undefined && config.verifyGate.verdictRoles.includes(role) && text) {
     const parsed = extractTrailingJson(text);
     if (parsed) {
       try {
@@ -68,6 +76,7 @@ async function main(): Promise<void> {
   const resolvedModel = input.tool_response?.resolvedModel ?? null;
   const totalTokens = input.tool_response?.totalTokens ?? null;
   const durationMs = input.tool_response?.totalDurationMs ?? null;
+  const agentId = typeof input.tool_response?.agentId === "string" ? input.tool_response.agentId : null;
 
   await appendJsonl(logFileForDate(), {
     at,
@@ -133,6 +142,7 @@ async function main(): Promise<void> {
       totalTokens,
       durationMs,
       at,
+      agentId,
     });
     if (verifierRecord) fresh.lastVerifier = verifierRecord;
   });

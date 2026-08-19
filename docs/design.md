@@ -160,9 +160,10 @@ hooks that check the two rules most worth enforcing mechanically:
     hash-differs condition alone isn't enough without an accompanying size delta. This is the
     accepted tradeoff of the hash+delta approach (a `git write-tree` snapshot would close it, but
     was ruled out as too heavy for a hook) — worth knowing rather than discovering by surprise.
-- **`telemetry`** (PostToolUse) and **`session-init`** (SessionStart) don't enforce anything; they
-  observe and warn. Enforcement only applies to the two rules where a false negative (an
-  unenforced violation) is worse than a false positive (an occasional unnecessary block).
+- **`telemetry`** (PostToolUse), **`subagent-stop`** (SubagentStop), and **`session-init`**
+  (SessionStart) don't enforce anything; they observe and warn/record. Enforcement only applies to
+  the two rules where a false negative (an unenforced violation) is worse than a false positive
+  (an occasional unnecessary block).
 
 Every enforcing hook fails open on its own internal errors — a bug in route-guard must never trap
 a session in a state where no Agent call can succeed.
@@ -178,20 +179,26 @@ required to end its response with a fenced JSON block:
 { "verdict": "CONFIRMED", "findings": [] }
 ```
 
-`telemetry` parses this out of the tool output and both records it in session state (for
-`verify-gate` to check immediately) and appends it to the JSONL log (for `praxarch report` to
-compute a pass rate across history). The verdict is derived, not asserted: `CONFIRMED` requires
+As of issue #15, `PostToolUse` only ever sees a dispatch-time launch receipt — Claude Code doesn't
+deliver a subagent's actual output there, so `telemetry` cannot parse a verdict out of it.
+Automatic verdict recording instead happens on the `SubagentStop` hook, which fires on real
+subagent completion and parses this JSON block out of the transcript, merging it into session state
+(for `verify-gate` to check immediately) and appending it to the JSONL log (for `praxarch report`
+to compute a pass rate across history). The verdict is derived, not asserted: `CONFIRMED` requires
 zero `critical`/`major` findings, regardless of what the `verdict` field itself claims — a defense
 against a verifier that writes "CONFIRMED" out of habit while listing a critical finding.
+`praxarch record-verdict` is the manual fallback for any completion `subagent-stop` misses (e.g. a
+subagent that errors or is interrupted before stopping normally).
 
 ### Telemetry: measured, not claimed
 
 Pilotfish cites benchmark numbers (e.g. "Sonnet workers at 96% of all-Fable performance for 46% of
 the cost") as the expected payoff of tiered delegation, but nothing in the tool itself measures
 *your* actual role distribution or savings. Praxarch's `telemetry` hook logs every delegation
-(role, model, timestamp, verifier verdict where applicable) to a monthly JSONL file; the status
-line surfaces the current session's counts live, and `praxarch report` aggregates role
-distribution and verifier pass rate across history.
+(role, model, timestamp) to a monthly JSONL file at dispatch time; `subagent-stop` merges the
+verifier verdict into that same row once the subagent actually completes. The status line
+surfaces the current session's counts live, and `praxarch report` aggregates role distribution and
+verifier pass rate across history.
 
 **What this deliberately does not claim**: a "delegation-vs-local ratio" or "escalation
 frequency." Both would require observing the main session's own direct work and linking repeated

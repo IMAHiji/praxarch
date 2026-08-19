@@ -829,6 +829,68 @@ test("does not record a verdict when trailing prose follows the closing fence", 
   });
 });
 
+// Issue #15: an async dispatch's PostToolUse(Agent) tool_response is the dispatch-time launch
+// receipt, not the subagent's report. It must never be run through the verdict parser.
+test("records verdict: null for an async launch receipt, without throwing", async () => {
+  await withPraxarchHome(async (home) => {
+    run(home, {
+      session_id: "s1",
+      cwd: process.cwd(),
+      hook_event_name: "PostToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: "verifier", model: "opus" },
+      tool_response: {
+        status: "async_launched",
+        isAsync: true,
+        agentId: "agent-123",
+        description: "verify the change",
+        prompt: "verify...",
+        resolvedModel: "claude-opus-5",
+        canReadOutputFile: true,
+        outputFile: "/tmp/out.txt",
+      },
+    });
+
+    const logContent = await readFile(monthlyLogPath(home), "utf8");
+    const record = JSON.parse(logContent.trim()) as { verdict: string | null };
+    assert.equal(record.verdict, null);
+  });
+});
+
+test("a launch receipt's text is never parsed for a verdict, even when it happens to contain a fenced json block", async () => {
+  await withPraxarchHome(async (home) => {
+    const receiptText = [
+      "Dispatching verifier...",
+      "",
+      "```json",
+      JSON.stringify({ verdict: "CONFIRMED", findings: [] }),
+      "```",
+    ].join("\n");
+
+    run(home, {
+      session_id: "s1",
+      cwd: process.cwd(),
+      hook_event_name: "PostToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: "verifier", model: "opus" },
+      tool_response: {
+        status: "async_launched",
+        isAsync: true,
+        agentId: "agent-123",
+        content: [{ type: "text", text: receiptText }],
+      },
+    });
+
+    const logContent = await readFile(monthlyLogPath(home), "utf8");
+    const record = JSON.parse(logContent.trim()) as { verdict: string | null };
+    assert.equal(record.verdict, null);
+
+    const statePath = join(home, "state", "s1.json");
+    const state = JSON.parse(await readFile(statePath, "utf8")) as { lastVerifier: unknown };
+    assert.equal(state.lastVerifier, null);
+  });
+});
+
 // summarizeVerdict throws MalformedVerdictError for a verdict value outside CONFIRMED/REFUTED.
 // telemetry.ts is a non-blocking observer (unlike record-verdict.ts), so this must behave exactly
 // like the trailing-prose case above: the delegation-log row is still appended (verdict: null) and

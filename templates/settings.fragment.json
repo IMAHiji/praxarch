@@ -30,6 +30,13 @@
         ]
       }
     ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node ~/.claude/praxarch/hooks/subagent-stop.js" }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

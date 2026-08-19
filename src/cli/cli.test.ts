@@ -147,6 +147,63 @@ test("doctor fails before install", async () => {
   }
 });
 
+// The failure shape this guards against (issue #15): a hook registered in the template but not
+// wired into the installed settings.json reports fully green. Doctor must catch it for every
+// shipped event, SubagentStop included, not just the ones known when doctor was last edited.
+test("doctor reports a problem when a shipped hook event is missing from installed settings", async () => {
+  const fixture = await setupFixture();
+  try {
+    runCli(fixture, ["install", "--yes"]);
+    const settingsPath = join(fixture.claudeHome, "settings.json");
+    const settings = JSON.parse(await readFile(settingsPath, "utf8")) as {
+      hooks: Record<string, unknown>;
+    };
+    delete settings.hooks["SubagentStop"];
+    await writeFile(settingsPath, JSON.stringify(settings, null, 2));
+
+    const { stdout, status } = runCli(fixture, ["doctor"]);
+    assert.equal(status, 1, stdout);
+    assert.match(stdout, /✗ settings\.json wires the praxarch SubagentStop hook/);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+// Proves the event list is derived from templates/settings.fragment.json rather than a hardcoded
+// array in doctor.ts — adding an event to the template must be picked up without touching doctor.
+test("doctor picks up a hook event added to the template without editing doctor.ts", async () => {
+  const fixture = await setupFixture();
+  const repo = await setupRepoCopy();
+  try {
+    const fragmentPath = join(repo.root, "templates", "settings.fragment.json");
+    const fragment = JSON.parse(await readFile(fragmentPath, "utf8")) as {
+      hooks: Record<string, unknown>;
+    };
+    fragment.hooks["NotifyEvent"] = [
+      { hooks: [{ type: "command", command: "node ~/.claude/praxarch/hooks/notify-event.js" }] },
+    ];
+    await writeFile(fragmentPath, JSON.stringify(fragment, null, 2));
+
+    runCli(fixture, ["install", "--yes"], repo.cli);
+    // Not actually wired into settings.json — install only merges what's in the fragment, but the
+    // fixture's settings.json was written before this edit landed in a real install flow. Simulate
+    // an install that predates the new event by removing it from the merged settings.
+    const settingsPath = join(fixture.claudeHome, "settings.json");
+    const settings = JSON.parse(await readFile(settingsPath, "utf8")) as {
+      hooks: Record<string, unknown>;
+    };
+    delete settings.hooks["NotifyEvent"];
+    await writeFile(settingsPath, JSON.stringify(settings, null, 2));
+
+    const { stdout, status } = runCli(fixture, ["doctor"], repo.cli);
+    assert.equal(status, 1, stdout);
+    assert.match(stdout, /✗ settings\.json wires the praxarch NotifyEvent hook/);
+  } finally {
+    await rm(repo.root, { recursive: true, force: true });
+    await teardownFixture(fixture);
+  }
+});
+
 // Symlinked destinations. The rule is: preserve the user's link, write *through* it. Replacing the
 // link with a plain copy (the original bug) freezes a live-linked install; skipping it outright
 // freezes any link that points somewhere other than our own source. Neither is acceptable.
