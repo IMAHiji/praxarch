@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { chmod, mkdir, mkdtemp, open, rm, symlink, writeFile } from "node:fs/promises";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -12,6 +12,75 @@ const here = dirname(fileURLToPath(import.meta.url));
 const { diffStat, diffFingerprint } = (await import(
   join(here, "..", "..", "..", "dist", "hooks", "lib", "git-diff.js")
 )) as typeof import("./git-diff.js");
+
+// mkfifo isn't available on every platform node:test runs on (notably Windows); the two FIFO
+// regression tests below skip visibly there rather than failing on an absent binary that has
+// nothing to do with the isFile() dispatch gate they're guarding.
+let hasMkfifo = true;
+try {
+  execFileSync("which", ["mkfifo"], { stdio: "ignore" });
+} catch {
+  hasMkfifo = false;
+}
+
+// The real-FIFO scenario runs in a spawned child rather than in-process: a regressed isFile()
+// gate makes createReadStream block forever on a writerless FIFO, and that block happens inside
+// libuv's threadpool where node:test can neither abort it nor finish reporting -- an in-process
+// per-test timeout cannot fire against it (see git-diff.test.ts history / issue #3). Spawning
+// lets the parent SIGKILL the child on a deadline and turn the hang itself into an assertion
+// failure instead of wedging the whole suite.
+const fifoRunnerPath = join(here, "..", "..", "..", "dist", "hooks", "lib", "fixtures", "fifo-fingerprint-runner.js");
+const specialRunnerPath = join(here, "..", "..", "..", "dist", "hooks", "lib", "fixtures", "special-fingerprint-runner.js");
+
+interface FifoRunnerResult {
+  before: string | null;
+  withFifo: string | null;
+  afterRestoring: string | null;
+}
+
+interface SpecialRunnerResult {
+  actual: string | null;
+  expected: string;
+}
+
+// Reusable by other tests/fixtures that need to bound a child process with a hard deadline and
+// convert expiry into a descriptive assertion failure (see issue #2, which needs a FIFO fixture
+// of its own). `deadlineMessage` names the suspected regression so a failure reads as a lead,
+// not a mystery timeout.
+async function runWithDeadline(
+  scriptPath: string,
+  deadlineMs: number,
+  deadlineMessage: string,
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [scriptPath], { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, deadlineMs);
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (timedOut) {
+        reject(new Error(`${deadlineMessage} (deadline ${deadlineMs}ms exceeded; stdout so far: ${stdout || "<empty>"})`));
+        return;
+      }
+      resolve({ code, stdout, stderr });
+    });
+  });
+}
 
 async function makeRepo(): Promise<string> {
   const repo = await mkdtemp(join(tmpdir(), "praxarch-gitdiff-repo-"));
@@ -569,32 +638,39 @@ test("the same tree state produces an identical fingerprint across two calls fro
 
 test(
   "a tracked file replaced by a FIFO fingerprints promptly with a real hash; the FIFO appearing and disappearing moves the hash",
-  { timeout: 5000 },
+  { skip: hasMkfifo ? false : "mkfifo not available on this platform" },
   async () => {
     // Round 6's dispatch tested isSymbolicLink() then isDirectory() then fell straight through to
     // createReadStream with no isFile() check. A FIFO (a tracked file replaced via `mkfifo`,
-    // reported as " M victim.txt") blocks createReadStream forever with no writer -- pre-fix, this
-    // test hangs rather than fails, which is exactly why it carries an explicit per-test timeout:
-    // the TDD evidence for this one is "timed out," not a red assertion.
-    const repo = await makeRepo();
+    // reported as " M victim.txt") blocks createReadStream forever with no writer. Running this
+    // in-process, a regression here would wedge the whole test runner rather than fail it: the
+    // block happens inside libuv's threadpool, where node:test can neither abort it nor finish
+    // reporting, so no per-test timeout option can fire against it. The scenario runs in a
+    // spawned child instead (see fixtures/fifo-fingerprint-runner.ts) so the parent can bound it
+    // with a real deadline and SIGKILL.
+    const { code, stdout, stderr } = await runWithDeadline(
+      fifoRunnerPath,
+      15_000,
+      "fingerprint hung on a FIFO: the isFile() dispatch gate has likely regressed",
+    );
+    assert.equal(code, 0, `runner exited non-zero (code ${code}); stderr: ${stderr}`);
+
+    const lastLine = stdout.trim().split("\n").pop() ?? "";
+    let result: FifoRunnerResult;
     try {
-      const victimPath = join(repo, "file.txt");
-      const before = await diffFingerprint(repo);
-      assert.notEqual(before, null);
-
-      await rm(victimPath);
-      execFileSync("mkfifo", [victimPath]);
-      const withFifo = await diffFingerprint(repo);
-      assert.notEqual(withFifo, null, "a FIFO in the tree must not hang or permanently null the fingerprint");
-      assert.notEqual(before, withFifo, "replacing the tracked file with a FIFO must move the hash");
-
-      await rm(victimPath);
-      await writeFile(victimPath, "line\n".repeat(5));
-      const afterRestoring = await diffFingerprint(repo);
-      assert.notEqual(withFifo, afterRestoring, "removing the FIFO and restoring a regular file must move the hash again");
-    } finally {
-      await rm(repo, { recursive: true, force: true });
+      result = JSON.parse(lastLine) as FifoRunnerResult;
+    } catch {
+      assert.fail(`runner did not print parseable JSON; stdout: ${stdout || "<empty>"}, stderr: ${stderr}`);
     }
+
+    assert.notEqual(result.before, null);
+    assert.notEqual(result.withFifo, null, "a FIFO in the tree must not hang or permanently null the fingerprint");
+    assert.notEqual(result.before, result.withFifo, "replacing the tracked file with a FIFO must move the hash");
+    assert.notEqual(
+      result.withFifo,
+      result.afterRestoring,
+      "removing the FIFO and restoring a regular file must move the hash again",
+    );
   },
 );
 
@@ -638,49 +714,41 @@ test("an ENOENT status entry's encoded bytes carry a distinguishing ABSENT marke
   }
 });
 
-test("a tracked path becoming a socket/char-device-shaped special file hashes as SPECIAL, distinct from a regular file of the same name", async () => {
-  // Round 7 task 1's marker applies uniformly to every non-regular, non-symlink, non-directory
-  // inode kind -- FIFO is the reproducible one in a test environment, but the dispatch itself
-  // must be total (isFile() gates streaming, not an implicit fallthrough) rather than special-
-  // cased to FIFOs alone. This is covered functionally by the FIFO test above; this test locks
-  // the marker's literal name via the same known-answer approach used for ABSENT.
-  const repo = await makeRepo();
-  try {
-    const fifoPath = join(repo, "special.txt");
-    await writeFile(fifoPath, "regular\n");
-    execFileSync("git", ["add", "special.txt"], { cwd: repo });
-    execFileSync("git", ["commit", "-q", "-m", "add special.txt"], { cwd: repo });
-    await rm(fifoPath);
-    execFileSync("mkfifo", [fifoPath]);
+test(
+  "a tracked path becoming a socket/char-device-shaped special file hashes as SPECIAL, distinct from a regular file of the same name",
+  { skip: hasMkfifo ? false : "mkfifo not available on this platform" },
+  async () => {
+    // Round 7 task 1's marker applies uniformly to every non-regular, non-symlink, non-directory
+    // inode kind -- FIFO is the reproducible one in a test environment, but the dispatch itself
+    // must be total (isFile() gates streaming, not an implicit fallthrough) rather than special-
+    // cased to FIFOs alone. This is covered functionally by the FIFO test above; this test locks
+    // the marker's literal name via the same known-answer approach used for ABSENT.
+    //
+    // This also calls diffFingerprint against a real FIFO, not just an lstat, so it's exposed to
+    // the same hang as the test above if the isFile() gate regresses; it runs through the same
+    // spawned-child, deadline-bound path rather than in-process for that reason.
+    const { code, stdout, stderr } = await runWithDeadline(
+      specialRunnerPath,
+      15_000,
+      "fingerprint hung on a FIFO: the isFile() dispatch gate has likely regressed",
+    );
+    assert.equal(code, 0, `runner exited non-zero (code ${code}); stderr: ${stderr}`);
 
-    // Trailing-newline strip only -- porcelain's leading status-code byte is often a literal
-    // space (" M", " D", ...), and .trim() would eat it along with the newline, corrupting the
-    // very 2-byte code this known-answer check depends on.
-    const statusOut = execFileSync("git", ["status", "--porcelain"], { cwd: repo }).toString("utf8").replace(/\n$/, "");
-    const code = statusOut.slice(0, 2);
-    const path = statusOut.slice(3);
-    const head = execFileSync("git", ["rev-parse", "--verify", "HEAD"], { cwd: repo }).toString("utf8").trim();
+    const lastLine = stdout.trim().split("\n").pop() ?? "";
+    let result: SpecialRunnerResult;
+    try {
+      result = JSON.parse(lastLine) as SpecialRunnerResult;
+    } catch {
+      assert.fail(`runner did not print parseable JSON; stdout: ${stdout || "<empty>"}, stderr: ${stderr}`);
+    }
 
-    const expected = createHash("sha256");
-    expected.update(head);
-    expected.update("\0");
-    expected.update(path);
-    expected.update("\0");
-    expected.update(code);
-    expected.update("\0");
-    expected.update("SPECIAL");
-    expected.update("\0");
-
-    const actual = await diffFingerprint(repo);
     assert.equal(
-      actual,
-      expected.digest("hex"),
+      result.actual,
+      result.expected,
       "a non-regular, non-symlink, non-directory inode must hash path + code + the SPECIAL marker",
     );
-  } finally {
-    await rm(repo, { recursive: true, force: true });
-  }
-});
+  },
+);
 
 test("a file larger than a few MB hashes successfully through the streaming path", async () => {
   const repo = await makeRepo();
