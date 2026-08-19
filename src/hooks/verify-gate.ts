@@ -293,7 +293,10 @@ async function main(): Promise<void> {
         additionalContext:
           "Delegate to the verifier role for a fresh-context review of the changes, then re-check " +
           "completion. If this diff is something like docs/config that doesn't warrant verification, " +
-          'say "PRAXARCH_VERIFY_WAIVED: <reason>" explicitly instead of just stopping.',
+          'say "PRAXARCH_VERIFY_WAIVED: <reason>" explicitly instead of just stopping. If the verdict ' +
+          "came from a resumed agent (e.g. via SendMessage), no hook observes that reply — run " +
+          `\`praxarch record-verdict --session ${input.session_id} --role <role>\` with the agent's output instead of ` +
+          "waiving.",
       },
     },
     warnings,

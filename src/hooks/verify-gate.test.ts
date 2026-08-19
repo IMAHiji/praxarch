@@ -212,6 +212,23 @@ test("blocks a non-trivial diff with no verifier record", async () => {
   }
 });
 
+test("block remediation interpolates the real session id, not a literal placeholder", async () => {
+  const fixture = await setupFixture();
+  try {
+    await makeNonTrivialDiff(fixture.repo);
+    const result = run(fixture, {
+      session_id: "s1-distinctive",
+      cwd: fixture.repo,
+      hook_event_name: "Stop",
+    }) as { hookSpecificOutput?: { additionalContext?: string } };
+    const additionalContext = result.hookSpecificOutput?.additionalContext ?? "";
+    assert.match(additionalContext, /record-verdict --session s1-distinctive --role <role>/);
+    assert.doesNotMatch(additionalContext, /--session <id>/);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
 test("allows a non-trivial diff with a CONFIRMED verifier record", async () => {
   const fixture = await setupFixture();
   try {

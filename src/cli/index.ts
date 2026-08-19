@@ -2,6 +2,7 @@
 import { install } from "./install.js";
 import { doctor } from "./doctor.js";
 import { uninstall } from "./uninstall.js";
+import { recordVerdict } from "./record-verdict.js";
 
 function printUsage(): void {
   process.stdout.write(
@@ -12,6 +13,10 @@ function printUsage(): void {
       "  install [--yes]     Merge praxarch config into ~/.claude (shows a plan, asks to confirm)",
       "  uninstall [--yes]   Remove praxarch config from ~/.claude",
       "  doctor              Check installation health, report drift",
+      "  record-verdict --session <id> --role <role> [--file <path>]",
+      "                      Record a verdict (verifier output on stdin or --file) into session",
+      "                      state so verify-gate sees it — for verdicts delivered by a resumed",
+      "                      agent, which no hook observes.",
       "",
       "Options:",
       "  --yes    Skip the confirmation prompt (for scripted use)",
@@ -32,6 +37,9 @@ async function main(): Promise<void> {
       return;
     case "doctor":
       await doctor();
+      return;
+    case "record-verdict":
+      process.exitCode = await recordVerdict(rest);
       return;
     default:
       printUsage();
