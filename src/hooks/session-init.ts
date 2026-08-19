@@ -53,13 +53,13 @@ async function main(): Promise<void> {
   //   "unknown" (count everything) instead of capturing whatever untracked files happen to exist
   //   at the first post-upgrade SessionStart -- which would silently include the session's own
   //   in-progress work as if it pre-existed.
-  // - The `in` check, not a null/undefined test, is what makes a single "startup" capture durable
-  //   across the rest of the session: `baselineUntrackedCaptured` is `true` the moment a capture is
-  //   attempted, whether or not the result was usable, and a null/undefined test would treat an
-  //   unusable (`null`) capture as "not yet captured" and retry it on every later SessionStart,
-  //   moving the baseline mid-session and laundering in-session files out of the measurement --
-  //   the same class of bug the comment above guards `baselineHead` against.
-  if (input.source === "startup" && !("baselineUntrackedCaptured" in state)) {
+  // - `!== true` is what makes a single "startup" capture durable across the rest of the session:
+  //   `baselineUntrackedCaptured` is `true` the moment a capture is attempted and is the only value
+  //   ever written (see the field's doc comment in `lib/session-state.ts`), so re-capturing would
+  //   only ever happen on a genuinely-never-set marker -- moving the baseline mid-session and
+  //   laundering in-session files out of the measurement, the same class of bug the comment above
+  //   guards `baselineHead` against.
+  if (input.source === "startup" && state.baselineUntrackedCaptured !== true) {
     const baseline = await captureUntrackedBaseline(input.cwd);
     await writeUntrackedBaseline(input.session_id, baseline);
     state.baselineUntrackedCaptured = true;
