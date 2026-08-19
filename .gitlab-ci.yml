@@ -45,5 +45,10 @@ test:
   needs:
     - build
   timeout: 5m
+  # Non-root: the default `image: node:22` (no `user:`) runs the whole pipeline as root, under
+  # which permission-dependent tests (chmod 000 unreadability, etc.) can't reproduce a real
+  # EACCES and silently skip instead of running -- a live defect in that code path would ship
+  # green. `node` is the unprivileged user baked into the official node images.
+  user: node
   script:
     - pnpm test

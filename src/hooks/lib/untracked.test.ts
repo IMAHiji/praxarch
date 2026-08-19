@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { appendFile, chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, mkdtemp, open, rm, symlink, writeFile } from "node:fs/promises";
 import { execFileSync, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,12 +9,20 @@ import type {
   getNonUtf8FilenameProbe as GetNonUtf8FilenameProbe,
   nonUtf8FilenameBytes as NonUtf8FilenameBytes,
 } from "./fixtures/non-utf8-filename-probe.js";
+import type { getPermissionProbe as GetPermissionProbe } from "./fixtures/permission-probe.js";
 import { TEST_DIST_DIR } from "../../test-support/dist-dir.js";
 // Imports the compiled output, not the sibling .ts source — matches the convention in
 // config.test.ts (see the comment there): tests resolve modules the way Node does at runtime.
-const { listUntrackedPaths, readUntrackedEntry, repoRoot, untrackedSnapshotKey, captureUntrackedBaseline } = (await import(
-  join(TEST_DIST_DIR, "hooks", "lib", "untracked.js")
-)) as typeof import("./untracked.js");
+const {
+  listUntrackedPaths,
+  readUntrackedEntry,
+  repoRoot,
+  untrackedSnapshotKey,
+  lookupUntrackedBaseline,
+  captureUntrackedBaseline,
+  MAX_BASELINE_ENTRIES,
+  MAX_BASELINE_BYTES,
+} = (await import(join(TEST_DIST_DIR, "hooks", "lib", "untracked.js"))) as typeof import("./untracked.js");
 // Same convention as above: this is test infra, not product code, but a bare
 // "./fixtures/mkfifo-probe.ts" specifier fails tsc (TS5097) since this project emits, and the
 // sibling fixtures/*-runner.ts files are already executed from dist -- this sits where the build
@@ -26,6 +34,9 @@ const { getMkfifoProbe } = (await import(
 const { getNonUtf8FilenameProbe, nonUtf8FilenameBytes } = (await import(
   join(TEST_DIST_DIR, "hooks", "lib", "fixtures", "non-utf8-filename-probe.js")
 )) as { getNonUtf8FilenameProbe: typeof GetNonUtf8FilenameProbe; nonUtf8FilenameBytes: typeof NonUtf8FilenameBytes };
+const { getPermissionProbe } = (await import(
+  join(TEST_DIST_DIR, "hooks", "lib", "fixtures", "permission-probe.js")
+)) as { getPermissionProbe: typeof GetPermissionProbe };
 
 // See git-diff.test.ts's matching comment for the full rationale -- `which mkfifo` only proves the
 // binary is on PATH, not that mkfifo(2) actually works in this sandbox.
@@ -40,6 +51,17 @@ const nonUtf8ProbeResult = await getNonUtf8FilenameProbe();
 const hasNonUtf8Filenames = nonUtf8ProbeResult.ok;
 const nonUtf8SkipReason = nonUtf8ProbeResult.reason ?? "non-UTF-8 filenames not supported on this filesystem";
 const untrackedFifoRunnerPath = join(TEST_DIST_DIR, "hooks", "lib", "fixtures", "untracked-fifo-runner.js");
+
+// Functional probe, not a uid check: a uid check only tests one *reason* permission enforcement
+// might be bypassed (root), not whether it actually is here. This creates a real chmod-000 file
+// and tries to open it — see permission-probe.ts's doc comment for the full rationale. Notably
+// this is the only test in the suite that a uid guard let skip in CI unconditionally: the default
+// `image: node:22` runs as root with no `user:` key, so `process.getuid() === 0` was true on
+// every CI run, and the fail-open this test exists to guard (an unreadable path recorded under a
+// placeholder key that later reads as "unchanged") never actually ran there.
+const permissionProbeResult = await getPermissionProbe();
+const hasPermissionEnforcement = permissionProbeResult.ok;
+const permissionSkipReason = permissionProbeResult.reason ?? "permission enforcement not available in this sandbox";
 
 interface UntrackedFifoRunnerResult {
   entry: { key: string; lines: number; readable: boolean };
@@ -519,6 +541,22 @@ test("untrackedSnapshotKey keys an unrepresentable path on a hash of its raw byt
   assert.notEqual(key, otherKey, "two distinct unrepresentable paths must never collide on the same r: key");
 });
 
+test("lookupUntrackedBaseline finds a representable path's baseline value through the same p:-prefixed key untrackedSnapshotKey writes", () => {
+  const entry = { path: "some/file.txt", raw: rawOf("some/file.txt") };
+  const baseline = { [untrackedSnapshotKey(entry)]: "f:abc" };
+  assert.equal(lookupUntrackedBaseline(baseline, entry), "f:abc");
+  // The exact bug Minor 5 exists to make structurally unreachable: a bare-path lookup misses the
+  // p:-prefixed key entirely and reads as "not in the baseline" rather than throwing or failing
+  // loudly.
+  assert.equal((baseline as Record<string, string>)[entry.path as string], undefined);
+});
+
+test("lookupUntrackedBaseline returns undefined for a null or undefined baseline without throwing", () => {
+  const entry = { path: "x.txt", raw: rawOf("x.txt") };
+  assert.equal(lookupUntrackedBaseline(null, entry), undefined);
+  assert.equal(lookupUntrackedBaseline(undefined, entry), undefined);
+});
+
 test("captureUntrackedBaseline records a p: key per untracked path, with the path's real content key as the value", async () => {
   const repo = await makeRepo();
   try {
@@ -565,10 +603,11 @@ test("a snapshot value goes stale (no longer matches a fresh read) once the file
 
 test(
   "captureUntrackedBaseline omits an unreadable entry (permission-denied) rather than recording a placeholder key",
-  // Root bypasses file permission checks entirely, so this only reproduces as a non-root user --
-  // the same asymmetry the mkfifo/non-UTF-8 probes above guard against, just for `chmod` instead
-  // of a filesystem feature.
-  { skip: typeof process.getuid === "function" && process.getuid() === 0 ? "running as root; permission checks are bypassed" : false },
+  // Gated on a functional probe (does a real chmod-000 file actually refuse to open?), not a uid
+  // check -- root is the common way permission enforcement gets bypassed, but not the only one,
+  // and a uid check says nothing about whether enforcement actually held here. See
+  // permission-probe.ts and the hasPermissionEnforcement comment above for the full rationale.
+  { skip: hasPermissionEnforcement ? false : permissionSkipReason },
   async () => {
     const repo = await makeRepo();
     try {
@@ -589,6 +628,112 @@ test(
       );
     } finally {
       await chmod(join(repo, "locked.txt"), 0o644).catch(() => undefined);
+      await rm(repo, { recursive: true, force: true });
+    }
+  },
+);
+
+// --- Caps: MAX_BASELINE_ENTRIES / MAX_BASELINE_BYTES --------------------------------------------
+
+test(
+  "captureUntrackedBaseline returns null over MAX_BASELINE_ENTRIES, and still captures normally exactly at the cap",
+  { timeout: 60_000 },
+  async () => {
+    const repo = await makeRepo();
+    try {
+      // One over the cap: every file is 0 bytes, so this exercises the entry cap in isolation from
+      // the byte cap.
+      const names: string[] = [];
+      for (let i = 0; i < MAX_BASELINE_ENTRIES + 1; i++) {
+        const name = `f${i}.txt`;
+        names.push(name);
+        await writeFile(join(repo, name), "");
+      }
+
+      const overCap = await captureUntrackedBaseline(repo);
+      assert.equal(
+        overCap,
+        null,
+        "a snapshot with more than MAX_BASELINE_ENTRIES untracked paths must be untrustworthy (null), not truncated",
+      );
+
+      // Exactly at the cap (one file removed): a `>` -> `>=` mutation would wrongly reject this
+      // too and return null.
+      const lastName = names[names.length - 1];
+      assert.ok(lastName);
+      await rm(join(repo, lastName));
+
+      const atCap = await captureUntrackedBaseline(repo);
+      assert.notEqual(atCap, null, "exactly MAX_BASELINE_ENTRIES untracked paths must still capture, not be rejected");
+      assert.equal(Object.keys(atCap as Record<string, string>).length, MAX_BASELINE_ENTRIES);
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "captureUntrackedBaseline returns null over MAX_BASELINE_BYTES total bytes hashed, and still captures normally exactly at the cap",
+  { timeout: 60_000 },
+  async () => {
+    const repo = await makeRepo();
+    try {
+      const fileName = "big.bin";
+      const filePath = join(repo, fileName);
+      await writeFile(filePath, Buffer.alloc(MAX_BASELINE_BYTES, 0x61));
+
+      const atCap = await captureUntrackedBaseline(repo);
+      assert.notEqual(atCap, null, "exactly MAX_BASELINE_BYTES bytes must still capture, not be rejected");
+      assert.ok(
+        (atCap as Record<string, string>)[`p:${fileName}`]?.startsWith("f:"),
+        `expected an f: key for ${fileName} at the byte cap, got: ${JSON.stringify(atCap)}`,
+      );
+
+      // One byte over: a `>` -> `>=` mutation would already reject the exactly-at-cap case above,
+      // and a never-accumulating byte probe would never reject either case -- this pins the real
+      // boundary between the two.
+      await appendFile(filePath, "x");
+
+      const overCap = await captureUntrackedBaseline(repo);
+      assert.equal(overCap, null, "one byte over MAX_BASELINE_BYTES must be rejected as untrustworthy (null)");
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "captureUntrackedBaseline rejects a huge file via the byte cap without ever hashing it (probe-before-read ordering)",
+  { timeout: 30_000 },
+  async () => {
+    // A 4 GB sparse file: created via ftruncate, so it occupies no real disk blocks and costs
+    // nothing to create. If the byte cap correctly fires from the lstat probe *before*
+    // readUntrackedEntry streams and hashes the file, this returns null almost immediately. If the
+    // probe were removed, or reordered after the hash (or made to never accumulate, so the cap
+    // never fires at all), this would instead try to stream-hash 4 GB of content -- seconds, not
+    // milliseconds, even for an all-zero sparse read -- which the elapsed-time assertion below
+    // catches.
+    const repo = await makeRepo();
+    const fourGiB = 4 * 1024 * 1024 * 1024;
+    try {
+      const filePath = join(repo, "huge.bin");
+      const handle = await open(filePath, "w");
+      try {
+        await handle.truncate(fourGiB);
+      } finally {
+        await handle.close();
+      }
+
+      const start = Date.now();
+      const snapshot = await captureUntrackedBaseline(repo);
+      const elapsedMs = Date.now() - start;
+
+      assert.equal(snapshot, null, "a 4 GB file must trip the byte cap and return null");
+      assert.ok(
+        elapsedMs < 5000,
+        `expected the byte-cap probe to reject a 4 GB file in well under 5s without hashing it, took ${elapsedMs}ms`,
+      );
+    } finally {
       await rm(repo, { recursive: true, force: true });
     }
   },

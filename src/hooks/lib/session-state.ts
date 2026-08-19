@@ -70,17 +70,24 @@ export interface SessionState {
    */
   baselineHead?: string | null;
   /**
-   * Content keys (see `untrackedSnapshotKey` in `lib/untracked.ts`) for every untracked path that
-   * already existed at SessionStart -- the untracked counterpart to `baselineHead`. Absent (key
-   * missing from the object entirely) means never captured: a session predating this field, or a
-   * hook run that didn't reach the capture. `null` means capture was attempted and came back
-   * unusable -- not a git repo, the listing failed, or the snapshot exceeded its size cap. Both
-   * states mean the same thing to a measurement: count every untracked path, exactly as it did
-   * before this snapshot existed. Never re-captured mid-session (see `session-init.ts`'s `in`
-   * guard) -- a baseline that moved partway through would launder in-session files out of scope by
-   * making them look pre-existing on a later Stop.
+   * Marks that a SessionStart untracked-file capture was attempted for this session -- the
+   * untracked counterpart to `baselineHead`, but not the snapshot's content: the actual result
+   * (content keys per untracked path, or `null` if the capture came back unusable) is stored
+   * separately, in its own file keyed by session ID (see `untrackedBaselinePath` in `lib/paths.ts`
+   * and `lib/untracked-baseline-store.ts`), never inlined here. Session state is re-read,
+   * re-parsed, and re-written on every PostToolUse (telemetry.ts); an untracked snapshot is written
+   * once and read rarely -- sharing one file for both meant every hot-path write paid the cost of
+   * serializing a snapshot that could hold thousands of entries.
+   *
+   * Absent (key missing from the object entirely) means never captured: a session predating this
+   * field, or a hook run that hasn't reached SessionStart's capture step yet. **Absent is not the
+   * same as "captured but unusable" here** -- unlike the snapshot file's own `null`, which does mean
+   * that -- because the marker's only job is to gate re-capture (see `session-init.ts`'s guard):
+   * once present, it must never be retried mid-session regardless of the value captured, or a
+   * baseline that moved partway through would launder in-session files out of scope by making them
+   * look pre-existing on a later Stop. `true` is the only value ever written.
    */
-  baselineUntracked?: Record<string, string> | null;
+  baselineUntrackedCaptured?: boolean;
   /**
    * Diff fingerprint at the moment a `PRAXARCH_VERIFY_WAIVED:` waiver was accepted. The gate
    * measures the whole session's diff against `baselineHead`, so without this a waived diff

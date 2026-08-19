@@ -276,11 +276,16 @@ export async function readUntrackedEntry(root: string, raw: Buffer): Promise<Unt
 // A SessionStart snapshot with more entries than this is pathological (a repo with thousands of
 // untracked paths at session start), not a normal working tree, and pathological means the whole
 // snapshot is untrustworthy rather than partially trusted -- see captureUntrackedBaseline's doc
-// comment for why the response is `null` (count everything), not a truncated snapshot.
-const MAX_BASELINE_ENTRIES = 2000;
-// Same reasoning for total bytes: at the ceiling this is ~160 KB of state on disk for a normal
-// tree, worst case for a session state file that every hook reads and re-writes on every turn.
-const MAX_BASELINE_BYTES = 64 * 1024 * 1024;
+// comment for why the response is `null` (count everything), not a truncated snapshot. Exported
+// (not module-private) so untracked.test.ts can pin cap behavior against the real constant rather
+// than a hardcoded copy that could silently drift from it.
+export const MAX_BASELINE_ENTRIES = 2000;
+// Same reasoning for total bytes hashed: at the ceiling this is ~2000 entries' worth of content
+// actually read and hashed, not a fixed on-disk state size -- the snapshot is now persisted in its
+// own file (see session-init.ts), not inlined into the per-tool-call session state, so the
+// on-disk-size framing this comment used to carry no longer applies to that hot path at all.
+// Exported for the same pinning reason as MAX_BASELINE_ENTRIES above.
+export const MAX_BASELINE_BYTES = 64 * 1024 * 1024;
 
 /**
  * The key a SessionStart snapshot (`captureUntrackedBaseline`'s `Record`) is indexed by, and the
@@ -301,6 +306,26 @@ const MAX_BASELINE_BYTES = 64 * 1024 * 1024;
 export function untrackedSnapshotKey(entry: UntrackedPath): string {
   if (entry.path !== null) return `p:${entry.path}`;
   return `r:${createHash("sha256").update(entry.raw).digest("hex")}`;
+}
+
+/**
+ * The lookup half of `untrackedSnapshotKey`, exported as its own function so a caller physically
+ * cannot look a path up in a captured baseline with a bare path string. A baseline is keyed
+ * `"p:" + path` or `"r:" + sha256(raw).hex` (see `untrackedSnapshotKey`'s doc comment); indexing it
+ * with `baseline[path]` instead -- a bare path, no prefix -- misses every entry silently (the
+ * lookup returns `undefined`, which reads identically to "genuinely not in the baseline"), making
+ * the whole snapshot inert without ever throwing or failing loudly. Both `baseline` values that
+ * mean "no baseline" (`null` from a failed capture, `undefined` from a caller that hasn't captured
+ * one) return `undefined` here rather than throwing, so a caller can pass the result of
+ * `readUntrackedBaseline` (`lib/untracked-baseline-store.ts`) straight through without its own
+ * null check first.
+ */
+export function lookupUntrackedBaseline(
+  baseline: Record<string, string> | null | undefined,
+  entry: UntrackedPath,
+): string | undefined {
+  if (baseline == null) return undefined;
+  return baseline[untrackedSnapshotKey(entry)];
 }
 
 /**
