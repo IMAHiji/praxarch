@@ -63,8 +63,12 @@ hooks that check the two rules most worth enforcing mechanically:
       remote's *default branch* (`refs/remotes/<remote>/HEAD`, set by `git clone`) and not
       `@{upstream}` — with `@{upstream}`, pushing a local commit to a feature branch advanced the
       effective baseline onto the session's own unverified work, laundering it out of the
-      measurement. Restricting to the default branch means laundering requires pushing straight to
-      `main`, which policy and branch protection already forbid. Any uncertainty (no remote, no
+      measurement. Restricting to the default branch raises the cost of laundering but does not
+      close it: `git remote set-head <remote> <branch>` repoints `refs/remotes/<remote>/HEAD`
+      locally, needs no remote permission and no write to the default branch, and moves the
+      effective baseline onto the session's own work. The gate is a guardrail, not an adversarial
+      boundary — it already ships `PRAXARCH_SKIP_VERIFY=1` and `PRAXARCH_VERIFY_WAIVED:` as
+      first-class escape hatches, so anyone wanting out has a supported door. Any uncertainty (no remote, no
       `origin/HEAD`, merge-base failure, a candidate that isn't a descendant of the pin) falls back
       to the pinned baseline unchanged.
   - **A pre-existing, but reachable, symlink hazard was closed by the same rewrite.** The old
