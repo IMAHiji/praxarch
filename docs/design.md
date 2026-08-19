@@ -66,11 +66,11 @@ hooks that check the two rules most worth enforcing mechanically:
       measurement. Restricting to the default branch raises the cost of laundering but does not
       close it: `git remote set-head <remote> <branch>` repoints `refs/remotes/<remote>/HEAD`
       locally, needs no remote permission and no write to the default branch, and moves the
-      effective baseline onto the session's own work. The gate is a guardrail, not an adversarial
-      boundary — it already ships `PRAXARCH_SKIP_VERIFY=1` and `PRAXARCH_VERIFY_WAIVED:` as
-      first-class escape hatches, so anyone wanting out has a supported door. Any uncertainty (no remote, no
-      `origin/HEAD`, merge-base failure, a candidate that isn't a descendant of the pin) falls back
-      to the pinned baseline unchanged.
+      effective baseline onto the session's own work. This is a guardrail. It already ships
+      `PRAXARCH_SKIP_VERIFY=1` and `PRAXARCH_VERIFY_WAIVED:` as first-class escape hatches, so
+      nobody needs `set-head` to get out of it. Any uncertainty (no remote, no `origin/HEAD`,
+      merge-base failure, a candidate that isn't a descendant of the pin) falls back to the pinned
+      baseline unchanged.
   - **A pre-existing, but reachable, symlink hazard was closed by the same rewrite.** The old
     untracked loop called `readFile` on every listed path, which follows symlinks: an untracked
     symlink pointing outside the repo read out-of-repo content into the count, and one pointing at
