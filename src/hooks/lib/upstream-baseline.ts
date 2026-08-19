@@ -54,7 +54,13 @@ const execFileAsync = promisify(execFile);
  * mirroring an unset `pinned`.
  */
 export async function resolveEffectiveBaseline(cwd: string, pinned: string | null | undefined): Promise<string | null> {
-  if (!pinned) return pinned ?? null;
+  // Hardened, not just `pinned ?? null`: `pinned` is unreachable as `""` today (`state.baselineHead`
+  // is only ever a real `rev-parse HEAD` result or `null`), but `"" ?? null` evaluates to `""` --
+  // `??` only replaces `null`/`undefined`, not other falsy values -- and Task 7's planned caller
+  // does `effective ?? "HEAD"`, which has the same blind spot. An empty string is not a usable
+  // baseline under any reading of this contract, so every falsy `pinned` collapses to the same
+  // `null` result here rather than passing a footgun on to whichever caller reaches for `??` next.
+  if (!pinned) return null;
 
   const remote = await resolveRemoteName(cwd);
 

@@ -224,6 +224,62 @@ test("refs/remotes/<remote>/HEAD unset keeps the pinned baseline (not the same v
   }
 });
 
+test("a fetch that brings a teammate's commit without merging it does not advance past the merge-base (merge-base step is load-bearing, not a redundant hop to the raw tip)", async () => {
+  // No fixture up to this point ever leaves the remote-tracking tip strictly ahead of
+  // merge-base(HEAD, tip) -- every prior scenario either never fetches, or fetches-and-merges in
+  // the same beat. `fetch` alone (no merge, no pull) is exactly the shape that does: the session's
+  // own HEAD stays behind the remote-tracking ref, so `tip` itself is not reachable from HEAD and
+  // returning it directly (skipping merge-base) would hand back a commit the session never built
+  // on -- unreachable from HEAD, and liable to understate the diff if that commit happens to touch
+  // content the session also wrote locally.
+  const bare = await makeBareRemote();
+  const seed = await makeSeedRepo(bare);
+  const session = await cloneRepo(bare, "fetch-no-merge");
+  try {
+    const pinned = git(session, ["rev-parse", "HEAD"]);
+    await commitFile(session, "local.txt", "session work\n", "local commit");
+    const teammateTip = await commitFile(seed, "teammate.txt", "teammate's own reviewed work\n", "teammate commit");
+    git(seed, ["push", "-q", "origin", "main"]);
+    git(session, ["fetch", "-q", "origin"]); // deliberately no merge/pull -- HEAD does not move
+
+    const effective = await resolveEffectiveBaseline(session, pinned);
+    assert.equal(effective, pinned);
+    assert.notEqual(effective, teammateTip);
+  } finally {
+    await cleanup(bare, seed, session);
+  }
+});
+
+test("HEAD and the remote-tracking tip sharing no common ancestor falls back to the pinned baseline, not HEAD (merge-base failure path is load-bearing)", async () => {
+  // Two independently `git init`'d repos have disjoint root commits by construction -- no shared
+  // history to find, so `git merge-base HEAD <tip>` genuinely fails (non-zero exit, no output)
+  // rather than merely returning an unhelpful answer. `pinned` is an ancestor of the session's real
+  // HEAD (ordinary local work), so a mutant that assigns the literal string `"HEAD"` on that catch
+  // would pass the `--is-ancestor` guard (pinned is trivially an ancestor of the branch's own tip)
+  // and return `"HEAD"` -- the caller's `git diff` would then measure nothing but working-tree
+  // changes, dropping every commit the session made out of the diff. That failure shape has no
+  // other test: it needs the merge-base call itself to throw, which no other fixture produces.
+  const bare = await makeBareRemote();
+  await makeSeedRepo(bare); // unrelated history, becomes origin/main's sole content below
+  const session = await mkdtemp(join(tmpdir(), "praxarch-upstream-disjoint-"));
+  try {
+    execFileSync("git", ["init", "-q", "-b", "main", session]);
+    git(session, ["config", "user.email", "test@example.com"]);
+    git(session, ["config", "user.name", "Test"]);
+    const pinned = await commitFile(session, "p.txt", "p\n", "pinned commit");
+    const head = await commitFile(session, "h.txt", "h\n", "later commit, still session-local");
+    git(session, ["remote", "add", "origin", bare]);
+    git(session, ["fetch", "-q", "origin"]); // brings origin/main's disjoint history, sets origin/HEAD
+
+    const effective = await resolveEffectiveBaseline(session, pinned);
+    assert.equal(effective, pinned);
+    assert.notEqual(effective, head);
+    assert.notEqual(effective, "HEAD");
+  } finally {
+    await cleanup(bare, session);
+  }
+});
+
 test("a pinned baseline that is not an ancestor of the derived candidate is left untouched (rollback guard)", async () => {
   const bare = await makeBareRemote();
   const seed = await makeSeedRepo(bare);
