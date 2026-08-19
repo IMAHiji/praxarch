@@ -18,9 +18,16 @@ const execFileAsync = promisify(execFile);
  * `merge-base(HEAD, @{upstream})` advances onto the commit the session itself just pushed, which
  * would launder unreviewed work past the gate the moment it's pushed rather than merged.
  * `merge-base(HEAD, origin/HEAD)` does not move in that scenario, because laundering would require
- * pushing directly to the remote's default branch — normally branch-protected, and against policy
- * regardless. That distinction is the entire security property this module provides; do not
- * substitute `@{upstream}` for it.
+ * the remote's default branch itself to move. Two ways that can happen, both worth naming:
+ * pushing directly to the default branch (normally branch-protected, and against policy
+ * regardless — the actual mitigation for this route lives outside this module), and running
+ * `git remote set-head <remote> <branch>` locally to repoint which branch this module treats as
+ * "default" (verified: `git remote set-head origin feature` after pushing a feature branch makes
+ * this function return the session's own commit instead of the pin). The second route needs no
+ * remote permissions at all — it's a local config change — so it is the cheaper of the two, though
+ * still one this module cannot see happen; it can only trust whatever `origin/HEAD` resolves to at
+ * measurement time. That distinction (the reference, not the git commands around it) is the entire
+ * security property this module provides; do not substitute `@{upstream}` for the reference.
  *
  * Every failure mode below returns `pinned` unchanged (fail closed — uncertainty must never
  * resolve to counting less than the pinned baseline would):
@@ -28,9 +35,12 @@ const execFileAsync = promisify(execFile);
  *   back to either; the caller's own "diff from HEAD" default applies.
  * - no remote configured for the current branch (falls back to trying `"origin"`, but that guess
  *   can still fail at the next step) or a detached HEAD (no current branch to look up at all).
- * - `refs/remotes/<remote>/HEAD` doesn't exist. Set by `git clone`, but **not** by
- *   `git init` + `git remote add` + `git fetch` (verified) — the user-side fix is
- *   `git remote set-head <remote> -a`.
+ * - `refs/remotes/<remote>/HEAD` doesn't exist. This is not reliably "however the repo was set
+ *   up": on a current git (verified on 2.54.0), `git init` + `git remote add` + `git fetch` sets
+ *   it exactly the way `git clone` does. The ref is genuinely absent only when it was explicitly
+ *   removed (`git remote set-head <remote> -d`) or never created because the fetch that would
+ *   have set it happened on an old git version and was never repeated — the user-side fix in
+ *   either case is `git remote set-head <remote> -a`.
  * - `git merge-base HEAD <tip>` fails outright (e.g. the remote-tracking ref is unreachable from
  *   HEAD in a way merge-base can't resolve).
  * - the candidate merge-base is **not** a descendant-or-equal of `pinned`. This is the guard that
@@ -58,7 +68,8 @@ export async function resolveEffectiveBaseline(cwd: string, pinned: string | nul
     tip = stdout.trim();
     if (!tip) return pinned;
   } catch {
-    // No remote-tracking default branch to advance onto — see the doc comment's `set-head` note.
+    // No remote-tracking default branch to advance onto — see the doc comment above for when this
+    // ref is genuinely absent (it's not "however the repo happened to be set up").
     return pinned;
   }
 

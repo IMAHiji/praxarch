@@ -38,8 +38,10 @@ async function makeSeedRepo(bareRemote: string): Promise<string> {
   return dir;
 }
 
-// A clone of `bareRemote` — the one operation that reliably sets `refs/remotes/origin/HEAD`
-// (verified: `git init` + `git remote add` + `git fetch` does not).
+// A clone of `bareRemote` — the most common way `refs/remotes/origin/HEAD` gets set. Not the only
+// one: on this machine's git (2.54.0), `git init` + `git remote add` + `git fetch` sets it too, so
+// tests that need the ref genuinely absent delete it explicitly (see below) rather than relying on
+// a fetch-without-clone path whose behavior has changed across git versions.
 async function cloneRepo(bareRemote: string, prefix: string): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), `praxarch-upstream-${prefix}-`));
   execFileSync("git", ["clone", "-q", bareRemote, dir]);
@@ -153,38 +155,70 @@ test("a local commit pushed to a feature branch is not laundered past the gate (
   }
 });
 
-test("no remote configured at all keeps the pinned baseline", async () => {
+test("characterization: pushing a commit directly to the remote default branch does launder it out of scope (documented residual risk, intentional)", async () => {
+  // Pinned as intentional-and-documented behavior, not a defect: pushing straight to the remote's
+  // default branch is the one route this module cannot distinguish from "already reviewed and
+  // merged," because from the remote's perspective it's indistinguishable from an MR having
+  // landed. That's an accepted tradeoff (branch protection is the actual mitigation, not this
+  // module), but a future change could silently narrow or widen it without anyone noticing unless
+  // a test pins the current shape.
+  const bare = await makeBareRemote();
+  const seed = await makeSeedRepo(bare);
+  const session = await cloneRepo(bare, "direct-push");
+  try {
+    const pinned = git(session, ["rev-parse", "HEAD"]);
+    const pushedTip = await commitFile(session, "local.txt", "session work, pushed straight to main\n", "local commit");
+    git(session, ["push", "-q", "origin", "main"]);
+    git(session, ["fetch", "-q", "origin"]);
+
+    const effective = await resolveEffectiveBaseline(session, pinned);
+    assert.equal(effective, pushedTip);
+    assert.notEqual(effective, pinned);
+  } finally {
+    await cleanup(bare, seed, session);
+  }
+});
+
+test("no remote configured at all keeps the pinned baseline (not the same value as HEAD)", async () => {
   const repo = await mkdtemp(join(tmpdir(), "praxarch-upstream-noremote-"));
   try {
     execFileSync("git", ["init", "-q", "-b", "main", repo]);
     git(repo, ["config", "user.email", "test@example.com"]);
     git(repo, ["config", "user.name", "Test"]);
     const pinned = await commitFile(repo, "file.txt", "content\n", "initial");
+    // A commit after pinning makes `pinned` and `HEAD` distinct values. Without this, "returned
+    // pinned" (correct) and "advanced onto HEAD" (a fail-open) both produce the same commit and
+    // this assertion can't tell them apart — see MAJOR 1 in the verifier's finding on this file.
+    const head = await commitFile(repo, "later.txt", "session work\n", "local commit after pinning");
 
     const effective = await resolveEffectiveBaseline(repo, pinned);
     assert.equal(effective, pinned);
+    assert.notEqual(effective, head);
   } finally {
     await cleanup(repo);
   }
 });
 
-test("refs/remotes/<remote>/HEAD unset (init + remote add + fetch, not clone) keeps the pinned baseline", async () => {
+test("refs/remotes/<remote>/HEAD unset keeps the pinned baseline (not the same value as HEAD)", async () => {
   const bare = await makeBareRemote();
   const seed = await makeSeedRepo(bare);
-  const repo = await mkdtemp(join(tmpdir(), "praxarch-upstream-nohead-"));
+  const repo = await cloneRepo(bare, "nohead");
   try {
-    // Deliberately not `git clone` — this is the one path documented (and verified) not to set
-    // origin/HEAD.
-    execFileSync("git", ["init", "-q", "-b", "main", repo]);
-    git(repo, ["remote", "add", "origin", bare]);
-    git(repo, ["fetch", "-q", "origin"]);
-    git(repo, ["checkout", "-q", "-b", "main", "origin/main"]);
-    git(repo, ["config", "user.email", "test@example.com"]);
-    git(repo, ["config", "user.name", "Test"]);
     const pinned = git(repo, ["rev-parse", "HEAD"]);
+    // Force the ref genuinely absent rather than relying on a fetch-without-clone path: on this
+    // machine's git (2.54.0), `git init` + `git remote add` + `git fetch` sets
+    // refs/remotes/origin/HEAD too (verified), so that path no longer reproduces the state this
+    // test's name claims. `update-ref -d` reproduces the real conditions instead — a genuinely
+    // deleted or never-created ref, e.g. a repo cloned on an old git and never re-fetched, or a
+    // remote explicitly detached with `git remote set-head origin -d`.
+    git(repo, ["update-ref", "-d", "refs/remotes/origin/HEAD"]);
+    // A commit after pinning, same reasoning as the sibling "no remote" test above: `pinned` and
+    // `HEAD` must be distinguishable values for this assertion to have teeth.
+    const head = await commitFile(repo, "later.txt", "session work\n", "local commit after pinning");
 
     const effective = await resolveEffectiveBaseline(repo, pinned);
     assert.equal(effective, pinned);
+    assert.notEqual(effective, head);
   } finally {
     await cleanup(bare, seed, repo);
   }
