@@ -3,13 +3,14 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { TEST_DIST_DIR } from "../../test-support/dist-dir.js";
 // Imports the compiled output, not the sibling .ts source — matches the convention in
 // git-diff.test.ts/config.test.ts: tests resolve modules the way Node does at runtime.
-const here = dirname(fileURLToPath(import.meta.url));
+// TEST_DIST_DIR, not a hardcoded "../../../dist": #14 made `pnpm verify` build to a scratch
+// directory so verifying a branch no longer overwrites the installed hooks.
 const { resolveEffectiveBaseline } = (await import(
-  join(here, "..", "..", "..", "dist", "hooks", "lib", "upstream-baseline.js")
+  join(TEST_DIST_DIR, "hooks", "lib", "upstream-baseline.js")
 )) as typeof import("./upstream-baseline.js");
 
 function git(cwd: string, args: string[]): string {
