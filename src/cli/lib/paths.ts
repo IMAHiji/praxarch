@@ -15,4 +15,9 @@ const here = dirname(fileURLToPath(import.meta.url));
 /** Repo root, resolved relative to the compiled dist/cli/lib/paths.js location. */
 export const REPO_ROOT = join(here, "..", "..", "..");
 export const TEMPLATES_DIR = join(REPO_ROOT, "templates");
-export const DIST_DIR = join(REPO_ROOT, "dist");
+// Overridable so a CLI spawned out of a scratch build (`pnpm verify`, issue #14) reads its own
+// scratch output for install/doctor purposes instead of falling back to REPO_ROOT's real dist/ —
+// the same PRAXARCH_TEST_DIST_DIR env var src/test-support/dist-dir.js uses, so one variable
+// covers both "which compiled output do the tests spawn" and "which compiled output does the
+// spawned CLI itself treat as its dist/". Unset in normal use; defaults to the real dist/.
+export const DIST_DIR = process.env["PRAXARCH_TEST_DIST_DIR"] ?? join(REPO_ROOT, "dist");

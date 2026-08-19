@@ -20,6 +20,5 @@ cleanup() {
 trap cleanup EXIT
 
 rm -rf "$scratch_dir"
-npx tsc -p "$repo_root/tsconfig.json" --outDir "$scratch_dir"
-node "$repo_root/scripts/write-build-info.mjs" "$scratch_dir"
+sh "$repo_root/scripts/build.sh" "$scratch_dir"
 PRAXARCH_TEST_DIST_DIR="$scratch_dir" node --test --experimental-strip-types "$repo_root/src/**/*.test.ts"

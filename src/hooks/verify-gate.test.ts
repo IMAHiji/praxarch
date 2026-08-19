@@ -221,6 +221,43 @@ test("blocks a non-trivial diff with no verifier record", async () => {
   }
 });
 
+// issue #14 Part B: the block reason names the ref/branch this gate was built from — the compiled
+// script under test ships with a real dist/hooks/build-info.json (written by `pnpm build`), so
+// this exercises the actual read path, not a mock.
+test("a block names the git ref this gate was built from", async () => {
+  const fixture = await setupFixture();
+  try {
+    await makeNonTrivialDiff(fixture.repo);
+    const result = run(fixture, {
+      session_id: "s1",
+      cwd: fixture.repo,
+      hook_event_name: "Stop",
+    }) as { decision?: string; reason?: string };
+    assert.equal(result.decision, "block");
+    assert.match(result.reason ?? "", /\[praxarch built from .+@[0-9a-f]{12}.*\]$/);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+// The stamp is a block-only diagnostic, not printed on every hook invocation — an allow must
+// never carry it.
+test("an allow never carries the build-ref suffix", async () => {
+  const fixture = await setupFixture();
+  try {
+    await writeFile(join(fixture.repo, "file.txt"), "line\n".repeat(6));
+    const result = run(fixture, {
+      session_id: "s1",
+      cwd: fixture.repo,
+      hook_event_name: "Stop",
+    }) as { decision?: string; systemMessage?: string };
+    assert.equal(result.decision, undefined);
+    assert.doesNotMatch(result.systemMessage ?? "", /praxarch built from/);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
 test("block remediation interpolates the real session id, not a literal placeholder", async () => {
   const fixture = await setupFixture();
   try {

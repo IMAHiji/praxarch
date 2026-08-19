@@ -169,12 +169,27 @@ async function currentGitRef(): Promise<{ ref: string; branch: string | null } |
 // to name it. Degrades to an informational pass, never a failure, when either side of the
 // comparison is unavailable (pre-#14 install, tarball install, git missing) — a stale-ref check
 // that can't determine staleness isn't a defect worth failing doctor over.
+// readJsonIfExists does an unguarded JSON.parse — fine for callers reading praxarch's own
+// well-formed output, but build-info.json can be hand-edited or truncated by an interrupted
+// write, and doctor's whole job is reporting on a broken install. A parse failure here must
+// degrade to "unknown," the same as a missing file, never take every other check down with it.
+async function readBuildInfoIfValid(path: string): Promise<BuildInfo | null> {
+  const raw = await readTextIfExists(path);
+  if (raw === null) return null;
+  try {
+    return JSON.parse(raw) as BuildInfo;
+  } catch {
+    return null;
+  }
+}
+
 async function checkBuildRef(): Promise<Check> {
-  const installed = await readJsonIfExists<BuildInfo>(join(PRAXARCH_INSTALL_DIR, "hooks", "build-info.json"));
+  const installed = await readBuildInfoIfValid(join(PRAXARCH_INSTALL_DIR, "hooks", "build-info.json"));
   if (!installed?.ref) {
     return {
       ok: true,
-      message: "installed hooks' build ref is unknown (pre-#14 install, or git was unavailable at build time)",
+      message:
+        "installed hooks' build ref is unknown (pre-#14 install, git was unavailable at build time, or build-info.json is unreadable)",
     };
   }
   const current = await currentGitRef();

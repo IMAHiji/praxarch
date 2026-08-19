@@ -11,6 +11,12 @@ export interface BuildInfo {
 
 const NULL_INFO: BuildInfo = { ref: null, branch: null, dirty: null, builtAt: null };
 
+/** The hooks/ directory this compiled module ships alongside — dist/hooks in a real build. */
+function defaultHooksDir(): string {
+  const here = dirname(fileURLToPath(import.meta.url)); // .../hooks/lib
+  return join(here, "..");
+}
+
 /**
  * Reads the git ref this hook was built from — written by scripts/write-build-info.mjs as the
  * last step of `pnpm build`, sitting alongside the compiled hook at dist/hooks/build-info.json
@@ -21,11 +27,13 @@ const NULL_INFO: BuildInfo = { ref: null, branch: null, dirty: null, builtAt: nu
  * Never throws: a tarball install predating this file, a build that ran with no git available, or
  * a build-info.json that fails to parse all degrade to nulls rather than crashing the hook that
  * calls this.
+ *
+ * `hooksDir` defaults to this module's own sibling hooks/ directory; tests pass a temp directory
+ * instead so they can exercise missing/corrupt-file behavior without touching a real dist/.
  */
-export async function readBuildInfo(): Promise<BuildInfo> {
+export async function readBuildInfo(hooksDir: string = defaultHooksDir()): Promise<BuildInfo> {
   try {
-    const here = dirname(fileURLToPath(import.meta.url));
-    const raw = await readFile(join(here, "..", "build-info.json"), "utf8");
+    const raw = await readFile(join(hooksDir, "build-info.json"), "utf8");
     const parsed = JSON.parse(raw) as Partial<BuildInfo>;
     return {
       ref: typeof parsed.ref === "string" ? parsed.ref : null,

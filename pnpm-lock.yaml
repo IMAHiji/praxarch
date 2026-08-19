@@ -17,6 +17,9 @@ importers:
       eslint:
         specifier: ^9.19.0
         version: 9.39.4
+      globals:
+        specifier: ^17.11.0
+        version: 17.11.0
       typescript:
         specifier: ^5.7.3
         version: 5.9.3
@@ -309,6 +312,10 @@ packages:
 
   globals@14.0.0:
     resolution: {integrity: sha512-oahGvuMGQlPw/ivIYBjVSrWAfWLBeku5tpPE2fOPLi+WHffIWbuh2tCjhyQhTBPMf5E9jDEH4FOmTYgYwbKwtQ==}
+    engines: {node: '>=18'}
+
+  globals@17.11.0:
+    resolution: {integrity: sha512-Z2I8hM+PbJDXQDq3Icgpzv+mPdwr68iZUU9d5WW4FuXfDUQfkZaZuvjMv42/5crNyw154+9+VWXbYrUgDXbxNw==}
     engines: {node: '>=18'}
 
   has-flag@4.0.0:
@@ -811,6 +818,8 @@ snapshots:
       is-glob: 4.0.3
 
   globals@14.0.0: {}
+
+  globals@17.11.0: {}
 
   has-flag@4.0.0: {}
 
