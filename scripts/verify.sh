@@ -21,4 +21,4 @@ trap cleanup EXIT
 
 rm -rf "$scratch_dir"
 sh "$repo_root/scripts/build.sh" "$scratch_dir"
-PRAXARCH_TEST_DIST_DIR="$scratch_dir" node --test --experimental-strip-types "$repo_root/src/**/*.test.ts"
+PRAXARCH_TEST_DIST_DIR="$scratch_dir" node --test --experimental-strip-types --experimental-test-module-mocks "$repo_root/src/**/*.test.ts"

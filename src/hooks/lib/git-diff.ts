@@ -157,10 +157,15 @@ async function trackedDiff(cwd: string, target: string, args: string[]): Promise
  *   under-count that one path's line total, never hide the fact that something changed there).
  * - Success → real counts.
  *
- * Deliberately cheap: only `--numstat` (tracked) and untracked-file byte-length line counts are
- * computed — no patch text is fetched. Callers that also need the fingerprint (e.g. to detect a
- * stale verdict) call `diffFingerprint` separately, and only when they actually need it — see its
- * doc comment for why that split exists.
+ * Deliberately cheap relative to `diffFingerprint`: only `--numstat` (tracked) is fetched from
+ * git, no patch text. Every untracked regular file still has its full on-disk contents streamed
+ * through `readUntrackedEntry` — which counts newlines *and* sha256-hashes the bytes for its
+ * `key` — but `diffStat` itself only ever keeps the line count off that result; the key is
+ * discarded here; it exists for callers (e.g. a SessionStart snapshot) that need to detect
+ * whether a specific untracked path's content changed, not just how many lines it has. Callers
+ * that also need the fingerprint (e.g. to detect a stale verdict) call `diffFingerprint`
+ * separately, and only when they actually need it — see its doc comment for why that split
+ * exists.
  */
 export async function diffStat(
   cwd: string,
@@ -215,7 +220,10 @@ export async function diffStat(
 
   let changedLines = tracked.changedLines;
   let changedFiles = tracked.changedFiles;
-  for (const { path, raw } of untracked) {
+  // Iterates the whole `UntrackedPath` object, not a `{ path, raw }` destructure — a caller that
+  // also needs to key a snapshot off this entry (e.g. `untrackedSnapshotKey`) needs the object
+  // itself in hand, not just the two fields this loop happens to use today.
+  for (const untrackedPath of untracked) {
     // A `null` path is a name this module cannot represent as a string (invalid UTF-8 bytes — see
     // UntrackedPath.path's doc comment in untracked.ts). ignorePatterns is a set of user-authored
     // strings tested with a substring/segment match; there is no way to run that match against a
@@ -224,11 +232,25 @@ export async function diffStat(
     // fail-closed direction is to never treat a null path as ignore-matched, so it always falls
     // through to being read and counted below rather than silently vanishing into a rule nobody
     // could have written to catch it.
-    if (path !== null && ignorePatterns.some((pattern) => matchesIgnorePattern(path, pattern))) {
+    //
+    // This check runs before `readUntrackedEntry` is ever called, not after: an ignored path must
+    // never be `lstat`ed or read at all, only ever matched by name. Moving it after the read would
+    // still land on the same final counts (the `continue` below still discards the entry either
+    // way), but it would mean every ignored path pays for a real filesystem read it has no reason
+    // to trigger, and — for a path this module cannot yet prove is a plain file — no reason to
+    // touch at all.
+    if (
+      untrackedPath.path !== null &&
+      ignorePatterns.some((pattern) => matchesIgnorePattern(untrackedPath.path as string, pattern))
+    ) {
       continue;
     }
-    const entry = await readUntrackedEntry(root, raw);
+    const entry = await readUntrackedEntry(root, untrackedPath.raw);
     changedFiles += 1;
+    // `entry.readable === false` (a permission error, or a read that failed mid-stream) still
+    // contributes 1 file / 0 lines here, deliberately not `diffFingerprint`'s null-the-whole-
+    // measurement treatment of the same failure — see the function doc comment above for why the
+    // two functions diverge on this one point.
     changedLines += entry.lines;
   }
 
@@ -368,8 +390,12 @@ export async function diffFingerprint(cwd: string): Promise<string | null> {
     // — same fix, and same reasoning, as untracked.ts's repoRoot: a repo whose own directory name
     // ends in whitespace would otherwise come back truncated to a path that doesn't exist, and
     // every status entry below would then `lstat` ENOENT against that wrong root regardless of its
-    // real on-disk content.
-    root = stdout.replace(/\r?\n$/, "");
+    // real on-disk content. Strictly `\n`, not `\r?\n`: git writes LF through a pipe, never CRLF,
+    // so an optional `\r` here protects nothing real and instead eats a LEGAL trailing carriage
+    // return that's part of the directory name itself, reintroducing the exact truncation bug this
+    // line exists to fix (verified: a repo directory named "dircr\r" collapses to a nonexistent
+    // "dircr" root under `\r?\n$`, and the fingerprint stops moving on edits entirely).
+    root = stdout.replace(/\n$/, "");
   } catch {
     return null;
   }
