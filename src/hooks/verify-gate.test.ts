@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +9,8 @@ import type { getMkfifoProbe as GetMkfifoProbe } from "./lib/fixtures/mkfifo-pro
 import { TEST_DIST_DIR } from "../test-support/dist-dir.js";
 
 const script = join(TEST_DIST_DIR, "hooks", "verify-gate.js");
+const sessionInitScript = join(TEST_DIST_DIR, "hooks", "session-init.js");
+const cli = join(TEST_DIST_DIR, "cli", "index.js");
 
 // `which mkfifo` proves only that the binary is on PATH, not that mkfifo(2) actually works here
 // -- a sandboxed CI runner can ship the binary while refusing the syscall. The FIFO-based
@@ -188,6 +190,44 @@ function run(fixture: Fixture, input: unknown, extraEnv: Record<string, string> 
     env: { ...process.env, PRAXARCH_HOME: fixture.home, ...extraEnv },
   }).toString("utf8");
   return JSON.parse(stdout);
+}
+
+// Drives the real SessionStart hook so the untracked snapshot is written through the same code
+// path production uses (`captureUntrackedBaseline` -> `writeUntrackedBaseline`), rather than the
+// test hand-building the sidecar file and having to know its key format.
+function runSessionInit(fixture: Fixture, sessionId: string): void {
+  execFileSync("node", [sessionInitScript], {
+    cwd: fixture.repo,
+    input: JSON.stringify({
+      session_id: sessionId,
+      cwd: fixture.repo,
+      hook_event_name: "SessionStart",
+      source: "startup",
+    }),
+    env: { ...process.env, PRAXARCH_HOME: fixture.home },
+  });
+}
+
+function verifierText(verdict: "CONFIRMED" | "REFUTED", findings: { severity: string }[] = []): string {
+  return ["Some prose the resumed agent wrote before its verdict.", "```json", JSON.stringify({ verdict, findings }), "```"].join(
+    "\n",
+  );
+}
+
+// Real `praxarch record-verdict` invocation -- same reasoning as sessionInit above: the test must
+// never have to know the untracked snapshot's on-disk key format, only that the recorded counts
+// come out snapshot-aware.
+function runRecordVerdict(fixture: Fixture, sessionId: string, text: string): { stdout: string; stderr: string; status: number } {
+  const result = spawnSync("node", [cli, "record-verdict", "--session", sessionId, "--role", "verifier"], {
+    cwd: fixture.repo,
+    input: text,
+    env: { ...process.env, PRAXARCH_HOME: fixture.home },
+  });
+  return {
+    stdout: result.stdout?.toString("utf8") ?? "",
+    stderr: result.stderr?.toString("utf8") ?? "",
+    status: result.status ?? 1,
+  };
 }
 
 test("allows a trivial diff without requiring verification", async () => {
@@ -1406,5 +1446,147 @@ test("a numstat failure in a real repo (not a FIFO, not a non-repo cwd) also blo
     });
   } finally {
     await teardownFixture(fixture);
+  }
+});
+
+// Task 5: end-to-end proof that verify-gate reads the SessionStart untracked snapshot from its
+// sidecar store (not from state -- the field it once lived in, `state.baselineUntracked`, was
+// removed for the hot-path reasons in untracked-baseline-store.ts) and uses it to stop charging
+// pre-existing untracked content to the session. Driven through the real compiled hooks
+// (session-init.js then verify-gate.js) so the test never has to know the snapshot's on-disk key
+// format -- only dist/hooks/untracked.js and dist/hooks/untracked-baseline-store.js do.
+test("verify-gate's untracked baseline snapshot: a pre-existing untracked file is excluded, the same file created after session-init is not (one pair, both directions)", async () => {
+  const before = await setupFixture();
+  const after = await setupFixture();
+  try {
+    // Direction 1: plan.md exists BEFORE session-init runs -- it is in the SessionStart snapshot,
+    // so it must not count.
+    await writeFile(join(before.repo, "plan.md"), "line\n".repeat(120));
+    runSessionInit(before, "s1");
+    const allowResult = run(before, { session_id: "s1", cwd: before.repo, hook_event_name: "Stop" }) as {
+      decision?: string;
+    };
+    assert.equal(allowResult.decision, undefined, "a pre-existing untracked file must not be charged to the session");
+
+    // Direction 2: plan.md is written AFTER session-init runs -- absent from the snapshot, so it
+    // is genuinely new session work and must still count in full.
+    runSessionInit(after, "s2");
+    await writeFile(join(after.repo, "plan.md"), "line\n".repeat(120));
+    const blockResult = run(after, { session_id: "s2", cwd: after.repo, hook_event_name: "Stop" }) as {
+      decision?: string;
+      reason?: string;
+    };
+    assert.equal(blockResult.decision, "block");
+    assert.match(blockResult.reason ?? "", /changed 12\d lines/);
+  } finally {
+    await teardownFixture(before);
+    await teardownFixture(after);
+  }
+});
+
+// Task 5, acceptance criterion 2: the issue's "real severity" claim was that the inflated counts
+// land in the RECORD, not just in the block message -- prove that at the record.
+test("record-verdict's recorded changedLines/changedFiles are snapshot-aware, not inflated by a pre-existing untracked file", async () => {
+  const fixture = await setupFixture();
+  try {
+    await writeFile(join(fixture.repo, "plan.md"), "line\n".repeat(120));
+    runSessionInit(fixture, "s1");
+
+    // A genuine, small tracked change -- the only thing the recorded counts should reflect.
+    // file.txt starts as "line\n" x5 (setupFixture); a full-content replacement with 6 differing
+    // lines shows up in `git diff --numstat` as 5 deletions + 6 insertions = 11, matching the
+    // formula record-verdict.test.ts's own equivalent assertion uses.
+    await writeFile(join(fixture.repo, "file.txt"), "changed line\n".repeat(6));
+
+    const result = runRecordVerdict(fixture, "s1", verifierText("CONFIRMED"));
+    assert.equal(result.status, 0, result.stderr);
+
+    const state = await readState(fixture.home, "s1");
+    const lastVerifier = state["lastVerifier"] as { changedLines: number | null; changedFiles: number | null };
+    assert.equal(lastVerifier.changedFiles, 1, "the pre-existing untracked plan.md must not inflate the recorded file count");
+    assert.equal(lastVerifier.changedLines, 11, "the pre-existing untracked plan.md must not inflate the recorded line count");
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+// A real bare remote and clone, matching git-diff.test.ts's `makeBareRemoteWithClone` fixture
+// shape exactly -- this is the only way `refs/remotes/origin/HEAD` gets set the way
+// `resolveEffectiveBaseline` depends on for sub-case B.
+async function makeBareRemoteWithClone(prefix: string): Promise<{ bare: string; seed: string; session: string }> {
+  const bare = await mkdtemp(join(tmpdir(), `praxarch-verifygate-${prefix}-bare-`));
+  execFileSync("git", ["init", "-q", "--bare", "-b", "main", bare]);
+
+  const seed = await mkdtemp(join(tmpdir(), `praxarch-verifygate-${prefix}-seed-`));
+  execFileSync("git", ["init", "-q", "-b", "main", seed]);
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: seed });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: seed });
+  await writeFile(join(seed, "base.txt"), "base\n");
+  execFileSync("git", ["add", "."], { cwd: seed });
+  execFileSync("git", ["commit", "-q", "-m", "initial"], { cwd: seed });
+  execFileSync("git", ["remote", "add", "origin", bare], { cwd: seed });
+  execFileSync("git", ["push", "-q", "-u", "origin", "main"], { cwd: seed });
+
+  const session = await mkdtemp(join(tmpdir(), `praxarch-verifygate-${prefix}-session-`));
+  execFileSync("git", ["clone", "-q", bare, session]);
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: session });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: session });
+
+  return { bare, seed, session };
+}
+
+// Task 8: the issue's headline symptom, reproduced and pinned end-to-end at the hook level.
+// Observed report: 382/6 -> 539/16 purely from a `git pull` of already-verified upstream work,
+// invalidating a standing verdict it had no business invalidating.
+test("verify-gate sub-case B: a standing verdict survives a fast-forward pull of already-reviewed work, but still goes stale on genuinely new local work", async () => {
+  const { bare, seed, session } = await makeBareRemoteWithClone("subcaseb");
+  const home = await mkdtemp(join(tmpdir(), "praxarch-verifygate-subcaseb-home-"));
+  const fixture: Fixture = { repo: session, home };
+  try {
+    // Step 1: session baseline B on the clone, then a genuine ~100-line local change, recorded as
+    // a CONFIRMED verdict via the real record-verdict path (not hand-built state).
+    runSessionInit(fixture, "s1");
+    await writeFile(join(session, "local-work.txt"), "local\n".repeat(100));
+    const recordResult = runRecordVerdict(fixture, "s1", verifierText("CONFIRMED"));
+    assert.equal(recordResult.status, 0, recordResult.stderr);
+
+    // Step 2: verify-gate allows -- the verdict was just recorded against the current tree.
+    const afterRecord = run(fixture, { session_id: "s1", cwd: session, hook_event_name: "Stop" }) as {
+      decision?: string;
+    };
+    assert.equal(afterRecord.decision, undefined, "a freshly recorded verdict must allow immediately");
+
+    // Step 3: a ~160-line change is pushed from a second clone and pulled into the fixture repo,
+    // moving HEAD and necessarily changing the fingerprint.
+    await writeFile(join(seed, "upstream.txt"), "upstream\n".repeat(160));
+    execFileSync("git", ["add", "."], { cwd: seed });
+    execFileSync("git", ["commit", "-q", "-m", "already reviewed, merged upstream"], { cwd: seed });
+    execFileSync("git", ["push", "-q", "origin", "main"], { cwd: seed });
+    execFileSync("git", ["pull", "-q", "--ff-only", "origin", "main"], { cwd: session });
+
+    // Step 4: verify-gate still allows -- the size delta from the effective baseline is ~0, so the
+    // pull does not invalidate the standing verdict. Assert no "is stale" text at all.
+    const afterPull = run(fixture, { session_id: "s1", cwd: session, hook_event_name: "Stop" }) as {
+      decision?: string;
+      reason?: string;
+    };
+    assert.equal(afterPull.decision, undefined, JSON.stringify(afterPull));
+    assert.doesNotMatch(afterPull.reason ?? "", /is stale/);
+
+    // Step 5: negative control -- a further ~100-line LOCAL change after the pull must still go
+    // stale and block. Without this, step 4 would also pass for a gate that never expires
+    // anything at all.
+    await writeFile(join(session, "local-work-2.txt"), "more local\n".repeat(100));
+    const afterLocalChange = run(fixture, { session_id: "s1", cwd: session, hook_event_name: "Stop" }) as {
+      decision?: string;
+      reason?: string;
+    };
+    assert.equal(afterLocalChange.decision, "block");
+    assert.match(afterLocalChange.reason ?? "", /is stale/);
+  } finally {
+    await rm(bare, { recursive: true, force: true });
+    await rm(seed, { recursive: true, force: true });
+    await rm(session, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
   }
 });

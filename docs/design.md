@@ -44,6 +44,44 @@ hooks that check the two rules most worth enforcing mechanically:
   `PRAXARCH_SKIP_VERIFY=1` and an explicit `PRAXARCH_VERIFY_WAIVED: <reason>` in the final
   message — because a hard gate with no escape becomes something users route around by lying to
   it, which is worse than no gate.
+  - **The diff measurement is session-scoped in both halves (issue #16).** Before this, `diffStat`
+    charged the session with work it did not do, in two directions at once, and both were observed
+    live: a 118-line pre-existing untracked file counted in full on every Stop, and a `git pull` of
+    two already-verified MRs turned a standing verdict stale purely from received commits
+    (`382/6 -> 539/16`).
+    - *Untracked half.* SessionStart snapshots a content key (sha256 for regular files, a kind
+      marker for anything else) for every untracked path that already exists — `baselineUntracked`
+      in spirit, though the field that name would suggest carries only a marker (see the sidecar
+      note below). A later measurement counts a path only when its key is absent or differs from
+      the snapshot; an identical key means the session never touched it and it contributes nothing.
+      A changed pre-existing file still counts in full, not as a delta — an over-count, and the
+      accepted direction. Genuinely new files (absent from the snapshot) always count.
+    - *Tracked half.* `state.baselineHead` stays pinned on disk for the whole session — nothing in
+      this fix writes a new value to it. Instead, each measurement derives an *effective* baseline:
+      `git merge-base HEAD <remote>/HEAD`, used only when it is a descendant of the pinned baseline
+      (`resolveEffectiveBaseline`, `upstream-baseline.ts`). The reference is deliberately the
+      remote's *default branch* (`refs/remotes/<remote>/HEAD`, set by `git clone`) and not
+      `@{upstream}` — with `@{upstream}`, pushing a local commit to a feature branch advanced the
+      effective baseline onto the session's own unverified work, laundering it out of the
+      measurement. Restricting to the default branch means laundering requires pushing straight to
+      `main`, which policy and branch protection already forbid. Any uncertainty (no remote, no
+      `origin/HEAD`, merge-base failure, a candidate that isn't a descendant of the pin) falls back
+      to the pinned baseline unchanged.
+  - **A pre-existing, but reachable, symlink hazard was closed by the same rewrite.** The old
+    untracked loop called `readFile` on every listed path, which follows symlinks: an untracked
+    symlink pointing outside the repo read out-of-repo content into the count, and one pointing at
+    a FIFO blocked the read forever — the same hang class as the fingerprint's own FIFO fix below,
+    reached through a different entry point. The new dispatch (`untracked.ts`) uses `lstat`, never
+    follows a symlink, and reads a regular file only after `lstat` has proven it one. A related
+    fail-open closed at the same time: listing untracked files from a subdirectory used to return
+    only that subtree with cwd-relative paths, silently under-counting; listing now always runs
+    whole-repo and root-relative (`git ls-files --others --exclude-standard --full-name -- :/`).
+  - **Residual, accepted:** a `git pull` still drops a standing `PRAXARCH_VERIFY_WAIVED` waiver,
+    because the waiver compares raw fingerprints (HEAD-sensitive by design) rather than a size
+    delta — the gate re-blocks once after a pull even when nothing the session touched actually
+    changed. Fixing this would mean weakening the waiver into a size-delta rule, which was judged
+    the worse tradeoff; the gate re-blocking once is a nuisance, a waiver silently surviving a
+    HEAD move it was never evaluated against is a correctness bug.
   - A recorded verdict expires if the tree has moved past it: `telemetry` fingerprints the diff
     (a content hash plus changed-lines/changed-files counts) alongside every verdict it records,
     and `verify-gate` treats the verdict as stale — falling through to the normal block path —
@@ -128,7 +166,17 @@ hooks that check the two rules most worth enforcing mechanically:
       `baseline`-relative via `--numstat` against the session's recorded HEAD) and
       `diffFingerprint` (the hash — a pure function of the current tree, no baseline parameter);
       callers only pay for the fingerprint once they've established they actually need one, which
-      is why the two are separate rather than one combined call that always does both.
+      is why the two are separate rather than one combined call that always does both. `diffStat`'s
+      own untracked-file half (issue #16) mirrors `diffFingerprint`'s dispatch precisely rather than
+      duplicating it: both live behind `untracked.ts`'s `readUntrackedEntry`, listing is always
+      whole-repo and root-relative regardless of `cwd` (`--full-name -- :/`), symlinks are read via
+      `lstat` and never followed, a directory (an embedded repo or nested worktree) counts as one
+      file with zero lines rather than being descended into, and the ignore-pattern check runs
+      *before* any read so an ignored tree (default `dist/`) is never opened just to be discarded.
+      An unreadable entry still contributes its 1 file / 0 lines here — deliberately not
+      `diffFingerprint`'s `null` — because a permanently unreadable path would otherwise make the
+      whole measurement un-measurable, and therefore permanently blocking, for the rest of the
+      session; counting it conservatively keeps the gate usable.
   - The loop guard runs two independent counters, and fails open when *either* clears its limit.
     `verifyGateConsecutiveBlocks` (limit 2) is scoped to a single stop cycle *and* to a single
     diff: it's cleared on every genuine allow path and whenever `stop_hook_active` is false, so a
@@ -259,3 +307,64 @@ a hook can't safely make.
   differs) passes as fresh, since the hash-differs condition alone isn't sufficient without an
   accompanying size delta past `minChangedLines`/`minChangedFiles`. Accepted tradeoff of the
   hash+delta approach over a heavier `git write-tree` snapshot; see the `verify-gate` bullet above.
+- **A changed pre-existing untracked file is counted in full, not as a delta** — the untracked
+  baseline snapshot (issue #16) tells `diffStat` whether a path's content key matches what it was
+  at SessionStart, not how much of it changed. A one-line edit to a large pre-existing untracked
+  file therefore counts the whole file, over-counting. The safe direction, and the same semantics
+  untracked content already had before the snapshot existed.
+- **No `refs/remotes/<remote>/HEAD` means the tracked baseline stays pinned** — `git init` +
+  `git remote add` + `git fetch` never sets this ref (only `git clone` does), so
+  `resolveEffectiveBaseline` has nothing to advance onto and every measurement falls back to the
+  pinned `state.baselineHead`; received-but-not-yet-reviewed work is still charged to the session in
+  that setup, exactly as before this fix. `git remote set-head <remote> -a` is the fix, left to the
+  user rather than a config key — `verifyGate.upstreamRef` was considered and ruled a deliberate
+  non-goal here.
+- **A `git pull` still invalidates a standing `PRAXARCH_VERIFY_WAIVED` waiver** — the waiver
+  compares raw fingerprints, which are HEAD-sensitive by design, not size deltas. See the residual
+  note under the `verify-gate` bullet above.
+
+### Fail-opens mutation testing found, not review (issue #16)
+
+Every one of these shipped green through the normal suite; each surfaced only once a mutant was
+written to exercise it. Documented here, not just fixed, because each is one plausible "cleanup"
+away from returning — the `\r?\n$` one below already did, within the same day it was first closed.
+
+- **The untracked snapshot lives in its own sidecar file, `<stateDir>/<sessionId>.untracked.json`
+  (`untracked-baseline-store.ts`), never inside `SessionState`.** `SessionState` carries only
+  `baselineUntrackedCaptured?: boolean` — a marker that a capture was attempted, not the captured
+  content. The snapshot was originally written straight into `SessionState.baselineUntracked`
+  because "every consumer already reads session state" made it look free; that reasoning is exactly
+  backwards, because `telemetry.ts` rewrites the state file on *every* PostToolUse(Agent) call.
+  Measured at 1999 untracked files (~20MB of content hashed): SessionStart went from ~10ms to
+  **3495ms**, and the state file grew to **187KB**, re-parsed and re-serialized on every tool call
+  regardless of whether that call had anything to do with untracked files. A write-once/read-rarely
+  blob must never share storage with a record that gets rewritten constantly, however convenient
+  the existing read looks. If this ever gets "simplified" back into `SessionState`, that
+  regression returns with it.
+- **`repoRoot` returns a `Buffer`, and `readUntrackedEntry` takes `Buffer` paths end to end —
+  never a `string`.** `execFile` with `encoding: "buffer"` keeps git's stdout from being UTF-8
+  decoded before a path is built from it. A repo root, or an untracked path, with a real on-disk
+  name containing invalid-UTF-8 bytes (permitted by ext4/xfs, and reachable without an unusual
+  filesystem — a hook's `cwd` can arrive through an ASCII-named symlink that still resolves to a
+  non-UTF-8-named physical directory) gets silently corrupted to U+FFFD the moment it round-trips
+  through a `string`. That corruption made a 400-line untracked file measure as 0 — the decoded
+  path no longer matched the file on disk, so every fs call on it failed and the read degraded to
+  "path only." A `string`-typed path parameter reintroduces this the moment someone adds one,
+  regardless of how careful the body is.
+- **Git output carrying a path is stripped with `/\n$/` — never `.trim()`, and never `/\r?\n$/`.**
+  Both wider patterns eat legal trailing whitespace that is part of a real directory or file name,
+  not padding. `.trim()` strips leading whitespace too, which a repo root can also legitimately
+  have. `/\r?\n$/` looks like defensive Windows-compatibility hardening — reasonable-sounding
+  enough that it recurred within a day of first being removed — but git terminates this class of
+  output with a bare `0x0A` on every platform, never `0x0D 0x0A`, when writing through a pipe; the
+  `\r?` protects against nothing real and instead strips a legal trailing carriage return that was
+  part of the name. In `diffFingerprint` this produced a hash that never moved for a repo whose
+  root ended that way, so a CONFIRMED verdict never went stale no matter how much changed
+  afterward — a silent, permanent free pass, not a crash or a visible wrong number.
+- **Permission-dependent tests use a functional probe (`fixtures/permission-probe.ts`), never
+  `process.getuid() === 0`.** CI runs as root on some runners, and a uid check built to skip "when
+  we can't test this" instead skips exactly where the behavior under test — a permission denial —
+  is guaranteed to actually happen, silently removing the coverage where it matters most. The probe
+  attempts the real operation (e.g. writing to a locked-down path) and skips only on an actual
+  failure to set up the precondition, so the test still runs, and still means something, under
+  root.

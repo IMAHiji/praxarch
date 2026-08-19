@@ -3,6 +3,7 @@ import { loadConfig } from "../hooks/lib/config.js";
 import { appendJsonl } from "../hooks/lib/jsonl.js";
 import { logFileForDate } from "../hooks/lib/paths.js";
 import { readSessionState, updateSessionState, type VerifierRecord } from "../hooks/lib/session-state.js";
+import { readUntrackedBaseline } from "../hooks/lib/untracked-baseline-store.js";
 import {
   captureDiffCounts,
   captureDiffHash,
@@ -114,7 +115,15 @@ export async function recordVerdict(argv: string[], cwd: string = process.cwd())
   } catch (err) {
     return fail(`session state unwritable: ${String(err)}`);
   }
-  const { changedLines, changedFiles } = await captureDiffCounts(cwd, config.verifyGate.ignorePatterns, baselineHead);
+  // One store read, alongside the one `readSessionState` call above — matches telemetry.ts's
+  // fail-safe contract (a missing/corrupt sidecar reads as `null`, never throws).
+  const untrackedBaseline = await readUntrackedBaseline(args.session);
+  const { changedLines, changedFiles } = await captureDiffCounts(
+    cwd,
+    config.verifyGate.ignorePatterns,
+    baselineHead,
+    untrackedBaseline,
+  );
 
   const verifierRecord: VerifierRecord = {
     ...summary,
