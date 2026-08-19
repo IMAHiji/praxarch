@@ -2,7 +2,6 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { lstat, readlink } from "node:fs/promises";
-import { join } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -27,15 +26,15 @@ export function countNewlines(buf: Buffer): number {
   return count;
 }
 
-// No real filename can contain a NUL byte -- POSIX forbids it in every filesystem git runs on --
-// so a leading NUL can never collide with a genuine git-printed path. Used below to mark an entry
-// whose raw bytes could not be represented as a lossless UTF-8 string, so `readUntrackedEntry` can
-// recognize it without attempting an fs call that would silently target the wrong bytes.
-const UNREPRESENTABLE_PREFIX = "\0raw:";
+// git always prints "/" as the path separator in its own output (ls-files, status), regardless of
+// host OS, so `root` is joined against a raw entry with a literal "/" here — not `node:path`'s
+// OS-dependent separator, and not `path.join`, which is string-only and would force a decode step
+// this module exists to avoid.
+const PATH_SEP = Buffer.from("/");
 
-// Splits on the raw 0x00 byte rather than decoding to a string and splitting on "\0" -- decoding
-// first is exactly the bug this module exists to close (see decodeUntrackedEntry below), so the
-// delimiter search itself must run on the untouched bytes.
+// Splits on the raw 0x00 byte rather than decoding to a string and splitting on "\0" — decoding
+// first is exactly the bug this module exists to close (see listUntrackedPaths's doc comment), so
+// the delimiter search itself must run on the untouched bytes.
 function splitOnNul(buf: Buffer): Buffer[] {
   const entries: Buffer[] = [];
   let start = 0;
@@ -49,22 +48,32 @@ function splitOnNul(buf: Buffer): Buffer[] {
   return entries;
 }
 
-// Converts one raw path entry to a string, entry-by-entry rather than decoding the whole stdout
-// buffer at once -- so one malformed filename's replacement bytes can't shift where later NUL
-// delimiters appear to be. A JS string is UTF-16; a byte sequence that isn't valid UTF-8 cannot be
-// represented in one losslessly (Node's default decode replaces it with U+FFFD, and re-encoding
-// U+FFFD does not reproduce the original bytes). The round-trip check below is how that's
-// detected: decode, then re-encode, then compare against the original bytes. When it fails, the
-// entry is marked with UNREPRESENTABLE_PREFIX instead of returned as a path Node would then
-// silently mis-locate -- see readUntrackedEntry's handling of that prefix for why "give up
-// cleanly" (readable: false, always counts) is the fail-closed choice here, not an attempt to
-// reconstruct the real bytes through some other encoding.
-function decodeUntrackedEntry(bytes: Buffer): string {
-  const decoded = bytes.toString("utf8");
-  if (Buffer.from(decoded, "utf8").equals(bytes)) {
-    return decoded;
-  }
-  return `${UNREPRESENTABLE_PREFIX}${bytes.toString("base64")}`;
+export interface UntrackedPath {
+  /**
+   * The path exactly as git printed it, decoded to a string — present only when the raw bytes are
+   * valid UTF-8 and decoding them round-trips losslessly (decode, then re-encode, then compare
+   * against the original bytes). This is the only field that may be matched against
+   * `ignorePatterns` or used as a display/snapshot key, and it is never a synthesized value: an
+   * earlier version of this module encoded "unrepresentable" as an escaped marker string in this
+   * same slot, and the marker's own alphabet could itself contain a default ignore pattern
+   * (`dist/` appears inside a base64 payload) — silently dropping the entry from every count
+   * before it was ever read. There is no safe synthesized string, so there isn't one: `null` is
+   * the only representation for "this path is not a string."
+   *
+   * A caller matching `ignorePatterns` against `path` must skip (not invent a placeholder for)
+   * entries where this is `null`. `null` can never match a real pattern, which is the fail-closed
+   * direction — the entry falls through to being counted, never silently ignored.
+   */
+  path: string | null;
+  /**
+   * The exact bytes git printed for this entry, always present regardless of `path`. This — never
+   * `path` — is what `readUntrackedEntry` uses to address the file on disk: Node's fs functions
+   * accept a `Buffer` path and pass it to the syscall verbatim, with no string encode/decode step
+   * to lose or corrupt bytes through. That is what makes a representable and an unrepresentable
+   * path readable identically and correctly (real content, real line count) rather than the
+   * unrepresentable case needing a weaker, always-unreadable fallback.
+   */
+  raw: Buffer;
 }
 
 /**
@@ -78,27 +87,26 @@ function decodeUntrackedEntry(bytes: Buffer): string {
  * `-z` (NUL-terminated, unquoted output) is required, not cosmetic: `core.quotePath` defaults to
  * true, so without it git C-quotes any path containing a non-ASCII byte, `"`, `\`, a tab, or a
  * newline — e.g. `naïve.md` prints as the *string* `"na\303\257ve.md"`, a path that does not exist
- * on disk. `readUntrackedEntry` would then `lstat` a nonexistent path, land on the ENOENT branch,
- * and report `{key: "a:", readable: true}` — a fixed key that matches itself on every subsequent
- * measurement, so the real file silently never counts again.
+ * on disk.
  *
- * `-z` closes git's half of that (git itself never quotes with it), but not Node's: `execFile`'s
- * default encoding decodes the child's entire stdout as UTF-8 text before this function ever sees
- * it, and a filename containing bytes that are not valid UTF-8 (permitted by ext4/xfs on Linux;
- * rejected outright by APFS on macOS, which is why this half is invisible in local development)
- * gets silently replaced with U+FFFD by that decode — the same self-matching-`"a:"` bypass as the
- * quoting bug above, reached through Node's decoding instead of git's. `encoding: "buffer"` below
- * keeps `execFile` from decoding anything; `splitOnNul` finds delimiters on the raw bytes, and
- * `decodeUntrackedEntry` converts each entry individually with a UTF-8 round-trip check, so a
- * path that cannot be represented losslessly as a string is flagged (`UNREPRESENTABLE_PREFIX`)
- * rather than silently corrupted.
+ * `-z` closes git's half of that, but not Node's: `execFile`'s default encoding decodes the
+ * child's entire stdout as UTF-8 text before this function ever sees it, and a filename containing
+ * bytes that are not valid UTF-8 (permitted by ext4/xfs on Linux; rejected outright by APFS on
+ * macOS, which is why this half is invisible in local development) gets silently replaced with
+ * U+FFFD by that decode. `encoding: "buffer"` below keeps `execFile` from decoding anything;
+ * `splitOnNul` finds delimiters on the raw bytes, and each entry is round-tripped through UTF-8
+ * individually (not the whole stream at once, so one malformed filename's replacement bytes can't
+ * shift where a later delimiter appears to be) to decide `UntrackedPath.path` vs `null` — see that
+ * field's doc comment for why an unrepresentable path is `null` rather than any synthesized
+ * string, including the specific bypass an earlier in-band marker string reintroduced.
  *
- * `null` means the listing could not be fetched — never an empty list. A swallowed listing
- * failure read as "no untracked files" would hide every new file in the tree from the count; that
- * silent under-count is precisely what the `null` contract exists to prevent, so a failure here
- * must take the whole measurement down at the call site, not degrade to "nothing new."
+ * `null` (the whole return value) means the listing could not be fetched — never an empty list. A
+ * swallowed listing failure read as "no untracked files" would hide every new file in the tree
+ * from the count; that silent under-count is precisely what the `null` contract exists to prevent,
+ * so a failure here must take the whole measurement down at the call site, not degrade to "nothing
+ * new."
  */
-export async function listUntrackedPaths(cwd: string): Promise<string[] | null> {
+export async function listUntrackedPaths(cwd: string): Promise<UntrackedPath[] | null> {
   try {
     const { stdout } = await execFileAsync(
       "git",
@@ -106,12 +114,14 @@ export async function listUntrackedPaths(cwd: string): Promise<string[] | null> 
       { cwd, maxBuffer: MAX_GIT_BUFFER, encoding: "buffer" },
     );
     // Entries for an embedded repo / nested worktree arrive with a trailing slash (e.g.
-    // "nested/"). That's kept verbatim — it's the exact string `readUntrackedEntry` is called
-    // with, the exact string a baseline snapshot keys on, and the exact string `ignorePatterns`
-    // matches against, so decoding or trimming it here would silently disagree with all three.
-    // `splitOnNul` already drops zero-length segments (a path that is entirely whitespace, e.g.
-    // `touch ' '`, is a real entry and survives this; only genuinely empty segments are dropped).
-    return splitOnNul(stdout).map(decodeUntrackedEntry);
+    // "nested/"); kept verbatim in `raw` (and in `path`, when representable) rather than trimmed,
+    // for the same reason `splitOnNul` only drops genuinely zero-length segments and not
+    // whitespace-only ones (`touch ' '` is a real entry and must survive intact).
+    return splitOnNul(stdout).map((raw) => {
+      const decoded = raw.toString("utf8");
+      const path = Buffer.from(decoded, "utf8").equals(raw) ? decoded : null;
+      return { path, raw };
+    });
   } catch {
     return null;
   }
@@ -156,21 +166,28 @@ export interface UntrackedEntry {
  * the two functions can never disagree about what a given on-disk path "is." `lstat`, never
  * `stat`: a symlink must be inspected as itself, not through whatever it points at.
  *
+ * `raw` is the exact bytes `listUntrackedPaths` printed for this entry (its `UntrackedPath.raw`),
+ * not a string. Every fs call below is made against a `Buffer` path built from it, so there is no
+ * string encode/decode step anywhere in this function that could corrupt bytes or silently target
+ * a different file than the one git listed — the same guarantee for every entry, representable or
+ * not, rather than a weaker fallback for the latter.
+ *
  * The symlink branch is the security-relevant one. `readFile` on an untracked symlink follows it:
  * a symlink planted in the working tree that points outside the repo used to read arbitrary
  * out-of-repo file content into the count, and a symlink pointing at a FIFO used to block
  * `readFile` forever with no writer on the other end — a hung Stop hook, which the harness then
  * kills at timeout and treats as non-blocking: a silent fail-open on the enforcement gate. Never
- * following the link, and recording only its target string, makes both of those structurally
- * unreachable for `relPath`'s final path component: this function never opens what the leaf
- * itself points at, so it does not matter what kind of thing that leaf is. `lstat`/`readlink`
- * still resolve *intermediate* path components normally (that's POSIX path resolution, not a
- * choice this function makes) — a `relPath` like `"outdir/secret.txt"` where `outdir` is a
- * symlinked directory would read through that intermediate link. The intended caller cannot reach
- * that shape: `git ls-files` never descends into a symlinked directory, so `listUntrackedPaths`
- * only ever hands this function directory-shaped entries as a single opaque leaf (see the `d:`
- * branch below). `relPath` values must come from `listUntrackedPaths` in the same measurement for
- * that guarantee to hold — this function does not itself validate that precondition.
+ * following the link, and keying on a hash of its target bytes rather than its content, makes both
+ * of those structurally unreachable for `raw`'s final path component: this function never opens
+ * what the leaf itself points at, so it does not matter what kind of thing that leaf is.
+ * `lstat`/`readlink` still resolve *intermediate* path components normally (that's POSIX path
+ * resolution, not a choice this function makes) — a `raw` byte string shaped like
+ * `"outdir/secret.txt"` where `outdir` is a symlinked directory would read through that
+ * intermediate link. The intended caller cannot reach that shape: `git ls-files` never descends
+ * into a symlinked directory, so `listUntrackedPaths` only ever hands this function
+ * directory-shaped entries as a single opaque leaf (see the `d:` branch below). `raw` values must
+ * come from `listUntrackedPaths` in the same measurement for that guarantee to hold — this
+ * function does not itself validate that precondition.
  *
  * The regular-file branch is what makes that hold up under the streaming path too: `lstat` proves
  * a path is a regular file *before* `createReadStream` is ever called on it, so a FIFO can only
@@ -178,19 +195,8 @@ export interface UntrackedEntry {
  * stream. Reordering that — opening the stream first and dispatching after — would reintroduce
  * the exact hang this function exists to close, just moved one line later.
  */
-export async function readUntrackedEntry(root: string, relPath: string): Promise<UntrackedEntry> {
-  // A path flagged by listUntrackedPaths as unrepresentable (its raw bytes were not valid UTF-8,
-  // so this string is a base64 escape, not a real path — see UNREPRESENTABLE_PREFIX above). An fs
-  // call on it would UTF-8-encode the string back to bytes that don't match what's actually on
-  // disk, almost certainly ENOENT, landing on the "vanished" branch below and reading as
-  // `{key: "a:", readable: true}` — a fixed key that self-matches forever, making the real file
-  // invisible to every future measurement. Short-circuiting here instead means the entry is never
-  // snapshotted (`readable: false`) and always counts as a full file in the meantime.
-  if (relPath.startsWith(UNREPRESENTABLE_PREFIX)) {
-    return { key: "u:", lines: 0, readable: false };
-  }
-
-  const fullPath = join(root, relPath);
+export async function readUntrackedEntry(root: string, raw: Buffer): Promise<UntrackedEntry> {
+  const fullPath = Buffer.concat([Buffer.from(root, "utf8"), PATH_SEP, raw]);
 
   let st;
   try {
@@ -208,16 +214,24 @@ export async function readUntrackedEntry(root: string, relPath: string): Promise
   }
 
   if (st.isSymbolicLink()) {
-    // Never followed — see the function doc comment for why. The key is derived from the link's
-    // target string, not its content, so retargeting a symlink still moves the key even though
-    // nothing was read through it, and a dangling target is not a read failure.
-    let target: string;
+    // Never followed — see the function doc comment for why. Read as raw bytes (not a decoded
+    // string) and then hashed, rather than embedded verbatim the way a representable target could
+    // be: two different targets that are each invalid UTF-8 can decode to the identical
+    // U+FFFD-laden string (verified: symlinks to two distinct invalid-UTF-8 targets produced the
+    // same decoded string and therefore the same key), which would silently collapse two really
+    // different retargets into one. Hashing the raw bytes makes the key exact regardless of the
+    // target's own encoding, with no round-trip check needed the way `path` above needs one — a
+    // hash has no "unrepresentable" case. Content is still never read: only the target's bytes are
+    // hashed, so retargeting still moves the key even though nothing was read through the link,
+    // and a dangling target is not a read failure.
+    let target: Buffer;
     try {
-      target = await readlink(fullPath);
+      target = await readlink(fullPath, { encoding: "buffer" });
     } catch {
       return { key: "u:", lines: 0, readable: false };
     }
-    return { key: `l:${target}`, lines: 0, readable: true };
+    const targetHash = createHash("sha256").update(target).digest("hex");
+    return { key: `l:${targetHash}`, lines: 0, readable: true };
   }
 
   if (st.isDirectory()) {

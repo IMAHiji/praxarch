@@ -3,30 +3,28 @@ import assert from "node:assert/strict";
 import { appendFile, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { execFileSync, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import type { getMkfifoProbe as GetMkfifoProbe } from "./fixtures/mkfifo-probe.js";
 import type {
   getNonUtf8FilenameProbe as GetNonUtf8FilenameProbe,
   nonUtf8FilenameBytes as NonUtf8FilenameBytes,
 } from "./fixtures/non-utf8-filename-probe.js";
-// Imports the compiled output, not the sibling .ts source — same convention as git-diff.test.ts
-// (see the comment there): tests resolve modules the way Node does at runtime. Written against the
-// current `main` dist-path convention deliberately, per the plan's note on the in-flight
-// fix/verify-without-installing branch: that branch rewrites every test file's preamble to a
-// shared TEST_DIST_DIR helper that does not exist on `main` yet, so pre-adopting it here would not
-// compile. Rebasing after it lands is a two-line mechanical edit, not a merge conflict.
-const here = dirname(fileURLToPath(import.meta.url));
+import { TEST_DIST_DIR } from "../../test-support/dist-dir.js";
+// Imports the compiled output, not the sibling .ts source — matches the convention in
+// config.test.ts (see the comment there): tests resolve modules the way Node does at runtime.
 const { listUntrackedPaths, readUntrackedEntry, repoRoot } = (await import(
-  join(here, "..", "..", "..", "dist", "hooks", "lib", "untracked.js")
+  join(TEST_DIST_DIR, "hooks", "lib", "untracked.js")
 )) as typeof import("./untracked.js");
-// Same dist-path convention as above (this is test infra, not product code, and a bare
-// "./fixtures/mkfifo-probe.ts" specifier fails tsc (TS5097) since this project emits).
+// Same convention as above: this is test infra, not product code, but a bare
+// "./fixtures/mkfifo-probe.ts" specifier fails tsc (TS5097) since this project emits, and the
+// sibling fixtures/*-runner.ts files are already executed from dist -- this sits where the build
+// already handles it. Resolved through TEST_DIST_DIR (not a hardcoded "dist" segment) so it comes
+// from the scratch tree under `pnpm verify`, same as every other compiled-output import here.
 const { getMkfifoProbe } = (await import(
-  join(here, "..", "..", "..", "dist", "hooks", "lib", "fixtures", "mkfifo-probe.js")
+  join(TEST_DIST_DIR, "hooks", "lib", "fixtures", "mkfifo-probe.js")
 )) as { getMkfifoProbe: typeof GetMkfifoProbe };
 const { getNonUtf8FilenameProbe, nonUtf8FilenameBytes } = (await import(
-  join(here, "..", "..", "..", "dist", "hooks", "lib", "fixtures", "non-utf8-filename-probe.js")
+  join(TEST_DIST_DIR, "hooks", "lib", "fixtures", "non-utf8-filename-probe.js")
 )) as { getNonUtf8FilenameProbe: typeof GetNonUtf8FilenameProbe; nonUtf8FilenameBytes: typeof NonUtf8FilenameBytes };
 
 // See git-diff.test.ts's matching comment for the full rationale -- `which mkfifo` only proves the
@@ -37,21 +35,11 @@ const mkfifoSkipReason = mkfifoProbeResult.reason ?? "mkfifo not available on th
 
 // APFS (macOS) rejects a filename containing invalid-UTF-8 bytes outright (EILSEQ); ext4/xfs
 // (Linux, including GitLab CI) permit it. This is the exact asymmetry that let the Node-decode
-// bypass ship invisibly from local development -- see the non-UTF-8 filename test below.
+// bypass ship invisibly from local development -- see the non-UTF-8 filename tests below.
 const nonUtf8ProbeResult = await getNonUtf8FilenameProbe();
 const hasNonUtf8Filenames = nonUtf8ProbeResult.ok;
 const nonUtf8SkipReason = nonUtf8ProbeResult.reason ?? "non-UTF-8 filenames not supported on this filesystem";
-const untrackedFifoRunnerPath = join(
-  here,
-  "..",
-  "..",
-  "..",
-  "dist",
-  "hooks",
-  "lib",
-  "fixtures",
-  "untracked-fifo-runner.js",
-);
+const untrackedFifoRunnerPath = join(TEST_DIST_DIR, "hooks", "lib", "fixtures", "untracked-fifo-runner.js");
 
 interface UntrackedFifoRunnerResult {
   entry: { key: string; lines: number; readable: boolean };
@@ -106,6 +94,14 @@ async function makeRepo(): Promise<string> {
   return repo;
 }
 
+// UTF-8 encodes a display path into the raw bytes readUntrackedEntry expects -- every path
+// constructed directly in a test (as opposed to obtained from listUntrackedPaths itself) goes
+// through this rather than a bare string, since readUntrackedEntry's second argument is the exact
+// on-disk bytes, not a string.
+function rawOf(path: string): Buffer {
+  return Buffer.from(path, "utf8");
+}
+
 test("listUntrackedPaths from a subdirectory still returns the root-relative path of a file in a sibling directory", async () => {
   // The fail-open finding 1 from the plan: without --full-name and the :/ pathspec, `git ls-files
   // --others --exclude-standard` run from a subdirectory lists only that subtree, cwd-relative.
@@ -120,7 +116,7 @@ test("listUntrackedPaths from a subdirectory still returns the root-relative pat
     const paths = await listUntrackedPaths(sub);
     assert.notEqual(paths, null);
     assert.ok(
-      (paths ?? []).includes("root-untracked.txt"),
+      (paths ?? []).some((p) => p.path === "root-untracked.txt"),
       `expected root-relative "root-untracked.txt" in listing from a subdirectory, got: ${JSON.stringify(paths)}`,
     );
   } finally {
@@ -164,7 +160,7 @@ test("readUntrackedEntry on a symlink to an out-of-repo file never follows it: k
     const linkRelPath = "link-to-outside";
     await symlink(outsideFile, join(repo, linkRelPath));
 
-    const entry = await readUntrackedEntry(repo, linkRelPath);
+    const entry = await readUntrackedEntry(repo, rawOf(linkRelPath));
     assert.ok(entry.key.startsWith("l:"), `expected an "l:" key for a symlink, got: ${entry.key}`);
     assert.equal(entry.lines, 0, "a symlink must never contribute the followed target's line count");
     assert.equal(entry.readable, true);
@@ -180,9 +176,39 @@ test("readUntrackedEntry on a dangling symlink yields an l: key and readable: tr
     const linkRelPath = "dangling-link";
     await symlink("does-not-exist", join(repo, linkRelPath));
 
-    const entry = await readUntrackedEntry(repo, linkRelPath);
+    const entry = await readUntrackedEntry(repo, rawOf(linkRelPath));
     assert.ok(entry.key.startsWith("l:"), `expected an "l:" key for a dangling symlink, got: ${entry.key}`);
     assert.equal(entry.readable, true, "a dangling target is not a read failure");
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test("two symlinks with distinct invalid-UTF-8 targets get distinct keys (no target-decode collision)", async () => {
+  // The readlink half of the same defect family: a decoded (lossy) target string collapses two
+  // different invalid-UTF-8 byte sequences to the identical U+FFFD-laden string, so two
+  // genuinely different retargets would compare equal. readUntrackedEntry hashes the raw target
+  // bytes instead of embedding a decoded string, which has no "unrepresentable" case at all.
+  // Symlink targets aren't validated as real filesystem paths at creation time (unlike a real
+  // filename), so this doesn't need the non-UTF-8-filesystem probe -- it reproduces on macOS too.
+  const repo = await makeRepo();
+  try {
+    const targetA = Buffer.from([0x2f, 0x74, 0x6d, 0x70, 0x2f, 0x63, 0x61, 0x66, 0xe9]); // "/tmp/caf" + 0xE9
+    const targetB = Buffer.from([0x2f, 0x74, 0x6d, 0x70, 0x2f, 0x63, 0x61, 0x66, 0xea]); // "/tmp/caf" + 0xEA
+    assert.equal(
+      targetA.toString("utf8"),
+      targetB.toString("utf8"),
+      "test setup assumption: both targets decode to the same lossy string (both single invalid trailing bytes)",
+    );
+
+    await symlink(targetA, join(repo, "link-a"));
+    await symlink(targetB, join(repo, "link-b"));
+
+    const entryA = await readUntrackedEntry(repo, rawOf("link-a"));
+    const entryB = await readUntrackedEntry(repo, rawOf("link-b"));
+    assert.ok(entryA.key.startsWith("l:"));
+    assert.ok(entryB.key.startsWith("l:"));
+    assert.notEqual(entryA.key, entryB.key, "two symlinks with different raw targets must never produce the same key");
   } finally {
     await rm(repo, { recursive: true, force: true });
   }
@@ -202,14 +228,14 @@ test("an embedded git repo is listed with a trailing slash and reads as key d:, 
 
     const paths = await listUntrackedPaths(repo);
     assert.notEqual(paths, null);
-    const embeddedPath = (paths ?? []).find((p) => p.startsWith("embedded"));
-    assert.notEqual(embeddedPath, undefined, `expected an "embedded"-prefixed entry, got: ${JSON.stringify(paths)}`);
+    const embeddedEntry = (paths ?? []).find((p) => p.path?.startsWith("embedded"));
+    assert.ok(embeddedEntry, `expected an "embedded"-prefixed entry, got: ${JSON.stringify(paths)}`);
     assert.ok(
-      embeddedPath?.endsWith("/"),
-      `expected the embedded repo's listed path to end with "/", got: ${embeddedPath}`,
+      embeddedEntry.path?.endsWith("/"),
+      `expected the embedded repo's listed path to end with "/", got: ${embeddedEntry.path}`,
     );
 
-    const entry = await readUntrackedEntry(repo, embeddedPath as string);
+    const entry = await readUntrackedEntry(repo, embeddedEntry.raw);
     assert.equal(entry.key, "d:");
     assert.equal(entry.lines, 0);
     assert.equal(entry.readable, true);
@@ -222,13 +248,13 @@ test("a regular file's key changes when its content changes and is stable when i
   const repo = await makeRepo();
   try {
     await writeFile(join(repo, "new.txt"), "v1\n");
-    const a = await readUntrackedEntry(repo, "new.txt");
-    const b = await readUntrackedEntry(repo, "new.txt");
+    const a = await readUntrackedEntry(repo, rawOf("new.txt"));
+    const b = await readUntrackedEntry(repo, rawOf("new.txt"));
     assert.equal(a.key, b.key, "the key must be stable across two reads of unchanged content");
     assert.ok(a.key.startsWith("f:"));
 
     await writeFile(join(repo, "new.txt"), "v2\n");
-    const c = await readUntrackedEntry(repo, "new.txt");
+    const c = await readUntrackedEntry(repo, rawOf("new.txt"));
     assert.notEqual(a.key, c.key, "the key must change when the file's content changes");
   } finally {
     await rm(repo, { recursive: true, force: true });
@@ -239,7 +265,7 @@ test("a file whose content is 'a\\nb\\n' reports lines === 2", async () => {
   const repo = await makeRepo();
   try {
     await writeFile(join(repo, "twolines.txt"), "a\nb\n");
-    const entry = await readUntrackedEntry(repo, "twolines.txt");
+    const entry = await readUntrackedEntry(repo, rawOf("twolines.txt"));
     assert.equal(entry.lines, 2);
     assert.equal(entry.readable, true);
     assert.ok(entry.key.startsWith("f:"));
@@ -251,7 +277,7 @@ test("a file whose content is 'a\\nb\\n' reports lines === 2", async () => {
 test("readUntrackedEntry on a path that has vanished since listing (ENOENT) yields an a: key and still counts as readable", async () => {
   const repo = await makeRepo();
   try {
-    const entry = await readUntrackedEntry(repo, "never-existed.txt");
+    const entry = await readUntrackedEntry(repo, rawOf("never-existed.txt"));
     assert.equal(entry.key, "a:");
     assert.equal(entry.lines, 0);
     assert.equal(entry.readable, true, "a vanished path is a race, not an unreadable path");
@@ -276,12 +302,13 @@ test("listUntrackedPaths returns a non-ASCII filename unquoted, and readUntracke
 
     const paths = await listUntrackedPaths(repo);
     assert.notEqual(paths, null);
+    const found = (paths ?? []).find((p) => p.path === fileName);
     assert.ok(
-      (paths ?? []).includes(fileName),
+      found,
       `expected the exact on-disk name "${fileName}" in the listing (not a C-quoted string), got: ${JSON.stringify(paths)}`,
     );
 
-    const entry = await readUntrackedEntry(repo, fileName);
+    const entry = await readUntrackedEntry(repo, found.raw);
     assert.equal(entry.readable, true);
     assert.ok(entry.key.startsWith("f:"), `expected a real "f:" content key, got: ${entry.key}`);
     assert.equal(entry.lines, 500, "the file's real line count must be measured, not silently dropped to 0");
@@ -302,7 +329,7 @@ test("listUntrackedPaths includes a whitespace-only filename (not discarded by t
     const paths = await listUntrackedPaths(repo);
     assert.notEqual(paths, null);
     assert.ok(
-      (paths ?? []).includes(" "),
+      (paths ?? []).some((p) => p.path === " "),
       `expected the whitespace-only filename " " in the listing, got: ${JSON.stringify(paths)}`,
     );
   } finally {
@@ -344,15 +371,16 @@ test(
 // --- Node's own execFile utf8-decode bypass (a second half of the -z quoting fix) ---------------
 
 test(
-  "a filename with invalid-UTF-8 bytes is never self-matching: always readable: false, so it always counts",
+  "a filename with invalid-UTF-8 bytes gets path: null and is still read for real content via raw bytes",
   { skip: hasNonUtf8Filenames ? false : nonUtf8SkipReason },
   async () => {
     // Round 3's finding: -z stops GIT from quoting, but execFile's default utf8 decode still
     // mangles a genuinely non-UTF-8 filename into U+FFFD before this module ever sees it -- the
-    // exact same self-matching "a:" bypass as the quoting bug, reached through Node's decoder
-    // instead of git's. Fixed by reading stdout as a raw buffer and round-tripping each entry
-    // individually; an entry that can't round-trip losslessly must come back readable: false
-    // (never snapshotted, always counted), not a fixed "a:" key that matches itself forever.
+    // same self-matching "a:" bypass as the quoting bug, reached through Node's decoder instead of
+    // git's. Fixed structurally: `path` is `null` for such an entry (never a synthesized string),
+    // and `readUntrackedEntry` addresses the file with the raw bytes regardless -- so the file is
+    // read correctly (a real, content-derived "f:" key and a real line count) rather than falling
+    // back to a permanently-unreadable placeholder.
     const repo = await makeRepo();
     try {
       const nameBytes = nonUtf8FilenameBytes();
@@ -361,30 +389,77 @@ test(
 
       const paths = await listUntrackedPaths(repo);
       assert.notEqual(paths, null);
-      assert.equal((paths ?? []).length, 1, `expected exactly one untracked entry, got: ${JSON.stringify(paths)}`);
-      const listedPath = (paths as string[])[0] as string;
+      const list = paths ?? [];
+      assert.equal(list.length, 1, `expected exactly one untracked entry, got: ${JSON.stringify(paths)}`);
+      const entry0 = list[0];
+      assert.ok(entry0, "expected exactly one untracked entry");
+      assert.equal(entry0.path, null, "an invalid-UTF-8 filename must never be exposed as a synthesized string");
 
-      const t0 = await readUntrackedEntry(repo, listedPath);
-      assert.equal(t0.readable, false, "an unrepresentable path must never be marked readable (never snapshottable)");
+      const t0 = await readUntrackedEntry(repo, entry0.raw);
+      assert.equal(t0.readable, true, "the raw bytes address the real file, so it must read successfully");
+      assert.ok(t0.key.startsWith("f:"), `expected a real "f:" content key, got: ${t0.key}`);
+      assert.equal(t0.lines, 250, "the real line count must be measured, not dropped to 0");
 
       await appendFile(filePath, "line\n".repeat(250));
 
-      // Re-measure exactly as diffStat's loop would: re-list, then re-read at the (possibly
-      // re-decoded) current path string.
       const pathsAfter = await listUntrackedPaths(repo);
-      const listedPathAfter = ((pathsAfter ?? [])[0] ?? listedPath) as string;
-      const t1 = await readUntrackedEntry(repo, listedPathAfter);
+      const entry1 = (pathsAfter ?? []).find((p) => p.raw.equals(entry0.raw));
+      assert.ok(entry1, "the same raw-byte entry must still be listed after the content change");
+      const t1 = await readUntrackedEntry(repo, entry1.raw);
 
-      // The bypass this test guards against was `readable: true` at both T0 and T1 with an
-      // identical fixed "a:" key -- Task 3's captureUntrackedBaseline would snapshot it, and the
-      // 250 new lines above would compare equal and contribute nothing. readable: false at T1
-      // (not just T0) is what proves it: the path is never cached into a baseline, so it has no
-      // way to self-match and keeps counting on every future measurement, unconditionally.
-      assert.equal(
-        t1.readable,
-        false,
-        "an unrepresentable path must stay unreadable after content changes too, or it could be snapshotted and then self-match",
+      assert.equal(t1.lines, 500, "the updated content must be reflected, not silently frozen at the first read");
+      assert.notEqual(t0.key, t1.key, "the key must move when the file's content changes, exactly like any other file");
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "an invalid-UTF-8 filename whose base64 escape would contain a default ignore pattern is never matched against ignorePatterns",
+  { skip: hasNonUtf8Filenames ? false : nonUtf8SkipReason },
+  async () => {
+    // The MAJOR finding this round: an earlier fix encoded "unrepresentable" as an in-band marker
+    // string ("\0raw:" + base64), and the base64 alphabet contains "/" -- these exact bytes
+    // produced the marker "\0raw:pTydist/GJMu", which contains the default ignore pattern
+    // "dist/". A caller's `ignorePatterns.some(p => path.includes(p))` would then drop the entry
+    // before it was ever counted: 0 files / 0 lines for a genuinely new 500-line file, strictly
+    // worse than any "always counts" fallback. There is no marker anymore -- `path` is `null` for
+    // this entry, which is not a string an `Array.prototype.includes`-style check can match at
+    // all, and the real bytes still flow through `raw` to a correct read.
+    const repo = await makeRepo();
+    const nameBytes = Buffer.from([0xa5, 0x3c, 0x9d, 0x8a, 0xcb, 0x7f, 0x18, 0x93, 0x2e]);
+    try {
+      // Confirms this specific byte sequence is still the one that reproduces the historical
+      // defect (its base64 form contains "dist/"), so this test would fail loudly if the bytes
+      // above ever stopped exercising that shape.
+      assert.ok(
+        nameBytes.toString("base64").includes("dist/"),
+        `test setup assumption: nameBytes' base64 form must contain "dist/", got: ${nameBytes.toString("base64")}`,
       );
+
+      const filePath = Buffer.concat([Buffer.from(`${repo}/`), nameBytes]);
+      await writeFile(filePath, "line\n".repeat(200));
+
+      const paths = await listUntrackedPaths(repo);
+      assert.notEqual(paths, null);
+      const list = paths ?? [];
+      assert.equal(list.length, 1, `expected exactly one untracked entry, got: ${JSON.stringify(paths)}`);
+      const entry = list[0];
+      assert.ok(entry, "expected exactly one untracked entry");
+      assert.equal(entry.path, null);
+
+      // Simulates Task 2's ignore check exactly as specified (`ignorePatterns.some(p =>
+      // path.includes(p))`) against the real default ignore patterns -- proving there is no
+      // string in play that `.includes` could ever match, structurally, not just for this one
+      // pattern list.
+      const defaultIgnorePatterns = ["package-lock.json", "pnpm-lock.yaml", "yarn.lock", ".min.js", "dist/"];
+      const wouldBeIgnored = entry.path !== null && defaultIgnorePatterns.some((p) => (entry.path as string).includes(p));
+      assert.equal(wouldBeIgnored, false, "a null path must never be treated as ignored -- there is no string to check");
+
+      const read = await readUntrackedEntry(repo, entry.raw);
+      assert.equal(read.readable, true);
+      assert.equal(read.lines, 200, "the file must still be read for its real content, not silently dropped");
     } finally {
       await rm(repo, { recursive: true, force: true });
     }
