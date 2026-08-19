@@ -6,12 +6,22 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { DiffCounts } from "./git-diff.js";
 // Imports the compiled output, not the sibling .ts source — matches the convention in
 // config.test.ts (see the comment there): tests resolve modules the way Node does at runtime.
 const here = dirname(fileURLToPath(import.meta.url));
 const { diffStat, diffFingerprint } = (await import(
   join(here, "..", "..", "..", "dist", "hooks", "lib", "git-diff.js")
 )) as typeof import("./git-diff.js");
+
+// `diffStat` returns `DiffCounts | null` (null means "could not measure"). Every call site below
+// that expects a real measurement (a healthy repo, no simulated failure) routes through this so a
+// regression that turns a healthy-path measurement into `null` fails loudly with a clear message,
+// rather than as an opaque "Cannot read properties of null" a bare destructure would produce.
+function assertMeasured(counts: DiffCounts | null): DiffCounts {
+  assert.notEqual(counts, null, "expected diffStat to return real counts, not null, on this healthy-path call");
+  return counts as DiffCounts;
+}
 
 // mkfifo isn't available on every platform node:test runs on (notably Windows); the two FIFO
 // regression tests below skip visibly there rather than failing on an absent binary that has
@@ -31,6 +41,17 @@ try {
 // failure instead of wedging the whole suite.
 const fifoRunnerPath = join(here, "..", "..", "..", "dist", "hooks", "lib", "fixtures", "fifo-fingerprint-runner.js");
 const specialRunnerPath = join(here, "..", "..", "..", "dist", "hooks", "lib", "fixtures", "special-fingerprint-runner.js");
+const diffStatFifoRunnerPath = join(
+  here,
+  "..",
+  "..",
+  "..",
+  "dist",
+  "hooks",
+  "lib",
+  "fixtures",
+  "diffstat-fifo-runner.js",
+);
 
 interface FifoRunnerResult {
   before: string | null;
@@ -41,6 +62,10 @@ interface FifoRunnerResult {
 interface SpecialRunnerResult {
   actual: string | null;
   expected: string;
+}
+
+interface DiffStatFifoRunnerResult {
+  result: DiffCounts | null;
 }
 
 // Reusable by other tests/fixtures that need to bound a child process with a hard deadline and
@@ -108,9 +133,11 @@ async function makeRepo(): Promise<string> {
 // - `"oversizedStatus"` makes `git status` print output larger than MAX_GIT_BUFFER instead of
 //   failing outright — the maxBuffer-overflow variant of the same contract, without generating
 //   15k real files: the shim just emits a large synthetic blob for that one call.
+// - `"ls-files"` fails the untracked-file listing specifically, with `--numstat` passing through —
+//   diffStat's null contract for a failed listing inside an otherwise-successful measurement.
 async function makeFakeGitDir(
   logPath?: string,
-  failOn: "diff" | "numstat" | "status" | "oversizedStatus" = "diff",
+  failOn: "diff" | "numstat" | "status" | "oversizedStatus" | "ls-files" = "diff",
 ): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "praxarch-gitdiff-fakegit-"));
   // Resolve the real git's absolute path up front — the script below must never call "git" by
@@ -148,6 +175,14 @@ async function makeFakeGitDir(
           `  *) exec "${realGit}" "$@" ;;`,
           "esac",
         ];
+      case "ls-files":
+        return [
+          'case "$*" in',
+          `  *--numstat*) exec "${realGit}" "$@" ;;`,
+          `  *ls-files*) echo "fake git: ls-files failed" >&2; exit 1 ;;`,
+          `  *) exec "${realGit}" "$@" ;;`,
+          "esac",
+        ];
       case "diff":
       default:
         return [
@@ -169,7 +204,7 @@ async function makeFakeGitDir(
 async function withFakeGitOnPath<T>(
   fn: () => Promise<T>,
   logPath?: string,
-  failOn: "diff" | "numstat" | "status" | "oversizedStatus" = "diff",
+  failOn: "diff" | "numstat" | "status" | "oversizedStatus" | "ls-files" = "diff",
 ): Promise<T> {
   const fakeGitDir = await makeFakeGitDir(logPath, failOn);
   const prevPath = process.env["PATH"];
@@ -197,8 +232,8 @@ async function makeNoOpExternalDiffScript(): Promise<{ dir: string; path: string
 test("diffStat returns a stable count for an unchanged tree", async () => {
   const repo = await makeRepo();
   try {
-    const a = await diffStat(repo, [], null);
-    const b = await diffStat(repo, [], null);
+    const a = assertMeasured(await diffStat(repo, [], null));
+    const b = assertMeasured(await diffStat(repo, [], null));
     assert.deepEqual(a, b);
     assert.equal(a.changedLines, 0);
     assert.equal(a.changedFiles, 0);
@@ -211,7 +246,7 @@ test("diffStat counts change when the tracked diff changes", async () => {
   const repo = await makeRepo();
   try {
     await writeFile(join(repo, "file.txt"), "changed line\n".repeat(5));
-    const after = await diffStat(repo, [], null);
+    const after = assertMeasured(await diffStat(repo, [], null));
     assert.equal(after.changedFiles, 1);
     assert.ok(after.changedLines > 0);
   } finally {
@@ -219,12 +254,85 @@ test("diffStat counts change when the tracked diff changes", async () => {
   }
 });
 
-test("diffStat returns zeros, without throwing, when there is no usable git diff", async () => {
+test("diffStat counts tracked and untracked changes together (healthy-path regression pin)", async () => {
+  // Both halves of the measurement in one test -- a regression that broke either the tracked
+  // (--numstat) side or the untracked (ls-files + byte-length) side alone would still pass the
+  // single-purpose tests above/below on its own.
+  const repo = await makeRepo();
+  try {
+    await writeFile(join(repo, "file.txt"), "changed line\n".repeat(5));
+    await writeFile(join(repo, "new.txt"), "untracked line\n".repeat(3));
+    const result = assertMeasured(await diffStat(repo, [], null));
+    assert.equal(result.changedFiles, 2);
+    assert.ok(result.changedLines > 3);
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test("diffStat returns zeros, without throwing, when cwd isn't a git repo at all (deliberate fail-open, unchanged by the null contract)", async () => {
+  // Positive detection (isGitRepo), not an inferred "the diff call failed" -- this is the one
+  // case the null contract deliberately leaves as-is: a non-repo cwd has nothing to gate on, so
+  // verify-gate's trivial-diff allow should still fire, same as before this fix.
   const repo = await mkdtemp(join(tmpdir(), "praxarch-gitdiff-nogit-"));
   try {
     const result = await diffStat(repo, [], null);
-    assert.equal(result.changedLines, 0);
-    assert.equal(result.changedFiles, 0);
+    assert.notEqual(result, null, "a non-repo cwd must stay {0, 0}, never null");
+    assert.equal(result?.changedLines, 0);
+    assert.equal(result?.changedFiles, 0);
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test("diffStat returns real counts (not null) in a repo with no commits yet -- unborn HEAD is 'nothing committed', not 'unknown'", async () => {
+  // The one bad-object-shaped failure diffStat's catch must NOT turn into null: a brand-new repo
+  // with only untracked work is a healthy, common case (see verify-gate.test.ts's matching
+  // end-to-end test), not a measurement failure.
+  const repo = await mkdtemp(join(tmpdir(), "praxarch-gitdiff-nohead-"));
+  execFileSync("git", ["init", "-q"], { cwd: repo });
+  try {
+    await writeFile(join(repo, "new.txt"), "new line\n".repeat(5));
+    const result = assertMeasured(await diffStat(repo, [], null));
+    assert.equal(result.changedFiles, 1);
+    assert.ok(result.changedLines > 0);
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test("diffStat returns null when the --numstat probe fails in a real repo (not a bad-object failure)", async () => {
+  const repo = await makeRepo();
+  try {
+    await withFakeGitOnPath(
+      async () => {
+        const result = await diffStat(repo, [], null);
+        assert.equal(result, null);
+      },
+      undefined,
+      "numstat",
+    );
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test("diffStat returns null when ls-files fails in a real repo, even though --numstat itself succeeded", async () => {
+  const repo = await makeRepo();
+  try {
+    await writeFile(join(repo, "file.txt"), "changed line\n".repeat(5));
+    await withFakeGitOnPath(
+      async () => {
+        const result = await diffStat(repo, [], null);
+        assert.equal(
+          result,
+          null,
+          "a failed untracked-file listing must null out the whole measurement, not just contribute nothing",
+        );
+      },
+      undefined,
+      "ls-files",
+    );
   } finally {
     await rm(repo, { recursive: true, force: true });
   }
@@ -746,6 +854,39 @@ test(
       result.actual,
       result.expected,
       "a non-regular, non-symlink, non-directory inode must hash path + code + the SPECIAL marker",
+    );
+  },
+);
+
+// --- Issue #2: diffStat's null-on-failure contract ----------------------------------------------
+
+test(
+  "diffStat returns null on the original repro (a FIFO replacing a tracked file, plus a genuine large change elsewhere) -- never zeros",
+  { skip: hasMkfifo ? false : "mkfifo not available on this platform" },
+  async () => {
+    // The defect this issue closes: a FIFO anywhere in the tree used to make the whole --numstat
+    // probe fail, and diffStat's old swallow-all catch degraded that failure to {0, 0} -- letting
+    // a genuinely large, unreviewed change elsewhere in the same tree read as trivial. Run in a
+    // spawned child per this file's FIFO-test convention (see diffstat-fifo-runner.ts's comment).
+    const { code, stdout, stderr } = await runWithDeadline(
+      diffStatFifoRunnerPath,
+      15_000,
+      "diffStat hung on a FIFO in the tree",
+    );
+    assert.equal(code, 0, `runner exited non-zero (code ${code}); stderr: ${stderr}`);
+
+    const lastLine = stdout.trim().split("\n").pop() ?? "";
+    let parsed: DiffStatFifoRunnerResult;
+    try {
+      parsed = JSON.parse(lastLine) as DiffStatFifoRunnerResult;
+    } catch {
+      assert.fail(`runner did not print parseable JSON; stdout: ${stdout || "<empty>"}, stderr: ${stderr}`);
+    }
+
+    assert.equal(
+      parsed.result,
+      null,
+      "a FIFO-caused numstat failure must read as null (unmeasurable), never as zero counts",
     );
   },
 );

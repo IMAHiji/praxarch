@@ -5,9 +5,27 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { DiffCounts } from "./lib/git-diff.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const script = join(here, "..", "..", "dist", "hooks", "verify-gate.js");
+
+// mkfifo isn't available on every platform (notably Windows) -- the FIFO-based end-to-end test
+// below skips visibly there, matching the convention in git-diff.test.ts.
+let hasMkfifo = true;
+try {
+  execFileSync("which", ["mkfifo"], { stdio: "ignore" });
+} catch {
+  hasMkfifo = false;
+}
+
+// `diffStat` returns `DiffCounts | null` (null means "could not measure"). Every call site below
+// expects a real measurement (a healthy repo, no simulated failure) and routes through this so a
+// regression fails loudly instead of throwing on a destructure of null.
+function assertMeasured(counts: DiffCounts | null): DiffCounts {
+  assert.notEqual(counts, null, "expected diffStat to return real counts, not null, on this healthy-path call");
+  return counts as DiffCounts;
+}
 
 // A fake `git` on PATH that behaves like the real one for --numstat and ls-files, but always
 // fails `git status` outright — simulating a real, black-box failure of the call
@@ -32,6 +50,33 @@ async function makeFakeGitDir(): Promise<string> {
 
 async function withFakeGitOnPath<T>(fn: (fakeGitDir: string) => Promise<T>): Promise<T> {
   const fakeGitDir = await makeFakeGitDir();
+  try {
+    return await fn(fakeGitDir);
+  } finally {
+    await rm(fakeGitDir, { recursive: true, force: true });
+  }
+}
+
+// Same shape as makeFakeGitDir/withFakeGitOnPath above, but fails the --numstat probe itself
+// (with `ls-files` and `status` passing through) rather than `status` -- the generic "diffStat's
+// own measurement failed in a real repo, not a FIFO" case issue #2's null contract also covers.
+async function makeFakeGitDirFailingNumstat(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "praxarch-verifygate-fakegit-numstat-"));
+  const realGit = execFileSync("which", ["git"]).toString("utf8").trim();
+  const script2 = [
+    "#!/bin/sh",
+    'case "$*" in',
+    `  *--numstat*) echo "fake git: numstat probe failed" >&2; exit 1 ;;`,
+    `  *) exec "${realGit}" "$@" ;;`,
+    "esac",
+  ].join("\n");
+  await writeFile(join(dir, "git"), `${script2}\n`, "utf8");
+  await chmod(join(dir, "git"), 0o755);
+  return dir;
+}
+
+async function withFakeGitOnPathFailingNumstat<T>(fn: (fakeGitDir: string) => Promise<T>): Promise<T> {
+  const fakeGitDir = await makeFakeGitDirFailingNumstat();
   try {
     return await fn(fakeGitDir);
   } finally {
@@ -700,7 +745,7 @@ test("CONFIRMED verdict whose fingerprint matches the current tree allows", asyn
   try {
     await makeNonTrivialDiff(fixture.repo);
     const { diffStat, diffFingerprint } = (await import(join(here, "..", "..", "dist", "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
-    const { changedLines, changedFiles } = await diffStat(fixture.repo, [], null);
+    const { changedLines, changedFiles } = assertMeasured(await diffStat(fixture.repo, [], null));
     const hash = await diffFingerprint(fixture.repo);
     await seedVerifierState(fixture.home, "s1", {
       verdict: "CONFIRMED",
@@ -726,7 +771,7 @@ test("CONFIRMED verdict with a differing hash but a below-threshold size delta s
   try {
     await makeNonTrivialDiff(fixture.repo);
     const { diffStat, diffFingerprint } = (await import(join(here, "..", "..", "dist", "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
-    const { changedLines, changedFiles } = await diffStat(fixture.repo, [], null);
+    const { changedLines, changedFiles } = assertMeasured(await diffStat(fixture.repo, [], null));
     const hash = await diffFingerprint(fixture.repo);
     await seedVerifierState(fixture.home, "s1", {
       verdict: "CONFIRMED",
@@ -757,7 +802,7 @@ test("CONFIRMED verdict with a differing hash and a threshold-clearing size delt
   try {
     await makeNonTrivialDiff(fixture.repo);
     const { diffStat, diffFingerprint } = (await import(join(here, "..", "..", "dist", "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
-    const { changedLines, changedFiles } = await diffStat(fixture.repo, [], null);
+    const { changedLines, changedFiles } = assertMeasured(await diffStat(fixture.repo, [], null));
     const hash = await diffFingerprint(fixture.repo);
     await seedVerifierState(fixture.home, "s1", {
       verdict: "CONFIRMED",
@@ -788,7 +833,7 @@ test("a zero file-count delta still reads as a real change, not as nothing happe
   try {
     await makeNonTrivialDiff(fixture.repo);
     const { diffStat, diffFingerprint } = (await import(join(here, "..", "..", "dist", "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
-    const { changedLines, changedFiles } = await diffStat(fixture.repo, [], null);
+    const { changedLines, changedFiles } = assertMeasured(await diffStat(fixture.repo, [], null));
     const hash = await diffFingerprint(fixture.repo);
     await seedVerifierState(fixture.home, "s1", {
       verdict: "REFUTED",
@@ -824,7 +869,7 @@ test("a negative file delta alongside a positive line delta reads as English, no
     await writeFile(join(fixture.repo, "extra.txt"), "line\n".repeat(50));
     await makeNonTrivialDiff(fixture.repo);
     const { diffStat, diffFingerprint } = (await import(join(here, "..", "..", "dist", "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
-    const { changedLines, changedFiles } = await diffStat(fixture.repo, [], null);
+    const { changedLines, changedFiles } = assertMeasured(await diffStat(fixture.repo, [], null));
     const hash = await diffFingerprint(fixture.repo);
     await seedVerifierState(fixture.home, "s1", {
       verdict: "REFUTED",
@@ -883,7 +928,7 @@ test("reverted work (negative delta) with a differing hash still allows", async 
     // Large non-trivial diff, recorded by the verifier.
     await writeFile(join(fixture.repo, "file.txt"), "changed line\n".repeat(100));
     const { diffStat, diffFingerprint } = (await import(join(here, "..", "..", "dist", "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
-    const { changedLines, changedFiles } = await diffStat(fixture.repo, [], null);
+    const { changedLines, changedFiles } = assertMeasured(await diffStat(fixture.repo, [], null));
     const hash = await diffFingerprint(fixture.repo);
     await seedVerifierState(fixture.home, "s1", {
       verdict: "CONFIRMED",
@@ -942,7 +987,7 @@ test("a stale REFUTED verdict is reported with its own verdict, not hardcoded CO
   try {
     await writeFile(join(fixture.repo, "file.txt"), "changed line\n".repeat(100));
     const { diffStat, diffFingerprint } = (await import(join(here, "..", "..", "dist", "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
-    const { changedLines, changedFiles } = await diffStat(fixture.repo, [], null);
+    const { changedLines, changedFiles } = assertMeasured(await diffStat(fixture.repo, [], null));
     const hash = await diffFingerprint(fixture.repo);
     await seedVerifierState(fixture.home, "s1", {
       verdict: "REFUTED",
@@ -975,7 +1020,7 @@ test("an unhashable current diff (patch fetch failed) is treated as unknown, not
   try {
     await makeNonTrivialDiff(fixture.repo);
     const { diffStat, diffFingerprint } = (await import(join(here, "..", "..", "dist", "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
-    const { changedLines, changedFiles } = await diffStat(fixture.repo, [], null);
+    const { changedLines, changedFiles } = assertMeasured(await diffStat(fixture.repo, [], null));
     const hash = await diffFingerprint(fixture.repo);
     await seedVerifierState(fixture.home, "s1", {
       verdict: "CONFIRMED",
@@ -1012,7 +1057,7 @@ test("an unhashable current diff still allows when the size delta stays below bo
   try {
     await makeNonTrivialDiff(fixture.repo);
     const { diffStat, diffFingerprint } = (await import(join(here, "..", "..", "dist", "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
-    const { changedLines, changedFiles } = await diffStat(fixture.repo, [], null);
+    const { changedLines, changedFiles } = assertMeasured(await diffStat(fixture.repo, [], null));
     const hash = await diffFingerprint(fixture.repo);
     await seedVerifierState(fixture.home, "s1", {
       verdict: "CONFIRMED",
@@ -1203,6 +1248,76 @@ test("the two fail-open reasons -- consecutive-block and per-cycle ceiling -- ar
     );
     assert.ok(reasons.has("loop-guard"), "expected a plain loop-guard fail-open reason");
     assert.ok(reasons.has("loop-guard-cycle"), "expected a loop-guard-cycle fail-open reason");
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+// --- Issue #2: diffStat null-on-failure -----------------------------------------------------
+
+test(
+  "original repro: a FIFO replacing a tracked file plus a genuine large change elsewhere blocks with the could-not-measure message, not a silent allow",
+  { skip: hasMkfifo ? false : "mkfifo not available on this platform" },
+  async () => {
+    const fixture = await setupFixture();
+    try {
+      const realChangePath = join(fixture.repo, "real-change.txt");
+      const victimPath = join(fixture.repo, "victim.txt");
+      await writeFile(realChangePath, "line\n".repeat(5));
+      await writeFile(victimPath, "line\n".repeat(5));
+      execFileSync("git", ["add", "."], { cwd: fixture.repo });
+      execFileSync("git", ["commit", "-q", "-m", "add fixture files"], { cwd: fixture.repo });
+
+      // A genuine, sizeable change -- pre-fix, this used to be reported as zeros once the FIFO
+      // below made the whole numstat probe fail, and verify-gate allowed with no verdict on record.
+      await writeFile(realChangePath, "changed line\n".repeat(500));
+
+      await rm(victimPath);
+      execFileSync("mkfifo", [victimPath]);
+
+      const result = run(fixture, {
+        session_id: "s1",
+        cwd: fixture.repo,
+        hook_event_name: "Stop",
+      }) as { decision?: string; reason?: string };
+
+      assert.equal(result.decision, "block", "an unmeasurable diff must never silently allow");
+      assert.match(result.reason ?? "", /could not be measured/);
+    } finally {
+      await teardownFixture(fixture);
+    }
+  },
+);
+
+test("a non-git cwd still allows a trivial-reading diff -- {0, 0} stays fail-open, unaffected by the null contract", async () => {
+  const repo = await mkdtemp(join(tmpdir(), "praxarch-verifygate-nogit-"));
+  const home = await mkdtemp(join(tmpdir(), "praxarch-verifygate-nogit-home-"));
+  const fixture: Fixture = { repo, home };
+  try {
+    const result = run(fixture, {
+      session_id: "s1",
+      cwd: fixture.repo,
+      hook_event_name: "Stop",
+    }) as { decision?: string };
+    assert.equal(result.decision, undefined, "a cwd that isn't a git repo has nothing to gate on and must allow");
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("a numstat failure in a real repo (not a FIFO, not a non-repo cwd) also blocks with the could-not-measure message", async () => {
+  const fixture = await setupFixture();
+  try {
+    await makeNonTrivialDiff(fixture.repo);
+    await withFakeGitOnPathFailingNumstat(async (fakeGitDir) => {
+      const result = run(
+        fixture,
+        { session_id: "s1", cwd: fixture.repo, hook_event_name: "Stop" },
+        { PATH: `${fakeGitDir}:${process.env["PATH"] ?? ""}` },
+      ) as { decision?: string; reason?: string };
+      assert.equal(result.decision, "block");
+      assert.match(result.reason ?? "", /could not be measured/);
+    });
   } finally {
     await teardownFixture(fixture);
   }

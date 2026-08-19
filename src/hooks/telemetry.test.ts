@@ -306,6 +306,75 @@ test("stores nulls (without throwing) when the fingerprint can't be computed, bu
   });
 });
 
+test("stores null changedLines/changedFiles (not zeros, and without throwing) when diffStat's own measurement fails", async () => {
+  // Issue #2: diffStat now returns null (not {0, 0}) when its own numstat probe fails inside a
+  // real repo. telemetry's try/catch around diffStat used to assume a thrown exception was the
+  // only failure mode; a null return without a throw must also leave both fields null, not crash
+  // on a destructure of null and not silently record zeros.
+  await withPraxarchHome(async (home) => {
+    const repo = await mkdtemp(join(tmpdir(), "praxarch-telemetry-statfail-repo-"));
+    const fakeGitDir = await mkdtemp(join(tmpdir(), "praxarch-telemetry-fakegit-numstat-"));
+    try {
+      execFileSync("git", ["init", "-q"], { cwd: repo });
+      execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
+      execFileSync("git", ["config", "user.name", "Test"], { cwd: repo });
+      await writeFile(join(repo, "file.txt"), "line\n".repeat(5));
+      execFileSync("git", ["add", "."], { cwd: repo });
+      execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: repo });
+      await writeFile(join(repo, "file.txt"), "changed line\n".repeat(5));
+
+      const realGit = execFileSync("which", ["git"]).toString("utf8").trim();
+      // Fails --numstat itself (the diffStat probe) while leaving `status` working, so the hash
+      // still comes through -- isolating the diffStat-specific null path from the diffFingerprint
+      // one the test above already covers.
+      const fakeGitScript = [
+        "#!/bin/sh",
+        'case "$*" in',
+        `  *--numstat*) echo "fake git: numstat probe failed" >&2; exit 1 ;;`,
+        `  *) exec "${realGit}" "$@" ;;`,
+        "esac",
+      ].join("\n");
+      await writeFile(join(fakeGitDir, "git"), `${fakeGitScript}\n`, "utf8");
+      await execFileSync("chmod", ["755", join(fakeGitDir, "git")]);
+
+      const verifierText = ["```json", JSON.stringify({ verdict: "CONFIRMED", findings: [] }), "```"].join(
+        "\n",
+      );
+
+      execFileSync("node", [script], {
+        input: JSON.stringify({
+          session_id: "s1",
+          cwd: repo,
+          hook_event_name: "PostToolUse",
+          tool_name: "Agent",
+          tool_input: { subagent_type: "verifier", model: "opus" },
+          tool_response: { status: "completed", content: [{ type: "text", text: verifierText }] },
+        }),
+        env: { ...process.env, PRAXARCH_HOME: home, PATH: `${fakeGitDir}:${process.env["PATH"] ?? ""}` },
+      });
+
+      const statePath = join(home, "state", "s1.json");
+      const state = JSON.parse(await readFile(statePath, "utf8")) as {
+        lastVerifier: {
+          verdict: string;
+          diffHash: string | null;
+          changedLines: number | null;
+          changedFiles: number | null;
+        };
+      };
+      // The verdict and hash (unaffected by the numstat failure) are still recorded -- only the
+      // counts come back null.
+      assert.equal(state.lastVerifier.verdict, "CONFIRMED");
+      assert.equal(typeof state.lastVerifier.diffHash, "string");
+      assert.equal(state.lastVerifier.changedLines, null);
+      assert.equal(state.lastVerifier.changedFiles, null);
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+      await rm(fakeGitDir, { recursive: true, force: true });
+    }
+  });
+});
+
 test("a corrupt session state file does not lose the delegation log row (JSONL append happens before state is touched)", async () => {
   await withPraxarchHome(async (home) => {
     const stateDir = join(home, "state");

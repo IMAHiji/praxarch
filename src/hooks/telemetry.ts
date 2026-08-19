@@ -129,8 +129,12 @@ async function main(): Promise<void> {
     let changedFiles: number | null = null;
     try {
       const counts = await diffStat(input.cwd, config.verifyGate.ignorePatterns, state.baselineHead);
-      changedLines = counts.changedLines;
-      changedFiles = counts.changedFiles;
+      // `null` means the measurement failed (see diffStat's doc comment) — leave both nulls,
+      // same as the catch below, rather than throwing on a destructure of null.
+      if (counts) {
+        changedLines = counts.changedLines;
+        changedFiles = counts.changedFiles;
+      }
     } catch {
       // Leave nulls.
     }
