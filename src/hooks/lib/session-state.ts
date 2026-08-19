@@ -22,6 +22,22 @@ export interface DelegationRecord {
   totalTokens: number | null;
   durationMs: number | null;
   at: string;
+  /**
+   * Dispatch-time `tool_response.agentId`, the correlation key `SubagentStop` matches against its
+   * own `agent_id` to update this record in place. Null when the field was absent (e.g. records
+   * predating capture, or a shape that omitted it) — SubagentStop must never guess a match in
+   * that case, only skip the update.
+   */
+  agentId?: string | null;
+  /**
+   * Fields below are filled in later by SubagentStop, once the delegation completes — null (or
+   * absent) until then. Distinct from `lastVerifier`, which is what verify-gate actually reads;
+   * these exist so `delegations[]` (and anything downstream reading it) reflects the same
+   * outcome per-delegation rather than only the session's single latest verdict.
+   */
+  verdict?: "CONFIRMED" | "REFUTED" | null;
+  findingsCount?: number | null;
+  criticalOrMajorCount?: number | null;
 }
 
 export interface SessionState {

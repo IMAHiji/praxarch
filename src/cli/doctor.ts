@@ -1,6 +1,15 @@
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
-import { AGENTS_DIR, CLAUDE_MD_PATH, DIST_DIR, PRAXARCH_INSTALL_DIR, REPO_ROOT, SETTINGS_PATH, SKILLS_DIR } from "./lib/paths.js";
+import {
+  AGENTS_DIR,
+  CLAUDE_MD_PATH,
+  DIST_DIR,
+  PRAXARCH_INSTALL_DIR,
+  REPO_ROOT,
+  SETTINGS_PATH,
+  SKILLS_DIR,
+  TEMPLATES_DIR,
+} from "./lib/paths.js";
 import { exists, readJsonIfExists, readTextIfExists } from "./lib/fsops.js";
 
 // Lowercase "explore" — the template/installed file is explore.md (the agent's *name* is
@@ -13,6 +22,17 @@ interface Check {
   message: string;
 }
 
+// Derived from templates/settings.fragment.json — the single source of truth for which hook
+// events praxarch registers — so a newly added event is checked automatically without a matching
+// edit here. A hardcoded list would silently stop covering new events (issue #15's failure shape:
+// a hook that isn't firing, with no diagnostic).
+async function shippedHookEvents(): Promise<string[]> {
+  const fragment = await readJsonIfExists<{ hooks?: Record<string, unknown> }>(
+    join(TEMPLATES_DIR, "settings.fragment.json"),
+  );
+  return Object.keys(fragment?.hooks ?? {});
+}
+
 async function checkSettings(): Promise<Check[]> {
   const checks: Check[] = [];
   const settings = await readJsonIfExists<Record<string, unknown>>(SETTINGS_PATH);
@@ -23,7 +43,7 @@ async function checkSettings(): Promise<Check[]> {
   const hooks = settings["hooks"] as Record<string, { hooks?: { command: string }[] }[]> | undefined;
   const hasHook = (event: string): boolean =>
     (hooks?.[event] ?? []).some((g) => (g.hooks ?? []).some((h) => h.command.includes("praxarch")));
-  for (const event of ["SessionStart", "PreToolUse", "PostToolUse", "Stop"]) {
+  for (const event of await shippedHookEvents()) {
     checks.push({ ok: hasHook(event), message: `settings.json wires the praxarch ${event} hook` });
   }
   const statusLine = settings["statusLine"] as { command?: string } | undefined;

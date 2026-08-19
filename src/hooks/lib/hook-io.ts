@@ -35,7 +35,16 @@ export interface PostToolUseInput extends HookInputBase {
   // tool_response — NOT tool_output — and the subagent's text lives in the content array.
   tool_response?: {
     status?: string;
+    // True on an async dispatch's launch receipt (`status: "async_launched"`), absent on the
+    // synchronous "completed" shape. See PostToolUseInput.status's own note.
+    isAsync?: boolean;
     agentType?: string;
+    // Observed as a top-level structured field in real captures of both the synchronous
+    // "completed" shape (fixtures/post-tool-use.agent.json) and the async "async_launched"
+    // launch receipt (this repo's own session transcript, 2026-08-19 — see
+    // .claude/plans/2026-08-19-subagent-stop-verdicts.md, task 3). This is the correlation key
+    // matched against SubagentStop's `agent_id` to update a delegation record in place.
+    agentId?: string;
     content?: { type: string; text?: string }[];
     resolvedModel?: string;
     totalTokens?: number;
@@ -48,6 +57,19 @@ export interface StopInput extends HookInputBase {
   hook_event_name: "Stop";
   /** True when this stop attempt follows a continuation that a Stop hook itself forced. */
   stop_hook_active?: boolean;
+  last_assistant_message?: string;
+}
+
+/**
+ * SubagentStop — fires on real subagent completion (see task 1's findings in
+ * .claude/plans/2026-08-19-subagent-stop-verdicts.md). `agent_type` can be an empty string; every
+ * field below except the envelope must be read defensively, and the key set observed live is not
+ * fixed across firings (e.g. `effort` was present on only one of three captures).
+ */
+export interface SubagentStopInput extends HookInputBase {
+  hook_event_name: "SubagentStop";
+  agent_id?: string;
+  agent_type?: string;
   last_assistant_message?: string;
 }
 
