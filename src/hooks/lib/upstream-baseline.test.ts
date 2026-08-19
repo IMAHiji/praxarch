@@ -67,6 +67,17 @@ test("pinned === null returns null (no baseline to advance from)", async () => {
   assert.equal(result, null);
 });
 
+test("pinned === '' (empty string) returns null, not '' -- the documented empty-string hardening", async () => {
+  // MINOR 5 from the round-3 adversarial pass: `pinned ?? null` would leave `""` unchanged (`??`
+  // only replaces `null`/`undefined`, not other falsy values), and Task 7's planned caller does
+  // `effective ?? "HEAD"`, which has the same blind spot -- an empty-string `pinned` would pass
+  // straight through both and land in `git diff` as the empty string. Nothing before this test
+  // exercised `pinned === ""` at all, so a revert of the `if (!pinned)` guard to `pinned ?? null`
+  // left the suite green.
+  const result = await resolveEffectiveBaseline("/nonexistent-does-not-matter", "");
+  assert.equal(result, null, 'an empty-string pinned baseline must collapse to null, never pass through as ""');
+});
+
 test("fast-forward pull of merged work advances past the pinned baseline (the observed regression)", async () => {
   const bare = await makeBareRemote();
   const seed = await makeSeedRepo(bare);
@@ -81,6 +92,42 @@ test("fast-forward pull of merged work advances past the pinned baseline (the ob
 
     const effective = await resolveEffectiveBaseline(session, pinned);
     assert.equal(effective, pulledTip);
+    assert.notEqual(effective, pinned);
+  } finally {
+    await cleanup(bare, seed, session);
+  }
+});
+
+test("a remote named something other than origin resolves through the branch's actual tracking config, not a hardcoded 'origin'", async () => {
+  // MINOR 4 from the round-3 adversarial pass: resolveRemoteName's two git calls (`symbolic-ref` to
+  // find the current branch, then `git config --get branch.<name>.remote`) are untested by every
+  // other fixture in this file, because every one of them clones with the default remote name
+  // "origin" -- replacing resolveRemoteName's whole body with a hardcoded `"origin"` would still
+  // pass all of them. Cloning with `-o upstream` names the remote (and sets
+  // `branch.main.remote=upstream`, and `refs/remotes/upstream/HEAD`) to something else entirely, so
+  // a hardcoded "origin" would look up a `refs/remotes/origin/HEAD` that does not exist here, fail
+  // the tip lookup, and return the un-advanced `pinned` -- observably different from the correct,
+  // dynamically-resolved result below.
+  const bare = await makeBareRemote();
+  const seed = await makeSeedRepo(bare);
+  const session = await mkdtemp(join(tmpdir(), "praxarch-upstream-namedremote-"));
+  try {
+    execFileSync("git", ["clone", "-q", "-o", "upstream", bare, session]);
+    git(session, ["config", "user.email", "test@example.com"]);
+    git(session, ["config", "user.name", "Test"]);
+    assert.equal(
+      git(session, ["config", "--get", "branch.main.remote"]),
+      "upstream",
+      "test setup assumption: cloning with -o upstream must set branch.main.remote=upstream",
+    );
+
+    const pinned = git(session, ["rev-parse", "HEAD"]);
+    const pulledTip = await commitFile(seed, "upstream.txt", "already reviewed\n", "merged upstream work");
+    git(seed, ["push", "-q", "origin", "main"]);
+    git(session, ["pull", "-q", "--ff-only", "upstream", "main"]);
+
+    const effective = await resolveEffectiveBaseline(session, pinned);
+    assert.equal(effective, pulledTip, "resolveRemoteName must resolve to the real remote name (upstream), not a hardcoded origin");
     assert.notEqual(effective, pinned);
   } finally {
     await cleanup(bare, seed, session);

@@ -42,8 +42,18 @@ build:
 test:
   extends: .node_pnpm
   stage: test
+  # `pnpm test` itself (not before_script) runs as the node:22 image's unprivileged `node` user,
+  # not the job's default of root: several tests (untracked.test.ts's mode-000 fixtures) reproduce
+  # EACCES-shaped filesystem failures that root's DAC_OVERRIDE bypasses outright. Under root those
+  # tests skip-guard themselves rather than fail for an unrelated reason -- correct locally, but it
+  # means the only environment that runs this suite automatically would silently never exercise the
+  # readable:false / "u:" key branches they cover. There is no `.gitlab-ci.yml` job keyword to pin
+  # the container user (that's a runner `config.toml` setting, outside this repo), so `su node -c`
+  # is the in-repo equivalent; install stays root (root-installed node_modules/pnpm-store are
+  # world-readable by default, and switching users mid-job would need the node user to own the
+  # pnpm store to write to it) and only the test run itself drops privilege.
   needs:
     - build
   timeout: 5m
   script:
-    - pnpm test
+    - su node -c "pnpm test"

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { appendFile, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { execFileSync, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -102,6 +102,24 @@ function rawOf(path: string): Buffer {
   return Buffer.from(path, "utf8");
 }
 
+// `readUntrackedEntry`'s `root` parameter is a Buffer (the exact bytes `repoRoot` would print),
+// not a string -- see untracked.ts's doc comment on that function for why. Tests that construct a
+// repo path directly (rather than obtaining it from `repoRoot` itself) go through this rather than
+// a bare string for the same reason `rawOf` exists for `raw`.
+function rootOf(path: string): Buffer {
+  return Buffer.from(path, "utf8");
+}
+
+// Mode-000 fixtures below reproduce EACCES-shaped failures that root simply doesn't experience --
+// DAC_OVERRIDE lets root traverse a mode-000 directory and open a mode-000 file as if the mode
+// bits weren't set at all, so these tests must skip (not fail for an unrelated reason) when the
+// test runner itself is root, which is the default user in the node:22 CI image this project's
+// pipeline runs under.
+function isRoot(): boolean {
+  return typeof process.getuid === "function" && process.getuid() === 0;
+}
+const rootSkipReason = "mode-000 permission checks are bypassed when running as root (DAC_OVERRIDE)";
+
 test("listUntrackedPaths from a subdirectory still returns the root-relative path of a file in a sibling directory", async () => {
   // The fail-open finding 1 from the plan: without --full-name and the :/ pathspec, `git ls-files
   // --others --exclude-standard` run from a subdirectory lists only that subtree, cwd-relative.
@@ -165,8 +183,9 @@ test("repoRoot preserves a trailing space in the repo's own directory name (not 
 
     const root = await repoRoot(repo);
     assert.notEqual(root, null);
+    assert.ok(Buffer.isBuffer(root), "repoRoot must return a Buffer, not a UTF-8-decoded string");
     assert.ok(
-      root?.endsWith("dirspace "),
+      root && root.toString("utf8").endsWith("dirspace "),
       `expected repoRoot to preserve the trailing space in the directory name, got: ${JSON.stringify(root)}`,
     );
 
@@ -175,13 +194,107 @@ test("repoRoot preserves a trailing space in the repo's own directory name (not 
     const found = (paths ?? []).find((p) => p.path === "file.txt");
     assert.ok(found, `expected "file.txt" in the listing, got: ${JSON.stringify(paths)}`);
 
-    const entry = await readUntrackedEntry(root as string, found.raw);
+    const entry = await readUntrackedEntry(root as Buffer, found.raw);
     assert.equal(entry.readable, true);
     assert.equal(entry.lines, 400, "a repo root ending in whitespace must not be truncated to a nonexistent path");
   } finally {
     await rm(parent, { recursive: true, force: true });
   }
 });
+
+test("repoRoot preserves a trailing carriage return in the repo's own directory name (not stripped by a \\r? in the newline-strip step)", async () => {
+  // MAJOR 1 from the round-3 adversarial pass: git terminates `rev-parse --show-toplevel`'s output
+  // with a single LF, never CRLF, through a pipe on any platform -- a `\r?` in the strip pattern
+  // protects nothing and instead eats a legal trailing CR that is part of the repo root directory's
+  // own name. readUntrackedEntry then builds every path against the truncated root, lstat ENOENTs
+  // on all of them, and every untracked entry reads as the fixed self-matching `{key: "a:",
+  // readable: true}` -- reproduced end-to-end with a 400-line file measuring as 0 lines forever,
+  // on both macOS and Linux.
+  const parent = await mkdtemp(join(tmpdir(), "praxarch-untracked-cr-"));
+  const repo = join(parent, "dircr\r");
+  try {
+    await mkdir(repo);
+    execFileSync("git", ["init", "-q"], { cwd: repo });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: repo });
+    await writeFile(join(repo, "file.txt"), "line\n".repeat(400));
+
+    const root = await repoRoot(repo);
+    assert.notEqual(root, null);
+    assert.ok(
+      root && root.toString("utf8").endsWith("dircr\r"),
+      `expected repoRoot to preserve the trailing CR in the directory name, got: ${JSON.stringify(root)}`,
+    );
+
+    const paths = await listUntrackedPaths(repo);
+    assert.notEqual(paths, null);
+    const found = (paths ?? []).find((p) => p.path === "file.txt");
+    assert.ok(found, `expected "file.txt" in the listing, got: ${JSON.stringify(paths)}`);
+
+    const entry = await readUntrackedEntry(root as Buffer, found.raw);
+    assert.equal(entry.readable, true);
+    assert.equal(
+      entry.lines,
+      400,
+      "a repo root ending in a legal trailing CR must not be truncated to a nonexistent path by an overbroad \\r? strip",
+    );
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+test(
+  "repoRoot returns the exact raw bytes for a non-UTF-8 repo root reached through an ASCII symlink, and readUntrackedEntry reads through it correctly (round-3 residual defect on the root half)",
+  { skip: hasNonUtf8Filenames ? false : nonUtf8SkipReason },
+  async () => {
+    // MAJOR 2: `repoRoot` used to call execFile without `encoding: "buffer"`, so a non-UTF-8 repo
+    // root got UTF-8-decoded (U+FFFD corruption) before readUntrackedEntry ever built a path from
+    // it -- the round-3 defect, left unfixed on the root half while listUntrackedPaths's leaf half
+    // was already closed. Reachable without any unusual filesystem access: a hook's cwd arrives via
+    // an ASCII-named symlink, but `getcwd()` inside the spawned git process resolves to the
+    // *physical* directory -- git's own `rev-parse --show-toplevel` output is the real, possibly
+    // non-UTF-8, on-disk name, never the symlink's ASCII name.
+    const parent = await mkdtemp(join(tmpdir(), "praxarch-untracked-rootbytes-"));
+    const nameBytes = nonUtf8FilenameBytes();
+    const repoPath = Buffer.concat([Buffer.from(`${parent}/repo-`), nameBytes]);
+    const linkPath = join(parent, "asciilink");
+    try {
+      await mkdir(repoPath);
+      await symlink(repoPath, linkPath);
+      // Every git invocation below goes through the ASCII symlink -- a valid UTF-8 string -- never
+      // through repoPath directly, matching the hook's real cwd shape.
+      execFileSync("git", ["init", "-q"], { cwd: linkPath });
+      execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: linkPath });
+      execFileSync("git", ["config", "user.name", "Test"], { cwd: linkPath });
+      await writeFile(Buffer.concat([repoPath, Buffer.from("/file.txt")]), "line\n".repeat(400));
+
+      const root = await repoRoot(linkPath);
+      assert.notEqual(root, null);
+      assert.ok(Buffer.isBuffer(root), "repoRoot must return a Buffer, not a UTF-8-decoded string");
+      assert.ok(
+        (root as Buffer).includes(nameBytes),
+        `expected the raw non-UTF-8 bytes in repoRoot's result (not the ASCII symlink path), got: ${JSON.stringify(root)}`,
+      );
+
+      const paths = await listUntrackedPaths(linkPath);
+      assert.notEqual(paths, null);
+      const found = (paths ?? []).find((p) => p.path === "file.txt");
+      assert.ok(found, `expected "file.txt" in the listing, got: ${JSON.stringify(paths)}`);
+
+      const entry = await readUntrackedEntry(root as Buffer, found.raw);
+      assert.equal(entry.readable, true, "a non-UTF-8 repo root must not corrupt every read into ENOENT");
+      assert.equal(
+        entry.lines,
+        400,
+        "the real line count must be measured through the raw-byte root, not truncated to 0 via a UTF-8-decode/re-encode round trip",
+      );
+    } finally {
+      await rm(linkPath, { force: true });
+      await rm(repoPath, { recursive: true, force: true });
+      await rm(parent, { recursive: true, force: true });
+    }
+  },
+);
 
 test("readUntrackedEntry on a symlink to an out-of-repo file never follows it: key starts with l:, lines is 0", async () => {
   // The security-relevant case: an untracked symlink pointing outside the repo must never have
@@ -196,7 +309,7 @@ test("readUntrackedEntry on a symlink to an out-of-repo file never follows it: k
     const linkRelPath = "link-to-outside";
     await symlink(outsideFile, join(repo, linkRelPath));
 
-    const entry = await readUntrackedEntry(repo, rawOf(linkRelPath));
+    const entry = await readUntrackedEntry(rootOf(repo), rawOf(linkRelPath));
     assert.ok(entry.key.startsWith("l:"), `expected an "l:" key for a symlink, got: ${entry.key}`);
     assert.equal(entry.lines, 0, "a symlink must never contribute the followed target's line count");
     assert.equal(entry.readable, true);
@@ -212,7 +325,7 @@ test("readUntrackedEntry on a dangling symlink yields an l: key and readable: tr
     const linkRelPath = "dangling-link";
     await symlink("does-not-exist", join(repo, linkRelPath));
 
-    const entry = await readUntrackedEntry(repo, rawOf(linkRelPath));
+    const entry = await readUntrackedEntry(rootOf(repo), rawOf(linkRelPath));
     assert.ok(entry.key.startsWith("l:"), `expected an "l:" key for a dangling symlink, got: ${entry.key}`);
     assert.equal(entry.readable, true, "a dangling target is not a read failure");
   } finally {
@@ -240,8 +353,8 @@ test("two symlinks with distinct invalid-UTF-8 targets get distinct keys (no tar
     await symlink(targetA, join(repo, "link-a"));
     await symlink(targetB, join(repo, "link-b"));
 
-    const entryA = await readUntrackedEntry(repo, rawOf("link-a"));
-    const entryB = await readUntrackedEntry(repo, rawOf("link-b"));
+    const entryA = await readUntrackedEntry(rootOf(repo), rawOf("link-a"));
+    const entryB = await readUntrackedEntry(rootOf(repo), rawOf("link-b"));
     assert.ok(entryA.key.startsWith("l:"));
     assert.ok(entryB.key.startsWith("l:"));
     assert.notEqual(entryA.key, entryB.key, "two symlinks with different raw targets must never produce the same key");
@@ -271,7 +384,7 @@ test("an embedded git repo is listed with a trailing slash and reads as key d:, 
       `expected the embedded repo's listed path to end with "/", got: ${embeddedEntry.path}`,
     );
 
-    const entry = await readUntrackedEntry(repo, embeddedEntry.raw);
+    const entry = await readUntrackedEntry(rootOf(repo), embeddedEntry.raw);
     assert.equal(entry.key, "d:");
     assert.equal(entry.lines, 0);
     assert.equal(entry.readable, true);
@@ -284,13 +397,13 @@ test("a regular file's key changes when its content changes and is stable when i
   const repo = await makeRepo();
   try {
     await writeFile(join(repo, "new.txt"), "v1\n");
-    const a = await readUntrackedEntry(repo, rawOf("new.txt"));
-    const b = await readUntrackedEntry(repo, rawOf("new.txt"));
+    const a = await readUntrackedEntry(rootOf(repo), rawOf("new.txt"));
+    const b = await readUntrackedEntry(rootOf(repo), rawOf("new.txt"));
     assert.equal(a.key, b.key, "the key must be stable across two reads of unchanged content");
     assert.ok(a.key.startsWith("f:"));
 
     await writeFile(join(repo, "new.txt"), "v2\n");
-    const c = await readUntrackedEntry(repo, rawOf("new.txt"));
+    const c = await readUntrackedEntry(rootOf(repo), rawOf("new.txt"));
     assert.notEqual(a.key, c.key, "the key must change when the file's content changes");
   } finally {
     await rm(repo, { recursive: true, force: true });
@@ -301,7 +414,7 @@ test("a file whose content is 'a\\nb\\n' reports lines === 2", async () => {
   const repo = await makeRepo();
   try {
     await writeFile(join(repo, "twolines.txt"), "a\nb\n");
-    const entry = await readUntrackedEntry(repo, rawOf("twolines.txt"));
+    const entry = await readUntrackedEntry(rootOf(repo), rawOf("twolines.txt"));
     assert.equal(entry.lines, 2);
     assert.equal(entry.readable, true);
     assert.ok(entry.key.startsWith("f:"));
@@ -313,7 +426,7 @@ test("a file whose content is 'a\\nb\\n' reports lines === 2", async () => {
 test("readUntrackedEntry on a path that has vanished since listing (ENOENT) yields an a: key and still counts as readable", async () => {
   const repo = await makeRepo();
   try {
-    const entry = await readUntrackedEntry(repo, rawOf("never-existed.txt"));
+    const entry = await readUntrackedEntry(rootOf(repo), rawOf("never-existed.txt"));
     assert.equal(entry.key, "a:");
     assert.equal(entry.lines, 0);
     assert.equal(entry.readable, true, "a vanished path is a race, not an unreadable path");
@@ -344,7 +457,7 @@ test("listUntrackedPaths returns a non-ASCII filename unquoted, and readUntracke
       `expected the exact on-disk name "${fileName}" in the listing (not a C-quoted string), got: ${JSON.stringify(paths)}`,
     );
 
-    const entry = await readUntrackedEntry(repo, found.raw);
+    const entry = await readUntrackedEntry(rootOf(repo), found.raw);
     assert.equal(entry.readable, true);
     assert.ok(entry.key.startsWith("f:"), `expected a real "f:" content key, got: ${entry.key}`);
     assert.equal(entry.lines, 500, "the file's real line count must be measured, not silently dropped to 0");
@@ -431,7 +544,7 @@ test(
       assert.ok(entry0, "expected exactly one untracked entry");
       assert.equal(entry0.path, null, "an invalid-UTF-8 filename must never be exposed as a synthesized string");
 
-      const t0 = await readUntrackedEntry(repo, entry0.raw);
+      const t0 = await readUntrackedEntry(rootOf(repo), entry0.raw);
       assert.equal(t0.readable, true, "the raw bytes address the real file, so it must read successfully");
       assert.ok(t0.key.startsWith("f:"), `expected a real "f:" content key, got: ${t0.key}`);
       assert.equal(t0.lines, 250, "the real line count must be measured, not dropped to 0");
@@ -441,7 +554,7 @@ test(
       const pathsAfter = await listUntrackedPaths(repo);
       const entry1 = (pathsAfter ?? []).find((p) => p.raw.equals(entry0.raw));
       assert.ok(entry1, "the same raw-byte entry must still be listed after the content change");
-      const t1 = await readUntrackedEntry(repo, entry1.raw);
+      const t1 = await readUntrackedEntry(rootOf(repo), entry1.raw);
 
       assert.equal(t1.lines, 500, "the updated content must be reflected, not silently frozen at the first read");
       assert.notEqual(t0.key, t1.key, "the key must move when the file's content changes, exactly like any other file");
@@ -493,10 +606,76 @@ test(
       const wouldBeIgnored = entry.path !== null && defaultIgnorePatterns.some((p) => (entry.path as string).includes(p));
       assert.equal(wouldBeIgnored, false, "a null path must never be treated as ignored -- there is no string to check");
 
-      const read = await readUntrackedEntry(repo, entry.raw);
+      const read = await readUntrackedEntry(rootOf(repo), entry.raw);
       assert.equal(read.readable, true);
       assert.equal(read.lines, 200, "the file must still be read for its real content, not silently dropped");
     } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  },
+);
+
+// --- readable: false coverage -- MAJOR 3 from the round-3 adversarial pass ----------------------
+//
+// Nothing before this section ever asserted `readable === false` or the "u:" key. Per
+// `UntrackedEntry.readable`'s own doc comment, an entry with `readable: false` reaching a
+// SessionStart snapshot is "the exact fail-open the snapshot's whole design exists to avoid" --
+// two of the three producers of that branch are exercised below (real, mode-000-based
+// reproductions, skip-guarded on root rather than faked). The third (`readlink` failing
+// independently of the `lstat` immediately above it in the same function) has no known
+// deterministic external reproduction -- see the comment on that catch block in untracked.ts for
+// the reachability argument; it is not tested here rather than faked.
+
+test(
+  "readUntrackedEntry on a path inside a directory with no search permission reads as key u:, readable: false (non-ENOENT lstat failure)",
+  { skip: isRoot() ? rootSkipReason : false },
+  async () => {
+    const repo = await makeRepo();
+    const blockedDir = join(repo, "blocked");
+    try {
+      await mkdir(blockedDir);
+      await writeFile(join(blockedDir, "secret.txt"), "line\n".repeat(5));
+      await chmod(blockedDir, 0o000);
+
+      const entry = await readUntrackedEntry(rootOf(repo), rawOf("blocked/secret.txt"));
+      assert.equal(entry.key, "u:", 'a non-ENOENT lstat failure must key as "u:", never the self-matching "a:"');
+      assert.equal(
+        entry.lines,
+        0,
+        "an unreadable entry must never carry a real line count",
+      );
+      assert.equal(
+        entry.readable,
+        false,
+        "a permissions failure must never read as readable -- that is the exact fail-open this branch exists to avoid",
+      );
+    } finally {
+      await chmod(blockedDir, 0o755).catch(() => undefined);
+      await rm(repo, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "readUntrackedEntry on a regular file with no read permission reads as key u:, readable: false (mid-stream read error)",
+  { skip: isRoot() ? rootSkipReason : false },
+  async () => {
+    const repo = await makeRepo();
+    const blockedFile = join(repo, "blocked.txt");
+    try {
+      await writeFile(blockedFile, "line\n".repeat(5));
+      await chmod(blockedFile, 0o000);
+
+      const entry = await readUntrackedEntry(rootOf(repo), rawOf("blocked.txt"));
+      assert.equal(entry.key, "u:", 'a mid-stream read error must key as "u:"');
+      assert.equal(entry.lines, 0, "an unreadable entry must never carry a real line count");
+      assert.equal(
+        entry.readable,
+        false,
+        "a permissions failure discovered while streaming must never read as readable -- lstat succeeding first (the file genuinely is a regular file) must not be conflated with the content actually being readable",
+      );
+    } finally {
+      await chmod(blockedFile, 0o644).catch(() => undefined);
       await rm(repo, { recursive: true, force: true });
     }
   },
