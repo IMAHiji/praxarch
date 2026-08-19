@@ -128,6 +128,41 @@
   functions; verify-gate only fingerprints past its trivial-diff early return, and telemetry only
   fingerprints when a verdict was actually parsed, instead of paying the cost of both on every
   Stop and every recorded verdict regardless of whether either was needed.
+- **verify-gate/telemetry/record-verdict: `diffStat` no longer charges the session for work it did
+  not do (issue #16).** Reported live: a `git pull` of two already-verified MRs turned a standing
+  CONFIRMED verdict stale (`382/6 -> 539/16`) purely from received commits, and separately, a
+  pre-existing untracked file was recounted in full on every Stop. Both are fixed without unpinning
+  `state.baselineHead`, which stays untouched on disk for the whole session.
+  - A SessionStart snapshot (`session-init.ts`) records a content key for every untracked path that
+    already exists; `diffStat` now counts an untracked path only when its current key is absent
+    from or differs from that snapshot — an identical key means the session never touched it. A
+    changed pre-existing file still counts in full, not as a delta (over-count, the accepted
+    direction); a genuinely new file always counts.
+  - Each measurement derives an *effective* tracked baseline —
+    `git merge-base HEAD refs/remotes/<remote>/HEAD`, used only when it is a descendant of the
+    pinned `baselineHead` — rather than moving the pin itself. The reference is the remote's
+    *default branch*, deliberately not `@{upstream}`: with `@{upstream}`, pushing a commit to a
+    feature branch advanced the effective baseline onto the session's own unverified work,
+    laundering it out of the measurement. Any uncertainty (no remote, no `origin/HEAD`, a
+    merge-base that isn't a descendant of the pin) falls back to the pinned baseline unchanged.
+  - Same rewrite closed a live symlink hazard in the untracked half: the old loop called `readFile`
+    on every listed path, which follows symlinks — an untracked symlink pointing outside the repo
+    read out-of-repo content into the count, and one pointing at a FIFO blocked the hook forever,
+    the same hang class as `diffFingerprint`'s own FIFO fix above. The new dispatch uses `lstat`
+    and never follows a symlink. A related under-count was closed the same way: untracked listing
+    from a subdirectory used to return only that subtree with cwd-relative paths; it is now always
+    whole-repo and root-relative regardless of `cwd`.
+  - Residual, accepted: a `git pull` still drops a standing `PRAXARCH_VERIFY_WAIVED` waiver, because
+    the waiver compares raw fingerprints (HEAD-sensitive by design), not size deltas.
+  - Four fail-opens below were found by mutation testing, not by review, and are documented at
+    length in `docs/design.md` rather than fixed-and-forgotten, because each is one plausible
+    "cleanup" away from returning: the untracked snapshot's own sidecar storage (moving it back into
+    `SessionState` reintroduces a 3495ms SessionStart), `Buffer`-typed paths end to end (a `string`
+    round-trip corrupts a non-UTF-8 path to U+FFFD and silently zeroes its measurement), stripping
+    git path output with `/\n$/` only (a `.trim()` or `/\r?\n$/` variant eats legal trailing
+    whitespace in a real path and freezes a fingerprint), and permission-dependent tests gated on a
+    functional probe rather than `process.getuid()` (CI running as root makes a uid guard skip
+    exactly where it matters).
 
 ## v0.1.1 — 2026-07-13
 

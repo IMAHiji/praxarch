@@ -3,6 +3,7 @@ import { loadConfig } from "./lib/config.js";
 import { appendJsonl } from "./lib/jsonl.js";
 import { logFileForDate } from "./lib/paths.js";
 import { readSessionState, updateSessionState, type VerifierRecord } from "./lib/session-state.js";
+import { readUntrackedBaseline } from "./lib/untracked-baseline-store.js";
 import { readHookInput, type PostToolUseInput } from "./lib/hook-io.js";
 import {
   captureDiffCounts,
@@ -111,10 +112,19 @@ async function main(): Promise<void> {
 
   let verifierRecord: VerifierRecord | null = null;
   if (parsedVerdict) {
+    // This read is gated behind `parsedVerdict`, not hoisted to every PostToolUse(Agent) call —
+    // the whole point of moving the untracked snapshot into its own sidecar file was to keep
+    // per-tool-call work flat (see untracked-baseline-store.ts and paths.ts's
+    // `untrackedBaselinePath` comment: a 2000-entry snapshot took SessionStart from ~10ms to
+    // ~3.5s when it lived inside the state file telemetry.ts rewrites on every call). A
+    // verdict-bearing PostToolUse(Agent) call is rare relative to the hot path, so reading the
+    // sidecar here does not reintroduce that cost.
+    const untrackedBaseline = await readUntrackedBaseline(input.session_id);
     const { changedLines, changedFiles } = await captureDiffCounts(
       input.cwd,
       config.verifyGate.ignorePatterns,
       state.baselineHead,
+      untrackedBaseline,
     );
     // Invariant verify-gate relies on: diffHash must be a real `string | null` here, never
     // `undefined` — it distinguishes a legacy record (key absent) from a failed fingerprint

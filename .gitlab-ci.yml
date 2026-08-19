@@ -6,6 +6,15 @@ stages:
 
 .node_pnpm:
   before_script:
+    # Corepack's default install directory (/usr/local/bin), deliberately -- an earlier revision
+    # used `--install-directory "$HOME/.local/bin"` on the theory that before_script might run as
+    # the `node` user. It does not: every job here runs as root (there is no `user:` key, and no
+    # such job keyword exists in GitLab CI), and only the `test` job's `su node -c` drops privilege
+    # for the test run itself. $HOME is therefore /root, which is mode 0700, so uid 1000 could not
+    # traverse it and `su node -c "pnpm test"` died with `pnpm: command not found`, exit 127 --
+    # zero tests executed in the one environment that runs them automatically.
+    # /usr/local/bin is drwxr-xr-x, so the node user reaches pnpm there (verified live:
+    # `docker run node:22-bookworm bash -c 'corepack enable && su node -c "command -v pnpm"'`).
     - corepack enable
     - corepack prepare pnpm@11.8.0 --activate
     - pnpm config set store-dir .pnpm-store
@@ -42,8 +51,39 @@ build:
 test:
   extends: .node_pnpm
   stage: test
+  # `pnpm test` itself (not before_script) runs as the node:22 image's unprivileged `node` user,
+  # not the job's default of root: several tests (untracked.test.ts's mode-000 fixtures) reproduce
+  # EACCES-shaped filesystem failures that root's DAC_OVERRIDE bypasses outright. Under root those
+  # tests skip-guard themselves rather than fail for an unrelated reason -- correct locally, but it
+  # means the only environment that runs this suite automatically would silently never exercise the
+  # readable:false / "u:" key branches they cover. There is no `.gitlab-ci.yml` job keyword to pin
+  # the container user (that's a runner `config.toml` setting, outside this repo), so `su node -c`
+  # is the in-repo equivalent; install stays root (root-installed node_modules/pnpm-store are
+  # world-readable by default, and switching users mid-job would need the node user to own the
+  # pnpm store to write to it) and only the test run itself drops privilege.
   needs:
     - build
   timeout: 5m
   script:
-    - pnpm test
+    # The runner clones as root, so git refuses to operate in the checkout as the `node` user
+    # ("detected dubious ownership"). Several tests shell out to git through the CLI -- doctor's
+    # build-ref check reads the checkout's HEAD -- and a git that errors makes doctor skip the
+    # comparison and exit 0, so the test asserting it exits 1 fails. --system covers every user.
+    - git config --system --add safe.directory "$CI_PROJECT_DIR"
+    # pipefail so a `pnpm test` failure is not masked by tee's exit status.
+    - set -o pipefail; su node -c "pnpm test" | tee test-output.log
+    # Every test must RUN here, not merely pass. A skipped test reports as passing, which is how
+    # this suite was blind for months: the mode-000 tests were guarded on `process.getuid() === 0`,
+    # CI runs as root, so the guard was true on every CI run and the fail-open they exist to catch
+    # was never exercised. Asserting the skip count is strictly stronger than trusting whatever
+    # guard mechanism each test happens to use -- a broken probe, a bad uid check, or a guard
+    # nobody has thought of yet all fail this line. Linux/ext4 as a non-root user can host every
+    # fixture in this suite (non-UTF-8 filenames, mkfifo, mode-000), so 0 is the correct number;
+    # if a legitimately unrunnable test is ever added, raise this deliberately rather than
+    # loosening it to a range.
+    - |
+      grep -qE '^# skipped 0$' test-output.log || {
+        echo "FAIL: tests were skipped in CI -- every test must run here."
+        grep -E '^# skipped |# SKIP' test-output.log || true
+        exit 1
+      }

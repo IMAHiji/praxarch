@@ -5,6 +5,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { readSessionState, writeSessionState } from "./lib/session-state.js";
+import { writeUntrackedBaseline } from "./lib/untracked-baseline-store.js";
+import { captureUntrackedBaseline } from "./lib/untracked.js";
 import { emit, readHookInput, type SessionStartInput, type SessionStartOutput } from "./lib/hook-io.js";
 
 const execFileAsync = promisify(execFile);
@@ -41,6 +43,26 @@ async function main(): Promise<void> {
     } catch {
       state.baselineHead = null;
     }
+  }
+  // Gated on `source === "startup"` AND the `in` check together, not either alone:
+  //
+  // - `source === "startup"` closes the legacy-state laundering hole: a session that began before
+  //   `baselineUntrackedCaptured` existed only ever receives resume/clear/compact events from here
+  //   on (a brand-new session_id is the only way to get a genuine "startup" event), so gating on
+  //   source means such a session's marker is never set and its baseline stays permanently
+  //   "unknown" (count everything) instead of capturing whatever untracked files happen to exist
+  //   at the first post-upgrade SessionStart -- which would silently include the session's own
+  //   in-progress work as if it pre-existed.
+  // - `!== true` is what makes a single "startup" capture durable across the rest of the session:
+  //   `baselineUntrackedCaptured` is `true` the moment a capture is attempted and is the only value
+  //   ever written (see the field's doc comment in `lib/session-state.ts`), so re-capturing would
+  //   only ever happen on a genuinely-never-set marker -- moving the baseline mid-session and
+  //   laundering in-session files out of the measurement, the same class of bug the comment above
+  //   guards `baselineHead` against.
+  if (input.source === "startup" && state.baselineUntrackedCaptured !== true) {
+    const baseline = await captureUntrackedBaseline(input.cwd);
+    await writeUntrackedBaseline(input.session_id, baseline);
+    state.baselineUntrackedCaptured = true;
   }
   await writeSessionState(state);
 

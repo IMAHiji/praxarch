@@ -2,6 +2,7 @@
 import { loadConfig } from "./lib/config.js";
 import { readHookInput, type SubagentStopInput } from "./lib/hook-io.js";
 import { readSessionState, updateSessionState, type VerifierRecord } from "./lib/session-state.js";
+import { readUntrackedBaseline } from "./lib/untracked-baseline-store.js";
 import {
   captureDiffCounts,
   captureDiffHash,
@@ -88,10 +89,14 @@ async function main(): Promise<void> {
   // read is only for `baselineHead`, which `captureDiffCounts` needs).
   const diffHash = await captureDiffHash(input.cwd);
   const state = await readSessionState(input.session_id);
+  // One store read per subagent completion, not per tool call -- this hook only runs at
+  // SubagentStop, so it carries none of telemetry.ts's hot-path constraint.
+  const untrackedBaseline = await readUntrackedBaseline(input.session_id);
   const { changedLines, changedFiles } = await captureDiffCounts(
     input.cwd,
     config.verifyGate.ignorePatterns,
     state.baselineHead,
+    untrackedBaseline,
   );
 
   const verifierRecord: VerifierRecord = {

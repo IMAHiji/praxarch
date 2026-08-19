@@ -4,6 +4,7 @@ import { diffFingerprint, diffStat } from "./lib/git-diff.js";
 import { appendJsonl } from "./lib/jsonl.js";
 import { logFileForDate } from "./lib/paths.js";
 import { readSessionState, writeSessionState } from "./lib/session-state.js";
+import { readUntrackedBaseline } from "./lib/untracked-baseline-store.js";
 import { emit, readHookInput, type StopInput, type StopOutput } from "./lib/hook-io.js";
 import { formatBuildRef, readBuildInfo } from "./lib/build-info.js";
 
@@ -117,7 +118,13 @@ async function main(): Promise<void> {
   }
 
   const { config, warnings } = await loadConfig(input.cwd);
-  const currentCounts = await diffStat(input.cwd, config.verifyGate.ignorePatterns, state.baselineHead);
+  // The sidecar snapshot, not `state` — `SessionState` only carries `baselineUntrackedCaptured`,
+  // a marker that a capture was attempted, not the captured content (see
+  // untracked-baseline-store.ts for why the two are split). `readUntrackedBaseline` already fails
+  // safe to `null` (count every untracked path) on a missing, unreadable, or corrupt sidecar file
+  // — never throws, never resolves to `{}`.
+  const untrackedBaseline = await readUntrackedBaseline(input.session_id);
+  const currentCounts = await diffStat(input.cwd, config.verifyGate.ignorePatterns, state.baselineHead, untrackedBaseline);
 
   // `null` means the diff couldn't be measured at all (see diffStat's doc comment). Reading that
   // as trivial is exactly the bypass this fix exists to close, so a failed measurement is treated
