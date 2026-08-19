@@ -65,4 +65,20 @@ test:
     - build
   timeout: 5m
   script:
-    - su node -c "pnpm test"
+    # pipefail so a `pnpm test` failure is not masked by tee's exit status.
+    - set -o pipefail; su node -c "pnpm test" | tee test-output.log
+    # Every test must RUN here, not merely pass. A skipped test reports as passing, which is how
+    # this suite was blind for months: the mode-000 tests were guarded on `process.getuid() === 0`,
+    # CI runs as root, so the guard was true on every CI run and the fail-open they exist to catch
+    # was never exercised. Asserting the skip count is strictly stronger than trusting whatever
+    # guard mechanism each test happens to use -- a broken probe, a bad uid check, or a guard
+    # nobody has thought of yet all fail this line. Linux/ext4 as a non-root user can host every
+    # fixture in this suite (non-UTF-8 filenames, mkfifo, mode-000), so 0 is the correct number;
+    # if a legitimately unrunnable test is ever added, raise this deliberately rather than
+    # loosening it to a range.
+    - |
+      grep -qE '^# skipped 0$' test-output.log || {
+        echo "FAIL: tests were skipped in CI -- every test must run here."
+        grep -E '^# skipped |# SKIP' test-output.log || true
+        exit 1
+      }
