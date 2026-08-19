@@ -3,7 +3,7 @@ import { loadConfig } from "./lib/config.js";
 import { diffFingerprint, diffStat } from "./lib/git-diff.js";
 import { appendJsonl } from "./lib/jsonl.js";
 import { logFileForDate } from "./lib/paths.js";
-import { readSessionState, writeSessionState, type VerifierRecord } from "./lib/session-state.js";
+import { readSessionState, updateSessionState, type VerifierRecord } from "./lib/session-state.js";
 import { readHookInput, type PostToolUseInput } from "./lib/hook-io.js";
 
 /**
@@ -100,16 +100,31 @@ async function main(): Promise<void> {
     criticalOrMajorCount: parsedVerdict?.criticalOrMajorCount ?? null,
   });
 
+  // Fingerprint the tree this verdict was recorded against, so verify-gate can later tell
+  // whether it's still current. Only computed here (a verdict was actually parsed) — the far
+  // more common PostToolUse(Agent) call, for a non-verdict role, never needs it. Hoisted above
+  // the state read: unlike diffStat, diffFingerprint doesn't consume any field of session state,
+  // so nothing stops it running before the read — shrinking (not eliminating; diffStat still
+  // needs `baselineHead` from the read) the window in which a concurrent writer's change could
+  // land before this hook's own merge-write below picks it up.
+  let diffHash: string | null = null;
+  if (parsedVerdict) {
+    try {
+      diffHash = await diffFingerprint(input.cwd);
+    } catch {
+      // Leave null — verify-gate treats a present-but-null diffHash as unverifiable (no free
+      // pass), unlike a record that omits the key entirely (genuinely predates this feature).
+    }
+  }
+
+  // Read only for `baselineHead`, which diffStat needs below — never mutated and never written
+  // back directly. The eventual write goes through `updateSessionState`, which re-reads the
+  // freshest snapshot immediately before applying telemetry's owned mutations, so this read being
+  // stale by the time we get to the bottom of this function is fine: it's not what gets persisted.
   const state = await readSessionState(input.session_id);
 
   let verifierRecord: VerifierRecord | null = null;
   if (parsedVerdict) {
-    // Fingerprint the tree this verdict was recorded against, so verify-gate can later tell
-    // whether it's still current. Only computed here (a verdict was actually parsed) — the far
-    // more common PostToolUse(Agent) call, for a non-verdict role, never needs it. diffStat and
-    // diffFingerprint both fail open to zeros/null rather than throwing, but this is wrapped
-    // anyway — telemetry must stay non-blocking even if that contract ever changes.
-    let diffHash: string | null = null;
     let changedLines: number | null = null;
     let changedFiles: number | null = null;
     try {
@@ -118,12 +133,6 @@ async function main(): Promise<void> {
       changedFiles = counts.changedFiles;
     } catch {
       // Leave nulls.
-    }
-    try {
-      diffHash = await diffFingerprint(input.cwd);
-    } catch {
-      // Leave null — verify-gate treats a present-but-null diffHash as unverifiable (no free
-      // pass), unlike a record that omits the key entirely (genuinely predates this feature).
     }
     // Invariant verify-gate relies on: diffHash must be a real `string | null` here, never
     // `undefined` — it distinguishes a legacy record (key absent) from a failed fingerprint
@@ -138,17 +147,22 @@ async function main(): Promise<void> {
     };
   }
 
-  state.delegations.push({
-    role: role ?? "unset",
-    model: model ?? "inherited",
-    resolvedModel,
-    totalTokens,
-    durationMs,
-    at,
+  // Merge-write: re-reads the freshest state immediately before writing and touches only the
+  // fields telemetry owns (`delegations`, `lastVerifier`) — see updateSessionState's doc comment.
+  // A concurrent verify-gate write landing anywhere before this call (including during the
+  // diffStat/diffFingerprint work above) is preserved, instead of being clobbered by a stale
+  // whole-object write built from the read at the top of this function.
+  await updateSessionState(input.session_id, (fresh) => {
+    fresh.delegations.push({
+      role: role ?? "unset",
+      model: model ?? "inherited",
+      resolvedModel,
+      totalTokens,
+      durationMs,
+      at,
+    });
+    if (verifierRecord) fresh.lastVerifier = verifierRecord;
   });
-  if (verifierRecord) state.lastVerifier = verifierRecord;
-
-  await writeSessionState(state);
 }
 
 main().catch((err: unknown) => {
