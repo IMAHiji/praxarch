@@ -221,9 +221,21 @@ test("blocks a non-trivial diff with no verifier record", async () => {
   }
 });
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 // issue #14 Part B: the block reason names the ref/branch this gate was built from — the compiled
 // script under test ships with a real dist/hooks/build-info.json (written by `pnpm build`), so
 // this exercises the actual read path, not a mock.
+//
+// CI checks this repo out detached, so build-info.json's `branch` is genuinely null there (a
+// correct degrade, per build-info.test.ts's own detached-HEAD coverage) -- asserting a single
+// permissive regex over "some rendering or other" would hide a regression in the interpolation.
+// Instead this reads the real build-info.json alongside the compiled hook and asserts the exact
+// shape formatBuildRef is documented to produce for whichever case is actually live: a named
+// branch renders "branch@shortref", detached HEAD renders the bare short ref, either optionally
+// suffixed " (dirty)".
 test("a block names the git ref this gate was built from", async () => {
   const fixture = await setupFixture();
   try {
@@ -234,14 +246,25 @@ test("a block names the git ref this gate was built from", async () => {
       hook_event_name: "Stop",
     }) as { decision?: string; reason?: string };
     assert.equal(result.decision, "block");
-    assert.match(result.reason ?? "", /\[praxarch built from .+@[0-9a-f]{12}.*\]$/);
+
+    const buildInfo = JSON.parse(
+      await readFile(join(TEST_DIST_DIR, "hooks", "build-info.json"), "utf8"),
+    ) as { ref: string | null; branch: string | null; dirty: boolean | null };
+    assert.ok(buildInfo.ref, "the compiled hook under test must ship a real build-info.json ref to assert against");
+    const shortRef = buildInfo.ref.slice(0, 12);
+    const dirtySuffix = buildInfo.dirty ? " (dirty)" : "";
+    const expected = buildInfo.branch ? `${buildInfo.branch}@${shortRef}${dirtySuffix}` : `${shortRef}${dirtySuffix}`;
+    assert.match(result.reason ?? "", new RegExp(`\\[praxarch built from ${escapeRegExp(expected)}\\]$`));
   } finally {
     await teardownFixture(fixture);
   }
 });
 
 // The stamp is a block-only diagnostic, not printed on every hook invocation — an allow must
-// never carry it.
+// never carry it. Asserted against the whole serialized output, not just systemMessage: a
+// regression that surfaced the suffix through hookSpecificOutput.additionalContext instead would
+// pass unnoticed against systemMessage alone (it's undefined on a below-threshold allow, so
+// `?? ""` made the old assertion trivially true regardless of where a leak showed up).
 test("an allow never carries the build-ref suffix", async () => {
   const fixture = await setupFixture();
   try {
@@ -250,9 +273,9 @@ test("an allow never carries the build-ref suffix", async () => {
       session_id: "s1",
       cwd: fixture.repo,
       hook_event_name: "Stop",
-    }) as { decision?: string; systemMessage?: string };
-    assert.equal(result.decision, undefined);
-    assert.doesNotMatch(result.systemMessage ?? "", /praxarch built from/);
+    }) as Record<string, unknown>;
+    assert.equal(result["decision"], undefined);
+    assert.doesNotMatch(JSON.stringify(result), /praxarch built from/);
   } finally {
     await teardownFixture(fixture);
   }

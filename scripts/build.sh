@@ -8,5 +8,5 @@ set -eu
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 out_dir="${1:-$repo_root/dist}"
 
-npx tsc -p "$repo_root/tsconfig.json" --outDir "$out_dir"
+"$repo_root/node_modules/.bin/tsc" -p "$repo_root/tsconfig.json" --outDir "$out_dir"
 node "$repo_root/scripts/write-build-info.mjs" "$out_dir"
