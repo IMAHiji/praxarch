@@ -90,3 +90,23 @@ export async function writeSessionState(state: SessionState): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, JSON.stringify(state, null, 2), "utf8");
 }
+
+/**
+ * Merge-write for callers (telemetry) that own only a subset of state's fields and may run
+ * concurrently with another writer (verify-gate) that owns the rest. Re-reads the freshest
+ * on-disk snapshot immediately before mutating and writing, rather than writing back whatever
+ * was read at the start of a possibly-long-running caller — so a concurrent writer's change that
+ * lands anywhere before this call still survives, instead of being silently overwritten by a
+ * stale whole-object write. `mutate` must touch only the fields the caller owns; anything it
+ * doesn't touch passes through unchanged from the fresh read. Not a lock: two callers racing this
+ * function against each other can still interleave read/write pairs, but that's out of scope here
+ * — see the calling hook's own concurrency contract.
+ */
+export async function updateSessionState(
+  sessionId: string,
+  mutate: (state: SessionState) => void,
+): Promise<void> {
+  const state = await readSessionState(sessionId);
+  mutate(state);
+  await writeSessionState(state);
+}

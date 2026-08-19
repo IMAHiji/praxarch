@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -388,5 +389,335 @@ test("ignores non-Agent tool calls", async () => {
       tool_input: {},
     });
     await assert.rejects(readFile(join(home, "state", "s1.json"), "utf8"));
+  });
+});
+
+// --- Interleaving tests (issue #4: telemetry's write must merge, not clobber, a concurrent
+// verify-gate write that lands between telemetry's own read and write) -------------------------
+//
+// The seam: `diffStat`/`diffFingerprint` shell out to `git`, and telemetry's read-to-write window
+// spans those calls. Putting a fake `git` earlier on PATH lets a test land an arbitrary
+// verify-gate-shaped write *during* that window with no changes to production code.
+//
+// The residual window (after the hoist in this fix) is `readSessionState` -> `diffStat` -> the
+// merge-write — `diffFingerprint` (the `git status` call) now runs *before* the read, so it is
+// outside the window and must not be where the injection fires. `diffStat` calls `git diff
+// --numstat` (via `trackedDiff`) first, and that call happens after the read — so the fake
+// matches on `--numstat` appearing in argv, not on "first invocation", and fires the injected
+// write there. Matching on argv (rather than counting calls) also means this doesn't quietly
+// break again if the git-call order is ever reshuffled — the seam only fires when Node is really
+// about to run `git diff --numstat`, wherever that lands in the sequence.
+function initGitRepo(repo: string): void {
+  execFileSync("git", ["init", "-q"], { cwd: repo });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: repo });
+}
+
+async function buildInterleavingGit(
+  fakeGitDir: string,
+  injectScriptPath: string,
+  markerPath: string,
+): Promise<void> {
+  const realGit = execFileSync("which", ["git"]).toString("utf8").trim();
+  const script = [
+    "#!/bin/sh",
+    'case "$*" in',
+    "  *--numstat*)",
+    `    if [ ! -f "${markerPath}" ]; then`,
+    `      touch "${markerPath}"`,
+    `      node "${injectScriptPath}"`,
+    "    fi",
+    `    exec "${realGit}" "$@"`,
+    "    ;;",
+    `  *) exec "${realGit}" "$@" ;;`,
+    "esac",
+  ].join("\n");
+  await writeFile(join(fakeGitDir, "git"), `${script}\n`, "utf8");
+  execFileSync("chmod", ["755", join(fakeGitDir, "git")]);
+}
+
+// Reads the (possibly not-yet-created) session state file, applies `mutate`, and writes the whole
+// object back — the same whole-object write shape verify-gate's real read-modify-write cycles use.
+function injectScriptSource(statePath: string, sessionId: string, mutateSource: string): string {
+  return [
+    'const fs = require("node:fs");',
+    'const path = require("node:path");',
+    `const STATE_PATH = ${JSON.stringify(statePath)};`,
+    `const SESSION_ID = ${JSON.stringify(sessionId)};`,
+    "let state;",
+    "try {",
+    "  state = JSON.parse(fs.readFileSync(STATE_PATH, 'utf8'));",
+    "} catch {",
+    "  state = { sessionId: SESSION_ID, startedAt: new Date().toISOString(), delegations: [], lastVerifier: null, baselineHead: null };",
+    "}",
+    mutateSource,
+    "fs.mkdirSync(path.dirname(STATE_PATH), { recursive: true });",
+    "fs.writeFileSync(STATE_PATH, JSON.stringify(state, null, 2));",
+  ].join("\n");
+}
+
+function verdictText(verdict: "CONFIRMED" | "REFUTED"): string {
+  return ["```json", JSON.stringify({ verdict, findings: [] }), "```"].join("\n");
+}
+
+async function withInterleavingSetup(
+  mutateSource: string,
+  fn: (ctx: { home: string; repo: string; statePath: string }) => Promise<void>,
+): Promise<void> {
+  await withPraxarchHome(async (home) => {
+    const repo = await mkdtemp(join(tmpdir(), "praxarch-telemetry-interleave-repo-"));
+    const fakeGitDir = await mkdtemp(join(tmpdir(), "praxarch-telemetry-interleave-git-"));
+    const statePath = join(home, "state", "s1.json");
+    const injectScriptPath = join(fakeGitDir, "inject.cjs");
+    const markerPath = join(fakeGitDir, "fired");
+    try {
+      initGitRepo(repo);
+      await writeFile(join(repo, "file.txt"), "line\n".repeat(5));
+      execFileSync("git", ["add", "."], { cwd: repo });
+      execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: repo });
+      await writeFile(join(repo, "file.txt"), "changed line\n".repeat(5));
+
+      await writeFile(injectScriptPath, injectScriptSource(statePath, "s1", mutateSource), "utf8");
+      await buildInterleavingGit(fakeGitDir, injectScriptPath, markerPath);
+
+      execFileSync("node", [script], {
+        input: JSON.stringify({
+          session_id: "s1",
+          cwd: repo,
+          hook_event_name: "PostToolUse",
+          tool_name: "Agent",
+          tool_input: { subagent_type: "verifier", model: "opus" },
+          tool_response: { status: "completed", content: [{ type: "text", text: verdictText("CONFIRMED") }] },
+        }),
+        env: { ...process.env, PRAXARCH_HOME: home, PATH: `${fakeGitDir}:${process.env["PATH"] ?? ""}` },
+      });
+
+      await fn({ home, repo, statePath });
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+      await rm(fakeGitDir, { recursive: true, force: true });
+    }
+  });
+}
+
+test("merges a verify-gate counter increment that lands between telemetry's read and write", async () => {
+  await withInterleavingSetup("state.verifyGateConsecutiveBlocks = 5;", async ({ statePath }) => {
+    const state = JSON.parse(await readFile(statePath, "utf8")) as {
+      verifyGateConsecutiveBlocks?: number;
+      delegations: unknown[];
+      lastVerifier: { verdict: string } | null;
+    };
+    assert.equal(state.verifyGateConsecutiveBlocks, 5, "the concurrent counter increment must survive");
+    assert.equal(state.delegations.length, 1, "telemetry's own delegation must still be recorded");
+    assert.equal(state.lastVerifier?.verdict, "CONFIRMED");
+  });
+});
+
+test("merges a verify-gate clearBlockCounters reset that lands between telemetry's read and write", async () => {
+  const mutate = [
+    "state.verifyGateConsecutiveBlocks = 7;",
+    "state.verifyGateBlockHash = 'deadbeef';",
+    "state.verifyGateCycleBlocks = 3;",
+    "fs.mkdirSync(path.dirname(STATE_PATH), { recursive: true });",
+    "fs.writeFileSync(STATE_PATH, JSON.stringify(state, null, 2));",
+    // Second write, inside the same injected script invocation, mimics clearBlockCounters
+    // clearing what it just set — both writes land inside telemetry's window.
+    "state.verifyGateConsecutiveBlocks = 0;",
+    "state.verifyGateBlockHash = null;",
+    "state.verifyGateCycleBlocks = 0;",
+  ].join("\n");
+  await withInterleavingSetup(mutate, async ({ statePath }) => {
+    const state = JSON.parse(await readFile(statePath, "utf8")) as {
+      verifyGateConsecutiveBlocks?: number;
+      verifyGateBlockHash?: string | null;
+      verifyGateCycleBlocks?: number;
+      delegations: unknown[];
+      lastVerifier: { verdict: string } | null;
+    };
+    assert.equal(state.verifyGateConsecutiveBlocks, 0);
+    assert.equal(state.verifyGateBlockHash, null);
+    assert.equal(state.verifyGateCycleBlocks, 0);
+    assert.equal(state.delegations.length, 1);
+    assert.equal(state.lastVerifier?.verdict, "CONFIRMED");
+  });
+});
+
+test("merges a verify-gate waiver hash write that lands between telemetry's read and write", async () => {
+  await withInterleavingSetup("state.verifyGateWaivedHash = 'waivedhash123';", async ({ statePath }) => {
+    const state = JSON.parse(await readFile(statePath, "utf8")) as {
+      verifyGateWaivedHash?: string;
+      delegations: unknown[];
+      lastVerifier: { verdict: string } | null;
+    };
+    assert.equal(state.verifyGateWaivedHash, "waivedhash123");
+    assert.equal(state.delegations.length, 1);
+    assert.equal(state.lastVerifier?.verdict, "CONFIRMED");
+  });
+});
+
+test("two verdict-recording telemetry runs racing each other: last verdict wins, both delegations survive", async () => {
+  await withPraxarchHome(async (home) => {
+    const repo = await mkdtemp(join(tmpdir(), "praxarch-telemetry-race-repo-"));
+    const fakeGitDir = await mkdtemp(join(tmpdir(), "praxarch-telemetry-race-git-"));
+    const startedMarker = join(fakeGitDir, "a-started");
+    const goMarker = join(fakeGitDir, "b-done");
+    try {
+      initGitRepo(repo);
+      await writeFile(join(repo, "file.txt"), "line\n".repeat(5));
+      execFileSync("git", ["add", "."], { cwd: repo });
+      execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: repo });
+      await writeFile(join(repo, "file.txt"), "changed line\n".repeat(5));
+
+      // Run A's fake `git`: A's `diffFingerprint` call (git status, before the read) runs
+      // normally, so A actually reads state first. Only A's `diffStat` call — `git diff
+      // --numstat`, which runs after the read — signals it has started and blocks until B has
+      // fully completed, so B's write is guaranteed to land inside A's real read-to-write window,
+      // not before A has read at all.
+      const realGit = execFileSync("which", ["git"]).toString("utf8").trim();
+      const aGitScript = [
+        "#!/bin/sh",
+        'case "$*" in',
+        "  *--numstat*)",
+        `    if [ ! -f "${startedMarker}" ]; then`,
+        `      touch "${startedMarker}"`,
+        `      while [ ! -f "${goMarker}" ]; do sleep 0.05; done`,
+        "    fi",
+        `    exec "${realGit}" "$@"`,
+        "    ;;",
+        `  *) exec "${realGit}" "$@" ;;`,
+        "esac",
+      ].join("\n");
+      await writeFile(join(fakeGitDir, "git"), `${aGitScript}\n`, "utf8");
+      execFileSync("chmod", ["755", join(fakeGitDir, "git")]);
+
+      const runA = new Promise<void>((resolve, reject) => {
+        const child = spawn("node", [script], {
+          env: { ...process.env, PRAXARCH_HOME: home, PATH: `${fakeGitDir}:${process.env["PATH"] ?? ""}` },
+        });
+        child.stdin.end(
+          JSON.stringify({
+            session_id: "s1",
+            cwd: repo,
+            hook_event_name: "PostToolUse",
+            tool_name: "Agent",
+            tool_input: { subagent_type: "verifier", model: "opus" },
+            tool_response: { status: "completed", content: [{ type: "text", text: verdictText("CONFIRMED") }] },
+          }),
+        );
+        child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`A exited ${code}`))));
+        child.on("error", reject);
+      });
+
+      // Wait for A to be mid-window (blocked in its fake git), then run B to full completion on
+      // the real, unmodified PATH — B's read, write, and exit all happen while A is parked.
+      const deadline = Date.now() + 5000;
+      while (!existsSync(startedMarker)) {
+        if (Date.now() > deadline) throw new Error("A never reached its git call");
+        await new Promise((r) => setTimeout(r, 20));
+      }
+
+      execFileSync("node", [script], {
+        input: JSON.stringify({
+          session_id: "s1",
+          cwd: repo,
+          hook_event_name: "PostToolUse",
+          tool_name: "Agent",
+          tool_input: { subagent_type: "verifier", model: "opus" },
+          tool_response: { status: "completed", content: [{ type: "text", text: verdictText("REFUTED") }] },
+        }),
+        env: { ...process.env, PRAXARCH_HOME: home },
+      });
+
+      await writeFile(goMarker, "go");
+      await runA;
+
+      const statePath = join(home, "state", "s1.json");
+      const state = JSON.parse(await readFile(statePath, "utf8")) as {
+        delegations: unknown[];
+        lastVerifier: { verdict: string } | null;
+      };
+      assert.equal(state.delegations.length, 2, "both racing runs' delegations must survive");
+      // A (CONFIRMED) is the one that finishes last, since B ran to completion entirely inside
+      // A's window — its verdict must be the one left standing.
+      assert.equal(state.lastVerifier?.verdict, "CONFIRMED");
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+      await rm(fakeGitDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("diffHash invariant: a merged record's diffHash is present-and-null after a failed fingerprint, never absent", async () => {
+  await withPraxarchHome(async (home) => {
+    const repo = await mkdtemp(join(tmpdir(), "praxarch-telemetry-diffhash-repo-"));
+    const fakeGitDir = await mkdtemp(join(tmpdir(), "praxarch-telemetry-diffhash-git-"));
+    const statePath = join(home, "state", "s1.json");
+    const injectScriptPath = join(fakeGitDir, "inject.cjs");
+    const markerPath = join(fakeGitDir, "fired");
+    try {
+      initGitRepo(repo);
+      await writeFile(join(repo, "file.txt"), "line\n".repeat(5));
+      execFileSync("git", ["add", "."], { cwd: repo });
+      execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: repo });
+      await writeFile(join(repo, "file.txt"), "changed line\n".repeat(5));
+
+      await writeFile(
+        injectScriptPath,
+        injectScriptSource(statePath, "s1", "state.verifyGateConsecutiveBlocks = 9;"),
+        "utf8",
+      );
+
+      // Fails `git status` (diffFingerprint's call, which now runs before the read) on every
+      // invocation, so the fingerprint comes back null while --numstat/ls-files (diffStat, which
+      // runs after the read) still work — forcing the merged record through the failed-fingerprint
+      // path. The injected write fires on the `--numstat` call specifically, so it lands inside
+      // the real read-to-write window rather than during the (pre-read) failing status call.
+      const realGit = execFileSync("which", ["git"]).toString("utf8").trim();
+      const fakeGitScript = [
+        "#!/bin/sh",
+        'case "$*" in',
+        "  *--numstat*)",
+        `    if [ ! -f "${markerPath}" ]; then`,
+        `      touch "${markerPath}"`,
+        `      node "${injectScriptPath}"`,
+        "    fi",
+        `    exec "${realGit}" "$@"`,
+        "    ;;",
+        `  *ls-files*) exec "${realGit}" "$@" ;;`,
+        '  status*) echo "fake git: status failed" >&2; exit 1 ;;',
+        `  *) exec "${realGit}" "$@" ;;`,
+        "esac",
+      ].join("\n");
+      await writeFile(join(fakeGitDir, "git"), `${fakeGitScript}\n`, "utf8");
+      execFileSync("chmod", ["755", join(fakeGitDir, "git")]);
+
+      execFileSync("node", [script], {
+        input: JSON.stringify({
+          session_id: "s1",
+          cwd: repo,
+          hook_event_name: "PostToolUse",
+          tool_name: "Agent",
+          tool_input: { subagent_type: "verifier", model: "opus" },
+          tool_response: { status: "completed", content: [{ type: "text", text: verdictText("CONFIRMED") }] },
+        }),
+        env: { ...process.env, PRAXARCH_HOME: home, PATH: `${fakeGitDir}:${process.env["PATH"] ?? ""}` },
+      });
+
+      const state = JSON.parse(await readFile(statePath, "utf8")) as {
+        verifyGateConsecutiveBlocks?: number;
+        lastVerifier: { verdict: string } | null;
+      };
+      // Concurrent write still merged in.
+      assert.equal(state.verifyGateConsecutiveBlocks, 9);
+      // The merge went through `JSON.stringify` (writeSessionState), so the invariant that must
+      // hold on disk is: the key is present with value `null`, not absent, not `undefined`.
+      const raw = JSON.parse(await readFile(statePath, "utf8")) as Record<string, unknown>;
+      const lastVerifier = raw["lastVerifier"] as Record<string, unknown>;
+      assert.ok("diffHash" in lastVerifier, "diffHash key must be present, not dropped by the merge");
+      assert.equal(lastVerifier["diffHash"], null);
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+      await rm(fakeGitDir, { recursive: true, force: true });
+    }
   });
 });
