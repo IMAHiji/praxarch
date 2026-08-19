@@ -1126,7 +1126,10 @@ test(
         namedExports: {
           listUntrackedPaths: real.listUntrackedPaths,
           repoRoot: real.repoRoot,
-          readUntrackedEntry: async (root: string, raw: Buffer) => {
+          // `root` is a Buffer, not a string: repoRoot returns raw bytes so a non-UTF-8 repo root
+          // survives without a decode round trip. Typing it `string` here compiles against the
+          // pre-Buffer signature and breaks on merge.
+          readUntrackedEntry: async (root: Buffer, raw: Buffer) => {
             invokedPaths.push(raw.toString("utf8"));
             return real.readUntrackedEntry(root, raw);
           },
