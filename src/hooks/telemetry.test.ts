@@ -790,3 +790,72 @@ test("diffHash invariant: a merged record's diffHash is present-and-null after a
     }
   });
 });
+
+// Every fixture above terminates its text at the closing fence, so none of them can observe
+// post-fence behavior. This one puts trailing prose after the closing fence (a closing remark, as
+// the un-tightened role prompts used to illustrate) — extractTrailingJson must return null, so
+// telemetry must not crash, must still append the delegation-log row (verdict: null, not the
+// prose-adjacent block's value), and must leave session state's `lastVerifier` untouched.
+test("does not record a verdict when trailing prose follows the closing fence", async () => {
+  await withPraxarchHome(async (home) => {
+    const verifierText = [
+      "```json",
+      JSON.stringify({ verdict: "CONFIRMED", findings: [] }),
+      "```",
+      "",
+      "That is all.",
+    ].join("\n");
+
+    run(home, {
+      session_id: "s1",
+      cwd: process.cwd(),
+      hook_event_name: "PostToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: "verifier", model: "opus" },
+      tool_response: { status: "completed", content: [{ type: "text", text: verifierText }] },
+    });
+
+    const logContent = await readFile(monthlyLogPath(home), "utf8");
+    const record = JSON.parse(logContent.trim()) as { verdict: string | null };
+    assert.equal(record.verdict, null);
+
+    const statePath = join(home, "state", "s1.json");
+    const state = JSON.parse(await readFile(statePath, "utf8")) as {
+      lastVerifier: unknown;
+      delegations: unknown[];
+    };
+    assert.equal(state.lastVerifier, null);
+    assert.equal(state.delegations.length, 1);
+  });
+});
+
+// summarizeVerdict throws MalformedVerdictError for a verdict value outside CONFIRMED/REFUTED.
+// telemetry.ts is a non-blocking observer (unlike record-verdict.ts), so this must behave exactly
+// like the trailing-prose case above: the delegation-log row is still appended (verdict: null) and
+// session state is still written — the throw must not unwind out of main() and erase both.
+test("still records the delegation row and state when the verdict value is out of range", async () => {
+  await withPraxarchHome(async (home) => {
+    const verifierText = ["```json", JSON.stringify({ verdict: "MAYBE", findings: [] }), "```"].join("\n");
+
+    run(home, {
+      session_id: "s1",
+      cwd: process.cwd(),
+      hook_event_name: "PostToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: "verifier", model: "opus" },
+      tool_response: { status: "completed", content: [{ type: "text", text: verifierText }] },
+    });
+
+    const logContent = await readFile(monthlyLogPath(home), "utf8");
+    const record = JSON.parse(logContent.trim()) as { verdict: string | null };
+    assert.equal(record.verdict, null);
+
+    const statePath = join(home, "state", "s1.json");
+    const state = JSON.parse(await readFile(statePath, "utf8")) as {
+      lastVerifier: unknown;
+      delegations: unknown[];
+    };
+    assert.equal(state.lastVerifier, null);
+    assert.equal(state.delegations.length, 1);
+  });
+});

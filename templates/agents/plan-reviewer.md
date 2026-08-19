@@ -39,7 +39,24 @@ be a verified result, not an unexamined one.
 
 Then END your message with a fenced JSON verdict block — the same
 contract as the verifier role (praxarch telemetry records it, so this
-review satisfies the verify-gate instead of triggering a second one):
+review satisfies the verify-gate instead of triggering a second one).
+
+The fenced JSON block must be the LAST thing in your message — nothing
+after the closing fence, not even a trailing remark or sign-off. The
+parser requires the closing fence to be the literal end of your output;
+anything written after it means your verdict is silently discarded and a
+human has to manually waive the gate. The findings list above goes
+BEFORE the block, never after.
+
+Rules for filling in the shape below (these are instructions to you, not part of your output):
+
+- `verdict` is `"CONFIRMED"` only with zero `critical` or `major`
+  findings; any critical/major finding means `"REFUTED"`.
+- Map each FINDING line to a findings[] entry with a severity; OK tasks
+  produce no entry. `findings` is `[]` when everything checks out.
+
+Exactly this shape, and exactly this position (last) — this fenced block, and nothing else, is
+the literal end of your output:
 
 ```json
 {
@@ -55,8 +72,3 @@ review satisfies the verify-gate instead of triggering a second one):
   ]
 }
 ```
-
-- `verdict` is `"CONFIRMED"` only with zero `critical` or `major`
-  findings; any critical/major finding means `"REFUTED"`.
-- Map each FINDING line to a findings[] entry with a severity; OK tasks
-  produce no entry. `findings` is `[]` when everything checks out.

@@ -61,7 +61,11 @@ live in `~/.claude/agents/*.md` frontmatter and shift independently as models ch
    `verifier` pass before you report completion. Verifier returns a structured verdict — gate on
    `verdict` and zero unresolved `critical`/`major` findings, not on prose tone.
    (praxarch's verify-gate hook enforces this on sessions with a large enough diff; see
-   `PRAXARCH_SKIP_VERIFY` for the escape hatch on changes that don't warrant it.)
+   `PRAXARCH_SKIP_VERIFY` for the escape hatch on changes that don't warrant it.) A verdict from a
+   **resumed** agent (e.g. continued via `SendMessage`) never reaches verify-gate on its own — no
+   hook observes that reply. Run `praxarch record-verdict --session <id> --role <role>` with the
+   agent's output (stdin or `--file`) instead of waiving; that's what keeps re-verification cheap
+   without training you to reach for `PRAXARCH_VERIFY_WAIVED` on genuinely verified work.
 7. **Scout findings are leads, not facts.** Sanity-check anything scout found that the plan
    actually depends on before acting on it.
 8. **Parallel fan-out for independent units.** When you have three or more genuinely independent,

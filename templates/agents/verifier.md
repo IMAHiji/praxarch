@@ -19,7 +19,23 @@ not to confirm it.
 
 ## Output — REQUIRED structured verdict
 
-End your response with a fenced JSON block, exactly this shape:
+The fenced JSON block below must be the LAST thing in your response — nothing after the closing
+fence, not even trailing whitespace-adjacent text: no closing remark, no summary bullet, no
+sign-off. The parser that records your verdict requires the closing fence to be the literal end
+of your output; anything you write after it means your verdict is silently discarded and a human
+has to manually waive the gate. Put any narrative/prose findings summary BEFORE the block, never
+after.
+
+Rules for filling in the shape below (these are instructions to you, not part of your output):
+
+- `verdict` is `"CONFIRMED"` only if there are zero `critical` or `major` findings. Any critical/major
+  finding means `"REFUTED"`.
+- `findings` is `[]` when nothing survived scrutiny — say so plainly, don't invent minor nitpicks to
+  seem thorough.
+- Do not fix anything yourself. Report findings; the orchestrator routes fixes back to an executor role.
+
+Exactly this shape, and exactly this position (last) — this fenced block, and nothing else, is
+the literal end of your output:
 
 ```json
 {
@@ -35,9 +51,3 @@ End your response with a fenced JSON block, exactly this shape:
   ]
 }
 ```
-
-- `verdict` is `"CONFIRMED"` only if there are zero `critical` or `major` findings. Any critical/major
-  finding means `"REFUTED"`.
-- `findings` is `[]` when nothing survived scrutiny — say so plainly, don't invent minor nitpicks to
-  seem thorough.
-- Do not fix anything yourself. Report findings; the orchestrator routes fixes back to an executor role.

@@ -1,10 +1,16 @@
 #!/usr/bin/env node
 import { loadConfig } from "./lib/config.js";
-import { diffFingerprint, diffStat } from "./lib/git-diff.js";
 import { appendJsonl } from "./lib/jsonl.js";
 import { logFileForDate } from "./lib/paths.js";
 import { readSessionState, updateSessionState, type VerifierRecord } from "./lib/session-state.js";
 import { readHookInput, type PostToolUseInput } from "./lib/hook-io.js";
+import {
+  captureDiffCounts,
+  captureDiffHash,
+  extractTrailingJson,
+  MalformedVerdictError,
+  summarizeVerdict,
+} from "./lib/verdict.js";
 
 /**
  * PostToolUse(Agent) — appends a delegation record to the monthly JSONL log and, for verdict
@@ -17,31 +23,6 @@ import { readHookInput, type PostToolUseInput } from "./lib/hook-io.js";
  */
 
 const FANOUT_TAG = /^\[fanout:([a-zA-Z0-9_-]+)\]/;
-
-interface VerifierVerdictJson {
-  verdict: "CONFIRMED" | "REFUTED";
-  findings?: { severity: "critical" | "major" | "minor" }[];
-}
-
-function extractTrailingJson(text: string): VerifierVerdictJson | null {
-  const fenceMatches = [...text.matchAll(/```json\s*([\s\S]*?)```/g)];
-  const last = fenceMatches.at(-1);
-  if (!last?.[1]) return null;
-  try {
-    const parsed = JSON.parse(last[1]) as unknown;
-    if (
-      typeof parsed === "object" &&
-      parsed !== null &&
-      "verdict" in parsed &&
-      (parsed as { verdict: unknown }).verdict !== undefined
-    ) {
-      return parsed as VerifierVerdictJson;
-    }
-  } catch {
-    return null;
-  }
-  return null;
-}
 
 function responseText(response: PostToolUseInput["tool_response"]): string {
   return (response?.content ?? [])
@@ -72,14 +53,15 @@ async function main(): Promise<void> {
   if (role !== undefined && config.verifyGate.verdictRoles.includes(role) && text) {
     const parsed = extractTrailingJson(text);
     if (parsed) {
-      const criticalOrMajor = (parsed.findings ?? []).filter(
-        (f) => f.severity === "critical" || f.severity === "major",
-      ).length;
-      parsedVerdict = {
-        verdict: parsed.verdict,
-        findingsCount: parsed.findings?.length ?? 0,
-        criticalOrMajorCount: criticalOrMajor,
-      };
+      try {
+        parsedVerdict = summarizeVerdict(parsed);
+      } catch (err) {
+        // Telemetry is a non-blocking observer (unlike record-verdict.ts, which must refuse
+        // outright): a malformed verdict value must not unwind out of main() and cost the JSONL
+        // log its only record of this delegation — treat it exactly like an unparseable block
+        // (parsedVerdict stays null) and let the row/state write below proceed.
+        if (!(err instanceof MalformedVerdictError)) throw err;
+      }
     }
   }
 
@@ -107,15 +89,10 @@ async function main(): Promise<void> {
   // so nothing stops it running before the read — shrinking (not eliminating; diffStat still
   // needs `baselineHead` from the read) the window in which a concurrent writer's change could
   // land before this hook's own merge-write below picks it up.
-  let diffHash: string | null = null;
-  if (parsedVerdict) {
-    try {
-      diffHash = await diffFingerprint(input.cwd);
-    } catch {
-      // Leave null — verify-gate treats a present-but-null diffHash as unverifiable (no free
-      // pass), unlike a record that omits the key entirely (genuinely predates this feature).
-    }
-  }
+  // A failure here degrades to null inside captureDiffHash — verify-gate treats a present-but-null
+  // diffHash as unverifiable (no free pass), unlike a record that omits the key entirely
+  // (genuinely predates this feature).
+  const diffHash: string | null = parsedVerdict ? await captureDiffHash(input.cwd) : null;
 
   // Read only for `baselineHead`, which diffStat needs below — never mutated and never written
   // back directly. The eventual write goes through `updateSessionState`, which re-reads the
@@ -125,19 +102,11 @@ async function main(): Promise<void> {
 
   let verifierRecord: VerifierRecord | null = null;
   if (parsedVerdict) {
-    let changedLines: number | null = null;
-    let changedFiles: number | null = null;
-    try {
-      const counts = await diffStat(input.cwd, config.verifyGate.ignorePatterns, state.baselineHead);
-      // `null` means the measurement failed (see diffStat's doc comment) — leave both nulls,
-      // same as the catch below, rather than throwing on a destructure of null.
-      if (counts) {
-        changedLines = counts.changedLines;
-        changedFiles = counts.changedFiles;
-      }
-    } catch {
-      // Leave nulls.
-    }
+    const { changedLines, changedFiles } = await captureDiffCounts(
+      input.cwd,
+      config.verifyGate.ignorePatterns,
+      state.baselineHead,
+    );
     // Invariant verify-gate relies on: diffHash must be a real `string | null` here, never
     // `undefined` — it distinguishes a legacy record (key absent) from a failed fingerprint
     // (key present, null) only because JSON.stringify drops undefined-valued keys but keeps

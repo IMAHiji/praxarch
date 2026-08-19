@@ -89,6 +89,18 @@ praxarch uninstall
 Removes praxarch's hook entries, role/skill files, and `~/.claude/praxarch/`. Leaves
 `model`/`fallbackModel` alone and leaves backups in place.
 
+### Record a verdict
+
+```sh
+praxarch record-verdict --session <id> --role verifier < verdict-output.txt
+praxarch record-verdict --session <id> --role verifier --file verdict-output.txt
+```
+
+Records a verdict role's trailing JSON verdict block into session state for verify-gate, for
+verdicts that arrive outside a hookable event (e.g. a resumed agent's reply). Input is the full
+text of the role's response, read from stdin or `--file`; the fenced JSON verdict block must be
+the last thing in it.
+
 ## Using it
 
 Once installed, delegate from your main Claude Code session using the nine roles — see the
