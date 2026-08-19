@@ -138,14 +138,20 @@ export interface DiffCountsResult {
  * caller's job to distinguish) on a real measurement failure — this wrapper only adds the same
  * throw-to-null degrade telemetry.ts used to apply inline, so a caller never has to destructure a
  * possibly-null return without a catch around it.
+ *
+ * `untrackedBaseline` passes straight through to `diffStat` — see its own doc comment for the
+ * fail-closed contract (absent/null counts every untracked path; only an exact content-key match
+ * excludes one). This function does not interpret the value itself, only forwards it, so a missing
+ * or unusable snapshot degrades identically here to how it degrades inside `diffStat`.
  */
 export async function captureDiffCounts(
   cwd: string,
   ignorePatterns: string[],
   baseline: string | null | undefined,
+  untrackedBaseline?: Record<string, string> | null,
 ): Promise<DiffCountsResult> {
   try {
-    const counts = await diffStat(cwd, ignorePatterns, baseline ?? null);
+    const counts = await diffStat(cwd, ignorePatterns, baseline ?? null, untrackedBaseline);
     if (counts) return { changedLines: counts.changedLines, changedFiles: counts.changedFiles };
     return { changedLines: null, changedFiles: null };
   } catch {
