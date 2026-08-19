@@ -65,6 +65,11 @@ test:
     - build
   timeout: 5m
   script:
+    # The runner clones as root, so git refuses to operate in the checkout as the `node` user
+    # ("detected dubious ownership"). Several tests shell out to git through the CLI -- doctor's
+    # build-ref check reads the checkout's HEAD -- and a git that errors makes doctor skip the
+    # comparison and exit 0, so the test asserting it exits 1 fails. --system covers every user.
+    - git config --system --add safe.directory "$CI_PROJECT_DIR"
     # pipefail so a `pnpm test` failure is not masked by tee's exit status.
     - set -o pipefail; su node -c "pnpm test" | tee test-output.log
     # Every test must RUN here, not merely pass. A skipped test reports as passing, which is how
