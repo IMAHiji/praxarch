@@ -70,6 +70,21 @@ function isBadObjectError(err: unknown): boolean {
   return /bad object|unknown revision|bad revision/i.test(message);
 }
 
+// Positive detection of "cwd is a git repo," not inferred from any diff/status call having
+// failed — the defect this issue exists to close is exactly that conflation (a FIFO tripping
+// `git diff --numstat` inside a real repo used to read identically to cwd not being a repo at
+// all). `git rev-parse --is-inside-work-tree` succeeds in any working tree, including one with an
+// unborn HEAD and zero commits, and fails (non-zero exit, "not a git repository" on stderr)
+// everywhere else — that boolean is the only thing this function reports.
+async function isGitRepo(cwd: string): Promise<boolean> {
+  try {
+    await execFileAsync("git", ["rev-parse", "--is-inside-work-tree"], { cwd });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function trackedDiff(cwd: string, target: string, args: string[]): Promise<string> {
   try {
     const { stdout } = await execFileAsync("git", ["diff", ...NEUTRALIZE_DIFF_CONFIG, target, ...args], {
@@ -110,33 +125,69 @@ async function listUntracked(cwd: string): Promise<string[] | null> {
 /**
  * Sizes the session's real diff: changes against `baseline` (the HEAD sha recorded at
  * SessionStart) when given, so committed work still gets measured — plus untracked new files,
- * which `git diff` never sees. Excludes paths matching any ignorePattern substring. Returns
- * zeros if cwd isn't a git repo — the verify-gate treats that as "nothing to gate on" rather than
- * failing the hook.
+ * which `git diff` never sees. Excludes paths matching any ignorePattern substring.
+ *
+ * `null` means the diff could not be measured — same contract as `diffFingerprint`'s return
+ * value, and it must never be treated as "nothing changed": a caller that used to read a swallowed
+ * measurement failure as `{0, 0}` was reading a genuinely unmeasured tree as trivially small,
+ * which is how a FIFO (or a socket, device node, or any other `unsupported file type` git chokes
+ * on) anywhere in the tree used to let a real diff of any size sail past verify-gate's trivial-diff
+ * allow with no verdict ever recorded. Three distinguishable outcomes, not two:
+ * - cwd isn't a git repo at all (`isGitRepo` below, checked positively — never inferred from the
+ *   numstat/ls-files calls having failed, which is the conflation that caused the defect this
+ *   split exists to fix) → `{0, 0}`. Deliberately still fail-open: the verify-gate treats this as
+ *   "nothing to gate on" rather than failing the hook, and that's unchanged by this fix.
+ * - A real repo whose `--numstat` probe or untracked-file listing fails for any other reason
+ *   (the FIFO repro, a numstat failure, an `ls-files` failure) → `null`. The one carve-out is an
+ *   unborn HEAD (a real repo, zero commits) diffing against `target`: `trackedDiff` reports that
+ *   the same way `diffFingerprint` treats it — as "nothing committed yet," not as unknown — so a
+ *   brand-new repo with only untracked work still gets real counts, not `null`.
+ * - Success → real counts.
  *
  * Deliberately cheap: only `--numstat` (tracked) and untracked-file byte-length line counts are
  * computed — no patch text is fetched. Callers that also need the fingerprint (e.g. to detect a
  * stale verdict) call `diffFingerprint` separately, and only when they actually need it — see its
  * doc comment for why that split exists.
  */
-export async function diffStat(cwd: string, ignorePatterns: string[], baseline?: string | null): Promise<DiffCounts> {
+export async function diffStat(
+  cwd: string,
+  ignorePatterns: string[],
+  baseline?: string | null,
+): Promise<DiffCounts | null> {
+  if (!(await isGitRepo(cwd))) {
+    return { changedLines: 0, changedFiles: 0 };
+  }
+
   const target = baseline ? baseline : "HEAD";
 
-  let tracked: DiffCounts = { changedLines: 0, changedFiles: 0 };
+  let tracked: DiffCounts;
   try {
     const numstatOut = await trackedDiff(cwd, target, ["--numstat"]);
     tracked = parseNumstat(numstatOut, ignorePatterns);
-  } catch {
-    // No usable committed diff (e.g. no commits yet, or not a git repo) — tracked portion is
-    // zero, but untracked-file counting below still runs.
+  } catch (err) {
+    // Unborn HEAD (no commits yet) is the one bad-object-shaped failure that isn't unknown — a
+    // real repo genuinely has nothing committed to diff against, matching diffFingerprint's
+    // "NOHEAD" treatment of the same state. `target === "HEAD"` above already keeps this from
+    // masking a bad `baseline` sha (trackedDiff's own HEAD fallback only fires when target isn't
+    // already HEAD), so this only ever catches the unborn-HEAD case. Anything else — the FIFO
+    // repro's "unsupported file type," a maxBuffer overflow, a genuine numstat failure — is
+    // unknown and must propagate as `null`, not degrade to a silently-zero tracked count.
+    if (isBadObjectError(err)) {
+      tracked = { changedLines: 0, changedFiles: 0 };
+    } else {
+      return null;
+    }
   }
+
+  const untracked = await listUntracked(cwd);
+  // A failed listing means a hidden batch of new files could be sitting uncounted — exactly the
+  // under-count this null contract exists to prevent, so it takes the whole measurement down
+  // rather than degrading to "contributes nothing" the way an individual unreadable file does.
+  if (untracked === null) return null;
 
   let changedLines = tracked.changedLines;
   let changedFiles = tracked.changedFiles;
-  // A failed listing (null) degrades to the same "contributes nothing" behaviour as an empty one
-  // — diffStat's counts are documented to degrade to zero on failure; only diffFingerprint's null
-  // contract distinguishes the two.
-  for (const path of (await listUntracked(cwd)) ?? []) {
+  for (const path of untracked) {
     let contents: Buffer | null = null;
     try {
       contents = await readFile(join(cwd, path));

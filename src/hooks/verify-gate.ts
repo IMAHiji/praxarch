@@ -116,11 +116,23 @@ async function main(): Promise<void> {
   }
 
   const { config, warnings } = await loadConfig(input.cwd);
-  const current = await diffStat(input.cwd, config.verifyGate.ignorePatterns, state.baselineHead);
+  const currentCounts = await diffStat(input.cwd, config.verifyGate.ignorePatterns, state.baselineHead);
+
+  // `null` means the diff couldn't be measured at all (see diffStat's doc comment). Reading that
+  // as trivial is exactly the bypass this fix exists to close, so a failed measurement is treated
+  // as non-trivial unconditionally — it skips the early allow below and falls through to the same
+  // verdict-demanding path as any other non-trivial diff, with its own message variant at the
+  // bottom of this function. `current` still gets zeroed counts so the delta math further down
+  // (which only runs once a verdict is already being demanded) has real numbers to subtract
+  // against; measurementFailed is what actually drives every branching decision.
+  const measurementFailed = currentCounts === null;
+  const current = currentCounts ?? { changedLines: 0, changedFiles: 0 };
   const { changedLines, changedFiles } = current;
 
   const isNonTrivial =
-    changedLines >= config.verifyGate.minChangedLines || changedFiles >= config.verifyGate.minChangedFiles;
+    measurementFailed ||
+    changedLines >= config.verifyGate.minChangedLines ||
+    changedFiles >= config.verifyGate.minChangedFiles;
   if (!isNonTrivial) {
     await clearBlockCounters(state);
     emit(allow(warnings));
@@ -263,13 +275,19 @@ async function main(): Promise<void> {
           `${fileDeltaPhrase} since it was recorded`
         : `last verifier pass was ${verifier.verdict} with ${verifier.criticalOrMajorCount} critical/major finding(s)`;
 
+  // A failed measurement has no real changedLines/changedFiles to report — the size-phrased
+  // message above would print zeros and read as "trivial but blocked," which is backwards. This
+  // variant states the actual reason (diff could not be measured) instead.
   const output: StopOutput = withConfigWarnings(
     {
       decision: "block",
-      reason:
-        `praxarch verify-gate: this session changed ${changedLines} lines across ${changedFiles} files ` +
-        `(non-trivial) but ${reasonDetail}. Run a verifier pass before reporting completion, or state ` +
-        `"PRAXARCH_VERIFY_WAIVED: <reason>" if verification genuinely doesn't apply here.`,
+      reason: measurementFailed
+        ? "praxarch verify-gate: the session's diff could not be measured (git diff failed) — treating as " +
+          'non-trivial. Run a verifier pass before reporting completion, or state "PRAXARCH_VERIFY_WAIVED: ' +
+          '<reason>" if verification genuinely doesn\'t apply here.'
+        : `praxarch verify-gate: this session changed ${changedLines} lines across ${changedFiles} files ` +
+          `(non-trivial) but ${reasonDetail}. Run a verifier pass before reporting completion, or state ` +
+          `"PRAXARCH_VERIFY_WAIVED: <reason>" if verification genuinely doesn't apply here.`,
       hookSpecificOutput: {
         hookEventName: "Stop",
         additionalContext:
