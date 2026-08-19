@@ -28,7 +28,7 @@ async function main(): Promise<void> {
     const fifoRelPath = "special.fifo";
     execFileSync("mkfifo", [join(repo, fifoRelPath)]);
 
-    const entry = await readUntrackedEntry(repo, Buffer.from(fifoRelPath, "utf8"));
+    const entry = await readUntrackedEntry(Buffer.from(repo, "utf8"), Buffer.from(fifoRelPath, "utf8"));
 
     process.stdout.write(`${JSON.stringify({ entry })}\n`);
   } finally {

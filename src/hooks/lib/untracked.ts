@@ -133,20 +133,36 @@ export async function listUntrackedPaths(cwd: string): Promise<UntrackedPath[] |
  * isn't inside a working tree, or the call otherwise fails — callers must not fall back to `cwd`
  * itself, which would silently reproduce the same wrong-base bug `--full-name` above exists to
  * close, just less often.
+ *
+ * Returns a `Buffer`, not a string, for the same reason `listUntrackedPaths` returns raw bytes in
+ * `UntrackedPath.raw`: `encoding: "buffer"` below keeps `execFile` from UTF-8-decoding stdout, so
+ * a repo root whose real on-disk name contains invalid-UTF-8 bytes (permitted by ext4/xfs) is
+ * never corrupted to U+FFFD before `readUntrackedEntry` builds a path from it. That path is
+ * reachable without an unusual filesystem: a hook's `cwd` arriving via an ASCII-named symlink
+ * still resolves to the physical (possibly non-UTF-8-named) directory once git's own `getcwd()`
+ * call inside the child process reconstructs it — the symlink's ASCII name is never what `git
+ * rev-parse --show-toplevel` prints. A caller must not re-encode this value through a string en
+ * route to `readUntrackedEntry`; that round-trip is exactly what this Buffer return exists to
+ * avoid.
  */
-export async function repoRoot(cwd: string): Promise<string | null> {
+export async function repoRoot(cwd: string): Promise<Buffer | null> {
   try {
     const { stdout } = await execFileAsync("git", ["rev-parse", "--show-toplevel"], {
       cwd,
       maxBuffer: MAX_GIT_BUFFER,
+      encoding: "buffer",
     });
-    // Strips only git's single terminating newline, not `.trim()`'s arbitrary trailing
-    // whitespace: a repo whose directory name itself ends in a space (or other whitespace) would
-    // otherwise come back truncated to a path that doesn't exist. readUntrackedEntry then builds
-    // every Buffer path against that wrong root, lstat ENOENTs on all of them, and every
-    // untracked entry reads as the fixed self-matching `{key: "a:", readable: true}` — the exact
-    // defect this module exists to close, reached through the root instead of a leaf.
-    return stdout.replace(/\r?\n$/, "");
+    // Strips only git's single trailing 0x0A byte, never a `\r?` variant: git terminates this
+    // output with LF alone (it does not write CRLF through a pipe here, on any platform), so a
+    // `\r?` in the strip pattern protects nothing and instead ate a legal trailing carriage return
+    // that was part of the repo root directory's own name. readUntrackedEntry then built every
+    // path against that truncated root, lstat ENOENTs on all of them, and every untracked entry
+    // read as the fixed self-matching `{key: "a:", readable: true}` — the exact defect this
+    // module exists to close, reached through the root instead of a leaf. Working on the raw
+    // bytes (rather than `.replace()` on a decoded string) is what makes stripping only the exact
+    // trailing byte possible at all.
+    const last = stdout.length - 1;
+    return last >= 0 && stdout[last] === 0x0a ? stdout.subarray(0, last) : stdout;
   } catch {
     return null;
   }
@@ -173,10 +189,16 @@ export interface UntrackedEntry {
  * `stat`: a symlink must be inspected as itself, not through whatever it points at.
  *
  * `raw` is the exact bytes `listUntrackedPaths` printed for this entry (its `UntrackedPath.raw`),
- * not a string. Every fs call below is made against a `Buffer` path built from it, so there is no
- * string encode/decode step anywhere in this function that could corrupt bytes or silently target
- * a different file than the one git listed — the same guarantee for every entry, representable or
- * not, rather than a weaker fallback for the latter.
+ * and `root` is the exact bytes `repoRoot` printed for the repo (its return value) — neither is a
+ * string. Every fs call below is made against a `Buffer` path built by concatenating the two, so
+ * there is no string encode/decode step anywhere in this function that could corrupt bytes or
+ * silently target a different file than the one git listed — the same guarantee for every entry,
+ * representable or not, rather than a weaker fallback for the latter. (`root` was still a `string`
+ * parameter until this defect's own root half was closed: this function re-encoded it via
+ * `Buffer.from(root, "utf8")`, which corrupted a non-UTF-8 repo root the same way a decoded `raw`
+ * would have. A `string` parameter here makes that class of bug permanently reachable regardless
+ * of what the caller does right, which is why the signature itself changed rather than just the
+ * call site.)
  *
  * The symlink branch is the security-relevant one. `readFile` on an untracked symlink follows it:
  * a symlink planted in the working tree that points outside the repo used to read arbitrary
@@ -201,8 +223,8 @@ export interface UntrackedEntry {
  * stream. Reordering that — opening the stream first and dispatching after — would reintroduce
  * the exact hang this function exists to close, just moved one line later.
  */
-export async function readUntrackedEntry(root: string, raw: Buffer): Promise<UntrackedEntry> {
-  const fullPath = Buffer.concat([Buffer.from(root, "utf8"), PATH_SEP, raw]);
+export async function readUntrackedEntry(root: Buffer, raw: Buffer): Promise<UntrackedEntry> {
+  const fullPath = Buffer.concat([root, PATH_SEP, raw]);
 
   let st;
   try {
@@ -234,6 +256,16 @@ export async function readUntrackedEntry(root: string, raw: Buffer): Promise<Unt
     try {
       target = await readlink(fullPath, { encoding: "buffer" });
     } catch {
+      // Not independently reachable from outside this function without a TOCTOU race: `readlink`
+      // needs no permission of its own on the link (POSIX grants none beyond directory search
+      // permission on `fullPath`'s parents, the exact same permission the `lstat` above already
+      // required to succeed), so any parent-directory permission change that would make this
+      // `readlink` fail would have already failed the `lstat` above first, returning from the
+      // catch block above this one instead. Reaching this branch requires the leaf to stop being a
+      // symlink (or vanish) in the gap between the two calls — a real race, not something a
+      // deterministic test can construct without mocking `node:fs/promises`, which this module
+      // avoids elsewhere for the same reason (see this file's tests: real filesystem fixtures
+      // throughout, no mocked fs calls). Left in place as defense in depth for that race.
       return { key: "u:", lines: 0, readable: false };
     }
     const targetHash = createHash("sha256").update(target).digest("hex");
