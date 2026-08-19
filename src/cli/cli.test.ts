@@ -58,6 +58,21 @@ async function setupRepoCopy(): Promise<{ root: string; cli: string }> {
   return { root, cli: join(root, "dist", "cli", "index.js") };
 }
 
+test("every role template carries an explicit effort frontmatter value", async () => {
+  const agentsDir = join(repoRoot, "templates", "agents");
+  const files = (await readdir(agentsDir)).filter((f) => f.endsWith(".md"));
+  assert.ok(files.length > 0, "expected at least one role template");
+
+  const missing: string[] = [];
+  for (const file of files) {
+    const content = await readFile(join(agentsDir, file), "utf8");
+    const frontmatter = content.match(/^---\n([\s\S]*?)\n---/)?.[1] ?? "";
+    if (!/^effort:\s*(low|medium|high)\s*$/m.test(frontmatter)) missing.push(file);
+  }
+
+  assert.deepEqual(missing, [], `role templates missing an effort frontmatter value: ${missing.join(", ")}`);
+});
+
 test("install --yes writes settings, CLAUDE.md, agents, skills, and praxarch/ tree", async () => {
   const fixture = await setupFixture();
   try {

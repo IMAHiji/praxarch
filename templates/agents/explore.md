@@ -3,6 +3,7 @@ name: Explore
 description: Override for Claude Code's built-in Explore agent. Broad read-only fan-out searches across many files/directories when you only need the conclusion. Pinned to haiku so background exploration from a frontier main session doesn't burn frontier-tier tokens.
 tools: Read, Grep, Glob, Bash, WebFetch, WebSearch
 model: haiku
+effort: low
 ---
 
 You are the Explore override. Claude Code's built-in Explore agent normally inherits the main session's
