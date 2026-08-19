@@ -192,13 +192,22 @@ export async function diffStat(
     }
   }
 
-  // Resolved before listing, and before any untracked path is read — untracked entries are
-  // root-relative, so every subsequent read must be joined against the real repo root, never
-  // `cwd`. See the doc comment above for why a failure here is unknown (`null`).
+  // Resolved before listing, and before any untracked path is read — every entry `readUntrackedEntry`
+  // reads below is joined against this root, never `cwd`, since the paths `listUntrackedPaths`
+  // returns are root-relative. See the doc comment above for why a failure here is unknown
+  // (`null`). Passed straight through to `readUntrackedEntry` with no intermediate stringification
+  // (no template literal, no `String(root)`) so this call site stays correct regardless of
+  // whether `repoRoot` returns a `string` or a raw-byte `Buffer` — the exact representation is
+  // untracked.ts's decision, not this function's.
   const root = await repoRoot(cwd);
   if (root === null) return null;
 
-  const untracked = await listUntrackedPaths(root);
+  // `listUntrackedPaths` takes any cwd inside the repo, not specifically the root — that's the
+  // whole point of its `--full-name` + `:/` pathspec (see its doc comment): the listing is
+  // whole-repo and root-relative regardless of which directory it's invoked from. Passing the
+  // original `cwd` here, rather than `root`, means this call never depends on `root`'s
+  // representation either.
+  const untracked = await listUntrackedPaths(cwd);
   // A failed listing means a hidden batch of new files could be sitting uncounted — exactly the
   // under-count this null contract exists to prevent, so it takes the whole measurement down
   // rather than degrading to "contributes nothing" the way an individual unreadable entry does.
