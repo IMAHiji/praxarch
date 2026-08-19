@@ -4,7 +4,8 @@ import { createReadStream } from "node:fs";
 import { lstat, readlink } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { listUntrackedPaths, readUntrackedEntry, repoRoot } from "./untracked.js";
+import { listUntrackedPaths, lookupUntrackedBaseline, readUntrackedEntry, repoRoot } from "./untracked.js";
+import { resolveEffectiveBaseline } from "./upstream-baseline.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -171,12 +172,29 @@ export async function diffStat(
   cwd: string,
   ignorePatterns: string[],
   baseline?: string | null,
+  // Session-start untracked snapshot (see untracked.ts's captureUntrackedBaseline). Omitted or
+  // null = no usable capture -> every untracked path counts, exactly as before this parameter
+  // existed. Optional and defaulted to "count everything" so every pre-Task-5 caller keeps
+  // compiling and keeps today's behaviour unchanged.
+  untrackedBaseline?: Record<string, string> | null,
 ): Promise<DiffCounts | null> {
   if (!(await isGitRepo(cwd))) {
     return { changedLines: 0, changedFiles: 0 };
   }
 
-  const target = baseline ? baseline : "HEAD";
+  // Received work is not this session's work. The pinned baseline itself stays pinned on disk
+  // (see session-state.ts:74 and verify-gate.ts:148 for why); this only derives, per measurement,
+  // the most recent already-upstream commit at or after it. `?? "HEAD"` below is safe only
+  // because resolveEffectiveBaseline's contract guarantees it never returns null for a real,
+  // non-empty `baseline` -- every failure or uncertainty it hits resolves back to `pinned`
+  // unchanged (see its own doc comment). `null` here means the same thing `baseline` itself being
+  // unset already meant: nothing to measure from but HEAD. If that contract ever changed to
+  // return null on some internal error instead, this line would silently start measuring nothing
+  // since the last commit -- an under-count that lets unverified session work through. See
+  // git-diff.test.ts's "effective-baseline coupling" test, which pins this against exactly that
+  // regression (mutation-tested by forcing resolveEffectiveBaseline to return null).
+  const effective = await resolveEffectiveBaseline(cwd, baseline);
+  const target = effective ?? "HEAD";
 
   let tracked: DiffCounts;
   try {
@@ -246,11 +264,30 @@ export async function diffStat(
       continue;
     }
     const entry = await readUntrackedEntry(root, untrackedPath.raw);
+    // AMENDED 2026-08-19 — do NOT do a bare-path lookup (`untrackedBaseline?.[path]`), which is
+    // what this spec originally said. Task 3's snapshot is keyed through `untrackedSnapshotKey`:
+    // "p:" + path for a representable path, "r:" + sha256(raw).hex for one that is not valid
+    // UTF-8. A bare-path lookup misses EVERY key, so the skip below would never fire and this
+    // whole parameter would be silently inert — an over-count, the safe direction, but a useless
+    // one. `lookupUntrackedBaseline` is exported for exactly this reason; call it rather than
+    // indexing the record directly.
+    const baselineKey = lookupUntrackedBaseline(untrackedBaseline, untrackedPath);
+    // Only a key that matches exactly proves the session did not touch this path since capture.
+    // Absent (never captured, or unreadable at capture time), different (content changed), or no
+    // snapshot at all (`untrackedBaseline` null/undefined, `baselineKey` always undefined) all
+    // count — the fail-closed direction this parameter must never weaken.
+    if (baselineKey !== undefined && baselineKey === entry.key) continue;
     changedFiles += 1;
     // `entry.readable === false` (a permission error, or a read that failed mid-stream) still
     // contributes 1 file / 0 lines here, deliberately not `diffFingerprint`'s null-the-whole-
     // measurement treatment of the same failure — see the function doc comment above for why the
     // two functions diverge on this one point.
+    //
+    // A key that differs from the baseline contributes the entry's FULL current line count, not a
+    // delta (design decision A2) — a one-line edit to a big pre-existing untracked file still
+    // counts the whole file. Over-counts an edited pre-existing untracked file; that is the safe
+    // direction, and it matches the semantics untracked content already had before this parameter
+    // existed.
     changedLines += entry.lines;
   }
 

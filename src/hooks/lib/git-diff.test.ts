@@ -16,6 +16,13 @@ import { TEST_DIST_DIR } from "../../test-support/dist-dir.js";
 const { diffStat, diffFingerprint } = (await import(
   join(TEST_DIST_DIR, "hooks", "lib", "git-diff.js")
 )) as typeof import("./git-diff.js");
+// Task 4 tests build the untracked baseline the same way session-init actually does, rather than
+// hand-constructing a Record<string, string> whose keys might not match untrackedSnapshotKey's
+// real format -- see git-diff.ts's own AMENDED comment on why a hand-rolled bare-path key would
+// make the feature silently inert without the test itself failing.
+const { captureUntrackedBaseline } = (await import(
+  join(TEST_DIST_DIR, "hooks", "lib", "untracked.js")
+)) as typeof import("./untracked.js");
 // Same convention as above: the shared mkfifo probe is test infra, not product code, but a bare
 // "./fixtures/mkfifo-probe.ts" specifier fails tsc (TS5097) since this project emits, and the
 // sibling fixtures/*-runner.ts files are already executed from dist -- this sits where the build
@@ -1126,6 +1133,10 @@ test(
         namedExports: {
           listUntrackedPaths: real.listUntrackedPaths,
           repoRoot: real.repoRoot,
+          // Task 4 added this import to git-diff.ts -- the mock must stay exhaustive over every
+          // named export git-diff.ts actually pulls from this module, or the reimport below fails
+          // to link at all (not a silently-wrong measurement, an outright module error).
+          lookupUntrackedBaseline: real.lookupUntrackedBaseline,
           // `root` is a Buffer, not a string: repoRoot returns raw bytes so a non-UTF-8 repo root
           // survives without a decode round trip. Typing it `string` here compiles against the
           // pre-Buffer signature and breaks on merge.
@@ -1341,5 +1352,207 @@ test("diffFingerprint preserves a trailing carriage return in the repo's own dir
     );
   } finally {
     await rm(parent, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// Task 4: diffStat's 4th parameter, the untracked baseline snapshot.
+// ---------------------------------------------------------------------------------------------
+
+test("diffStat's untracked baseline: a pre-existing untracked file present before capture is skipped with the snapshot, and still counted in full without it (the issue's repro)", async () => {
+  const repo = await makeRepo();
+  try {
+    await writeFile(join(repo, "plan.md"), "line\n".repeat(118));
+    const snapshot = await captureUntrackedBaseline(repo);
+    assert.notEqual(snapshot, null, "test setup assumption: capture must succeed on a healthy repo");
+
+    const withSnapshot = assertMeasured(await diffStat(repo, [], null, snapshot));
+    assert.equal(withSnapshot.changedFiles, 0, "a pre-existing untracked file matching the snapshot must not count");
+    assert.equal(withSnapshot.changedLines, 0);
+
+    const withoutSnapshot = assertMeasured(await diffStat(repo, [], null));
+    assert.equal(withoutSnapshot.changedFiles, 1, "omitting the snapshot must keep today's count-everything behaviour");
+    assert.equal(withoutSnapshot.changedLines, 118);
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test("diffStat's untracked baseline: a genuinely new file created after capture is still counted in full", async () => {
+  const repo = await makeRepo();
+  try {
+    const snapshot = await captureUntrackedBaseline(repo);
+    assert.notEqual(snapshot, null);
+
+    await writeFile(join(repo, "new-work.md"), "line\n".repeat(12));
+    const result = assertMeasured(await diffStat(repo, [], null, snapshot));
+    assert.equal(result.changedFiles, 1, "a file the session itself created must never be skipped by the baseline");
+    assert.equal(result.changedLines, 12);
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test("diffStat's untracked baseline: a pre-existing untracked file whose content changed after capture is counted in full, not as a delta", async () => {
+  const repo = await makeRepo();
+  try {
+    await writeFile(join(repo, "notes.md"), "line\n".repeat(10));
+    const snapshot = await captureUntrackedBaseline(repo);
+    assert.notEqual(snapshot, null);
+
+    // Design decision A2: a changed key contributes its *current* full line count, not a delta --
+    // this is the over-count direction, deliberately, and is the semantics untracked content
+    // already had before the baseline existed.
+    await writeFile(join(repo, "notes.md"), "line\n".repeat(11));
+    const result = assertMeasured(await diffStat(repo, [], null, snapshot));
+    assert.equal(result.changedFiles, 1, "a content-changed pre-existing untracked file must still count");
+    assert.equal(result.changedLines, 11, "the full current line count, not an 11-10=1 delta, must be reported");
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test("diffStat's untracked baseline: a pre-existing untracked file that was deleted after capture contributes nothing and does not throw", async () => {
+  const repo = await makeRepo();
+  try {
+    const deletedPath = join(repo, "gone.md");
+    await writeFile(deletedPath, "line\n".repeat(9));
+    const snapshot = await captureUntrackedBaseline(repo);
+    assert.notEqual(snapshot, null);
+
+    await rm(deletedPath);
+    const result = assertMeasured(await diffStat(repo, [], null, snapshot));
+    assert.equal(result.changedFiles, 0, "a path git no longer lists as untracked must not appear in the count at all");
+    assert.equal(result.changedLines, 0);
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test("diffStat's untracked baseline: a null snapshot counts everything (explicit fail-closed assertion)", async () => {
+  const repo = await makeRepo();
+  try {
+    await writeFile(join(repo, "plan.md"), "line\n".repeat(40));
+    const result = assertMeasured(await diffStat(repo, [], null, null));
+    assert.equal(result.changedFiles, 1, "a null baseline (no usable capture) must behave exactly like omitting the parameter");
+    assert.equal(result.changedLines, 40);
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test("diffStat's untracked baseline: the lookup is keyed through untrackedSnapshotKey, not a bare path index (regression pin)", async () => {
+  // AMENDED 2026-08-19's whole warning: a `untrackedBaseline?.[path]` lookup misses every real
+  // key (which is prefixed "p:" or "r:"), so the skip never fires and the feature is silently
+  // inert. This test's only job is to prove the skip actually fires against a real
+  // captureUntrackedBaseline snapshot -- if diffStat is ever reverted to a bare-path index, this
+  // is the test that goes red (changedFiles/changedLines come back non-zero instead of 0).
+  const repo = await makeRepo();
+  try {
+    await writeFile(join(repo, "already-here.md"), "line\n".repeat(7));
+    const snapshot = await captureUntrackedBaseline(repo);
+    assert.notEqual(snapshot, null);
+    assert.ok(
+      Object.keys(snapshot as Record<string, string>).some((key) => key.startsWith("p:")),
+      "test setup assumption: captureUntrackedBaseline must key entries as 'p:<path>', not a bare path",
+    );
+
+    const result = assertMeasured(await diffStat(repo, [], null, snapshot));
+    assert.equal(result.changedFiles, 0, "a bare-path lookup would miss the 'p:'-prefixed key and count this file anyway");
+    assert.equal(result.changedLines, 0);
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// Task 7: diffStat measures from the effective (upstream-advanced) baseline.
+// ---------------------------------------------------------------------------------------------
+
+function git(cwd: string, args: string[]): string {
+  return execFileSync("git", args, { cwd }).toString("utf8").trim();
+}
+
+// A real bare remote and clone, matching upstream-baseline.test.ts's fixture shape exactly --
+// this is the only way `refs/remotes/origin/HEAD` gets set the way `resolveEffectiveBaseline`
+// depends on.
+async function makeBareRemoteWithClone(prefix: string): Promise<{ bare: string; seed: string; session: string }> {
+  const bare = await mkdtemp(join(tmpdir(), `praxarch-gitdiff-${prefix}-bare-`));
+  execFileSync("git", ["init", "-q", "--bare", "-b", "main", bare]);
+
+  const seed = await mkdtemp(join(tmpdir(), `praxarch-gitdiff-${prefix}-seed-`));
+  execFileSync("git", ["init", "-q", "-b", "main", seed]);
+  git(seed, ["config", "user.email", "test@example.com"]);
+  git(seed, ["config", "user.name", "Test"]);
+  await writeFile(join(seed, "base.txt"), "base\n");
+  git(seed, ["add", "."]);
+  git(seed, ["commit", "-q", "-m", "initial"]);
+  git(seed, ["remote", "add", "origin", bare]);
+  git(seed, ["push", "-q", "-u", "origin", "main"]);
+
+  const session = await mkdtemp(join(tmpdir(), `praxarch-gitdiff-${prefix}-session-`));
+  execFileSync("git", ["clone", "-q", bare, session]);
+  git(session, ["config", "user.email", "test@example.com"]);
+  git(session, ["config", "user.name", "Test"]);
+
+  return { bare, seed, session };
+}
+
+test("diffStat measures from the effective (upstream-advanced) baseline: a fast-forward pull's lines drop out, only the local edit counts", async () => {
+  const { bare, seed, session } = await makeBareRemoteWithClone("ff");
+  try {
+    const pinned = git(session, ["rev-parse", "HEAD"]);
+
+    await writeFile(join(seed, "upstream.txt"), "upstream\n".repeat(150));
+    git(seed, ["add", "."]);
+    git(seed, ["commit", "-q", "-m", "already reviewed, merged upstream"]);
+    git(seed, ["push", "-q", "origin", "main"]);
+    git(session, ["pull", "-q", "--ff-only", "origin", "main"]);
+
+    await writeFile(join(session, "local.txt"), "local\n".repeat(5));
+    git(session, ["add", "local.txt"]);
+    git(session, ["commit", "-q", "-m", "local session work"]);
+
+    // The raw pinned measurement (what the pre-Task-7 code would have reported): both the
+    // upstream and local commits show up.
+    const rawNumstat = git(session, ["diff", "--numstat", pinned]);
+    assert.match(rawNumstat, /upstream\.txt/, "test setup assumption: the pinned diff must include the upstream commit");
+    assert.match(rawNumstat, /local\.txt/, "test setup assumption: the pinned diff must include the local commit");
+
+    const result = assertMeasured(await diffStat(session, [], pinned));
+    assert.equal(result.changedFiles, 1, "only the local commit's file should count once the pull is excluded");
+    assert.equal(result.changedLines, 5, "received upstream lines must not be charged to the session");
+  } finally {
+    await rm(bare, { recursive: true, force: true });
+    await rm(seed, { recursive: true, force: true });
+    await rm(session, { recursive: true, force: true });
+  }
+});
+
+test("diffStat's effective-baseline coupling: a local commit that was never pulled/pushed stays measured from the pinned baseline, not swallowed into HEAD", async () => {
+  // This is the pin for the `effective ?? \"HEAD\"` subtlety: `resolveEffectiveBaseline` must
+  // never return null for a real, non-empty pinned baseline (its contract is "always return
+  // pinned on any uncertainty"). Nothing was pulled here, so the correct effective baseline is
+  // the pin itself -- if `resolveEffectiveBaseline` ever violated that contract and returned null
+  // (simulating an internal error), `diffStat`'s `effective ?? \"HEAD\"` would silently fall back
+  // to measuring from the just-made local commit's own tip instead of the pin, reporting 0
+  // changed lines for work the session actually did. See upstream-baseline.ts's own doc comment
+  // and test suite for why the contract holds; this test is what would go red here if it ever
+  // didn't (mutation-tested by temporarily forcing resolveEffectiveBaseline to return null).
+  const { bare, seed, session } = await makeBareRemoteWithClone("localonly");
+  try {
+    const pinned = git(session, ["rev-parse", "HEAD"]);
+
+    await writeFile(join(session, "local.txt"), "local\n".repeat(9));
+    git(session, ["add", "local.txt"]);
+    git(session, ["commit", "-q", "-m", "local session work, nothing pulled or pushed"]);
+
+    const result = assertMeasured(await diffStat(session, [], pinned));
+    assert.equal(result.changedFiles, 1, "the session's own unpushed commit must still be measured from the pinned baseline");
+    assert.equal(result.changedLines, 9);
+  } finally {
+    await rm(bare, { recursive: true, force: true });
+    await rm(seed, { recursive: true, force: true });
+    await rm(session, { recursive: true, force: true });
   }
 });
