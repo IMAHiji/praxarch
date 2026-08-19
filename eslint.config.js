@@ -20,6 +20,13 @@ export default tseslint.config(
     },
   },
   {
-    ignores: ["dist/**", "node_modules/**", "eslint.config.js"],
+    ignores: [
+      "dist/**",
+      ".verify-out/**",
+      "node_modules/**",
+      "eslint.config.js",
+      "scripts/**",
+      "src/test-support/dist-dir.js",
+    ],
   },
 );

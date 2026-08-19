@@ -5,9 +5,10 @@ import { cp, mkdtemp, readFile, readdir, rm, writeFile, mkdir, symlink, lstat, r
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { TEST_DIST_DIR } from "../test-support/dist-dir.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const cli = join(here, "..", "..", "dist", "cli", "index.js");
+const cli = join(TEST_DIST_DIR, "cli", "index.js");
 
 interface Fixture {
   claudeHome: string;
@@ -47,12 +48,19 @@ const repoRoot = join(here, "..", "..");
  */
 async function setupRepoCopy(): Promise<{ root: string; cli: string }> {
   const root = await mkdtemp(join(tmpdir(), "praxarch-repo-"));
-  for (const entry of ["dist", "templates", "package.json"]) {
-    await cp(join(repoRoot, entry), join(root, entry), {
+  // "dist" is sourced from TEST_DIST_DIR (the scratch build under `pnpm verify`, the real one
+  // under plain `pnpm test`) rather than repoRoot, so this fixture never reads the live dist/.
+  const sources: [string, string][] = [
+    [TEST_DIST_DIR, "dist"],
+    [join(repoRoot, "templates"), "templates"],
+    [join(repoRoot, "package.json"), "package.json"],
+  ];
+  for (const [src, entry] of sources) {
+    await cp(src, join(root, entry), {
       recursive: true,
       // A stray backup in the dev's own tree (the artifact of the bug being fixed here) would
       // otherwise land in the fixture and trip the "no backups in the clone" assertions.
-      filter: (src) => !src.includes(".praxarch-backup-"),
+      filter: (s) => !s.includes(".praxarch-backup-"),
     });
   }
   return { root, cli: join(root, "dist", "cli", "index.js") };

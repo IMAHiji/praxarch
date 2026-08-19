@@ -6,9 +6,10 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { TEST_DIST_DIR } from "../test-support/dist-dir.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const script = join(here, "..", "..", "dist", "hooks", "telemetry.js");
+const script = join(TEST_DIST_DIR, "hooks", "telemetry.js");
 
 async function withPraxarchHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
   const home = await mkdtemp(join(tmpdir(), "praxarch-telemetry-"));

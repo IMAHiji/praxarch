@@ -3,12 +3,11 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { TEST_DIST_DIR } from "../test-support/dist-dir.js";
 
-const here = dirname(fileURLToPath(import.meta.url));
-const cli = join(here, "..", "..", "dist", "cli", "index.js");
-const verifyGateScript = join(here, "..", "..", "dist", "hooks", "verify-gate.js");
+const cli = join(TEST_DIST_DIR, "cli", "index.js");
+const verifyGateScript = join(TEST_DIST_DIR, "hooks", "verify-gate.js");
 
 interface Fixture {
   repo: string;
@@ -253,7 +252,7 @@ test("appends a delegation-log row marked via record-verdict, and praxarch repor
     assert.equal(row?.["criticalOrMajorCount"], 1);
     assert.equal(row?.["findingsCount"], 1);
 
-    const reportScript = join(here, "..", "..", "dist", "report", "report.js");
+    const reportScript = join(TEST_DIST_DIR, "report", "report.js");
     const reportOut = execFileSync("node", [reportScript], {
       env: { ...process.env, PRAXARCH_HOME: fixture.home },
     }).toString("utf8");

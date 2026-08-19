@@ -3,25 +3,26 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import type { DiffCounts } from "./lib/git-diff.js";
 import type { getMkfifoProbe as GetMkfifoProbe } from "./lib/fixtures/mkfifo-probe.js";
+import { TEST_DIST_DIR } from "../test-support/dist-dir.js";
 
-const here = dirname(fileURLToPath(import.meta.url));
-const script = join(here, "..", "..", "dist", "hooks", "verify-gate.js");
+const script = join(TEST_DIST_DIR, "hooks", "verify-gate.js");
 
 // `which mkfifo` proves only that the binary is on PATH, not that mkfifo(2) actually works here
 // -- a sandboxed CI runner can ship the binary while refusing the syscall. The FIFO-based
 // end-to-end test below shares the same functional-probe implementation as git-diff.test.ts (see
-// lib/fixtures/mkfifo-probe.ts) rather than duplicating a weaker guard. Imported from dist because
-// a bare ".ts" specifier fails tsc (TS5097) since this project emits, and the sibling
-// fixtures/*-runner.ts files are already executed from dist -- this sits where the build already
-// handles it. `node --test` runs each test file in its own child process, so this file's probe
-// call is its own cached-once execution, separate from git-diff.test.ts's -- still "once per
-// process, not once per test" per file, just not shared across files.
+// lib/fixtures/mkfifo-probe.ts) rather than duplicating a weaker guard. Resolved through
+// TEST_DIST_DIR (not a hardcoded "dist" segment) so it comes from the scratch tree under
+// `pnpm verify`, same as every other compiled-output import here — a bare ".ts" specifier fails
+// tsc (TS5097) since this project emits, and the sibling fixtures/*-runner.ts files are already
+// executed from compiled output the same way. `node --test` runs each test file in its own child
+// process, so this file's probe call is its own cached-once execution, separate from
+// git-diff.test.ts's -- still "once per process, not once per test" per file, just not shared
+// across files.
 const { getMkfifoProbe } = (await import(
-  join(here, "..", "..", "dist", "hooks", "lib", "fixtures", "mkfifo-probe.js")
+  join(TEST_DIST_DIR, "hooks", "lib", "fixtures", "mkfifo-probe.js")
 )) as { getMkfifoProbe: typeof GetMkfifoProbe };
 const mkfifoProbeResult = await getMkfifoProbe();
 const hasMkfifo = mkfifoProbeResult.ok;
@@ -769,7 +770,7 @@ test("CONFIRMED verdict whose fingerprint matches the current tree allows", asyn
   const fixture = await setupFixture();
   try {
     await makeNonTrivialDiff(fixture.repo);
-    const { diffStat, diffFingerprint } = (await import(join(here, "..", "..", "dist", "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
+    const { diffStat, diffFingerprint } = (await import(join(TEST_DIST_DIR, "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
     const { changedLines, changedFiles } = assertMeasured(await diffStat(fixture.repo, [], null));
     const hash = await diffFingerprint(fixture.repo);
     await seedVerifierState(fixture.home, "s1", {
@@ -795,7 +796,7 @@ test("CONFIRMED verdict with a differing hash but a below-threshold size delta s
   const fixture = await setupFixture();
   try {
     await makeNonTrivialDiff(fixture.repo);
-    const { diffStat, diffFingerprint } = (await import(join(here, "..", "..", "dist", "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
+    const { diffStat, diffFingerprint } = (await import(join(TEST_DIST_DIR, "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
     const { changedLines, changedFiles } = assertMeasured(await diffStat(fixture.repo, [], null));
     const hash = await diffFingerprint(fixture.repo);
     await seedVerifierState(fixture.home, "s1", {
@@ -826,7 +827,7 @@ test("CONFIRMED verdict with a differing hash and a threshold-clearing size delt
   const fixture = await setupFixture();
   try {
     await makeNonTrivialDiff(fixture.repo);
-    const { diffStat, diffFingerprint } = (await import(join(here, "..", "..", "dist", "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
+    const { diffStat, diffFingerprint } = (await import(join(TEST_DIST_DIR, "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
     const { changedLines, changedFiles } = assertMeasured(await diffStat(fixture.repo, [], null));
     const hash = await diffFingerprint(fixture.repo);
     await seedVerifierState(fixture.home, "s1", {
@@ -857,7 +858,7 @@ test("a zero file-count delta still reads as a real change, not as nothing happe
   const fixture = await setupFixture();
   try {
     await makeNonTrivialDiff(fixture.repo);
-    const { diffStat, diffFingerprint } = (await import(join(here, "..", "..", "dist", "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
+    const { diffStat, diffFingerprint } = (await import(join(TEST_DIST_DIR, "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
     const { changedLines, changedFiles } = assertMeasured(await diffStat(fixture.repo, [], null));
     const hash = await diffFingerprint(fixture.repo);
     await seedVerifierState(fixture.home, "s1", {
@@ -893,7 +894,7 @@ test("a negative file delta alongside a positive line delta reads as English, no
     // Two files present when the (REFUTED) verdict was recorded.
     await writeFile(join(fixture.repo, "extra.txt"), "line\n".repeat(50));
     await makeNonTrivialDiff(fixture.repo);
-    const { diffStat, diffFingerprint } = (await import(join(here, "..", "..", "dist", "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
+    const { diffStat, diffFingerprint } = (await import(join(TEST_DIST_DIR, "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
     const { changedLines, changedFiles } = assertMeasured(await diffStat(fixture.repo, [], null));
     const hash = await diffFingerprint(fixture.repo);
     await seedVerifierState(fixture.home, "s1", {
@@ -952,7 +953,7 @@ test("reverted work (negative delta) with a differing hash still allows", async 
   try {
     // Large non-trivial diff, recorded by the verifier.
     await writeFile(join(fixture.repo, "file.txt"), "changed line\n".repeat(100));
-    const { diffStat, diffFingerprint } = (await import(join(here, "..", "..", "dist", "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
+    const { diffStat, diffFingerprint } = (await import(join(TEST_DIST_DIR, "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
     const { changedLines, changedFiles } = assertMeasured(await diffStat(fixture.repo, [], null));
     const hash = await diffFingerprint(fixture.repo);
     await seedVerifierState(fixture.home, "s1", {
@@ -1011,7 +1012,7 @@ test("a stale REFUTED verdict is reported with its own verdict, not hardcoded CO
   const fixture = await setupFixture();
   try {
     await writeFile(join(fixture.repo, "file.txt"), "changed line\n".repeat(100));
-    const { diffStat, diffFingerprint } = (await import(join(here, "..", "..", "dist", "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
+    const { diffStat, diffFingerprint } = (await import(join(TEST_DIST_DIR, "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
     const { changedLines, changedFiles } = assertMeasured(await diffStat(fixture.repo, [], null));
     const hash = await diffFingerprint(fixture.repo);
     await seedVerifierState(fixture.home, "s1", {
@@ -1044,7 +1045,7 @@ test("an unhashable current diff (patch fetch failed) is treated as unknown, not
   const fixture = await setupFixture();
   try {
     await makeNonTrivialDiff(fixture.repo);
-    const { diffStat, diffFingerprint } = (await import(join(here, "..", "..", "dist", "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
+    const { diffStat, diffFingerprint } = (await import(join(TEST_DIST_DIR, "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
     const { changedLines, changedFiles } = assertMeasured(await diffStat(fixture.repo, [], null));
     const hash = await diffFingerprint(fixture.repo);
     await seedVerifierState(fixture.home, "s1", {
@@ -1081,7 +1082,7 @@ test("an unhashable current diff still allows when the size delta stays below bo
   const fixture = await setupFixture();
   try {
     await makeNonTrivialDiff(fixture.repo);
-    const { diffStat, diffFingerprint } = (await import(join(here, "..", "..", "dist", "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
+    const { diffStat, diffFingerprint } = (await import(join(TEST_DIST_DIR, "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
     const { changedLines, changedFiles } = assertMeasured(await diffStat(fixture.repo, [], null));
     const hash = await diffFingerprint(fixture.repo);
     await seedVerifierState(fixture.home, "s1", {

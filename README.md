@@ -69,6 +69,15 @@ praxarch install
 If pnpm reports its global bin directory is not in PATH, add it (e.g.
 `export PATH="$HOME/Library/pnpm/bin:$PATH"` in your shell profile on macOS).
 
+**This makes `pnpm build` an install.** `~/.claude/praxarch/hooks` (and `statusline`, `report`)
+are directory symlinks straight into this checkout's `dist/`, so `pnpm build` in a linked checkout
+overwrites the hooks your Claude Code session is actively running — with no prompt and no
+confirmation. Checking out and building someone else's branch to review it, or building mid-refactor
+on your own, puts that code live immediately. Use `pnpm verify` (below) to run the full build +
+test suite against a scratch output instead, leaving `dist/` — and the live hooks — untouched.
+`praxarch doctor` reports if the installed hooks' build ref no longer matches this checkout's
+HEAD. **To recover:** `git checkout main && pnpm build` restores the live hooks to merged code.
+
 Prefer a manual, code-free install? See [`install/AGENT-INSTALL.md`](install/AGENT-INSTALL.md) —
 paste it into a Claude Code session and it walks through the same changes by hand.
 
@@ -125,6 +134,15 @@ pnpm typecheck
 pnpm lint
 pnpm build
 pnpm test
+```
+
+`pnpm build` writes to `dist/`, which a dev-mode symlink install (above) serves live — so this
+loop is fine while you're building your own checkout, but it is not how to verify someone else's
+branch. Use `pnpm verify` for that instead: it builds to a scratch directory outside `dist/` and
+runs the suite against it, leaving `dist/` (and the live install) completely untouched.
+
+```sh
+pnpm verify
 ```
 
 Hooks and the CLI are tested by spawning the compiled output against a fake `$HOME`/`PRAXARCH_HOME`
