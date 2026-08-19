@@ -6,18 +6,26 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { DiffCounts } from "./lib/git-diff.js";
+import type { getMkfifoProbe as GetMkfifoProbe } from "./lib/fixtures/mkfifo-probe.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const script = join(here, "..", "..", "dist", "hooks", "verify-gate.js");
 
-// mkfifo isn't available on every platform (notably Windows) -- the FIFO-based end-to-end test
-// below skips visibly there, matching the convention in git-diff.test.ts.
-let hasMkfifo = true;
-try {
-  execFileSync("which", ["mkfifo"], { stdio: "ignore" });
-} catch {
-  hasMkfifo = false;
-}
+// `which mkfifo` proves only that the binary is on PATH, not that mkfifo(2) actually works here
+// -- a sandboxed CI runner can ship the binary while refusing the syscall. The FIFO-based
+// end-to-end test below shares the same functional-probe implementation as git-diff.test.ts (see
+// lib/fixtures/mkfifo-probe.ts) rather than duplicating a weaker guard. Imported from dist because
+// a bare ".ts" specifier fails tsc (TS5097) since this project emits, and the sibling
+// fixtures/*-runner.ts files are already executed from dist -- this sits where the build already
+// handles it. `node --test` runs each test file in its own child process, so this file's probe
+// call is its own cached-once execution, separate from git-diff.test.ts's -- still "once per
+// process, not once per test" per file, just not shared across files.
+const { getMkfifoProbe } = (await import(
+  join(here, "..", "..", "dist", "hooks", "lib", "fixtures", "mkfifo-probe.js")
+)) as { getMkfifoProbe: typeof GetMkfifoProbe };
+const mkfifoProbeResult = await getMkfifoProbe();
+const hasMkfifo = mkfifoProbeResult.ok;
+const mkfifoSkipReason = mkfifoProbeResult.reason ?? "mkfifo not available on this platform";
 
 // `diffStat` returns `DiffCounts | null` (null means "could not measure"). Every call site below
 // expects a real measurement (a healthy repo, no simulated failure) and routes through this so a
@@ -1274,7 +1282,7 @@ test("the two fail-open reasons -- consecutive-block and per-cycle ceiling -- ar
 
 test(
   "original repro: a FIFO replacing a tracked file plus a genuine large change elsewhere blocks with the could-not-measure message, not a silent allow",
-  { skip: hasMkfifo ? false : "mkfifo not available on this platform" },
+  { skip: hasMkfifo ? false : mkfifoSkipReason },
   async () => {
     const fixture = await setupFixture();
     try {

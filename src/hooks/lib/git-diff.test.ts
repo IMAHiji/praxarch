@@ -7,12 +7,20 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { DiffCounts } from "./git-diff.js";
+import type { getMkfifoProbe as GetMkfifoProbe } from "./fixtures/mkfifo-probe.js";
 // Imports the compiled output, not the sibling .ts source — matches the convention in
 // config.test.ts (see the comment there): tests resolve modules the way Node does at runtime.
 const here = dirname(fileURLToPath(import.meta.url));
 const { diffStat, diffFingerprint } = (await import(
   join(here, "..", "..", "..", "dist", "hooks", "lib", "git-diff.js")
 )) as typeof import("./git-diff.js");
+// Same convention as above: the shared mkfifo probe is test infra, not product code, but a bare
+// "./fixtures/mkfifo-probe.ts" specifier fails tsc (TS5097) since this project emits, and the
+// sibling fixtures/*-runner.ts files are already executed from dist -- this sits where the build
+// already handles it.
+const { getMkfifoProbe } = (await import(
+  join(here, "..", "..", "..", "dist", "hooks", "lib", "fixtures", "mkfifo-probe.js")
+)) as { getMkfifoProbe: typeof GetMkfifoProbe };
 
 // `diffStat` returns `DiffCounts | null` (null means "could not measure"). Every call site below
 // that expects a real measurement (a healthy repo, no simulated failure) routes through this so a
@@ -23,15 +31,21 @@ function assertMeasured(counts: DiffCounts | null): DiffCounts {
   return counts as DiffCounts;
 }
 
-// mkfifo isn't available on every platform node:test runs on (notably Windows); the two FIFO
-// regression tests below skip visibly there rather than failing on an absent binary that has
-// nothing to do with the isFile() dispatch gate they're guarding.
-let hasMkfifo = true;
-try {
-  execFileSync("which", ["mkfifo"], { stdio: "ignore" });
-} catch {
-  hasMkfifo = false;
-}
+// mkfifo isn't available on every platform node:test runs on (notably Windows), and a platform
+// can also ship the binary while blocking the underlying syscall (the plausible shape of a CI
+// container sandbox) -- `which mkfifo` succeeding proves only that the binary is on PATH, not
+// that mkfifo(2) actually works here. The FIFO-dependent tests below need the latter claim, so
+// the guard is a functional probe shared with verify-gate.test.ts (see fixtures/mkfifo-probe.ts):
+// create a real FIFO in a throwaway temp directory and confirm via lstat that what landed on disk
+// is actually a FIFO. It never opens the FIFO for reading or writing -- opening (not creating) is
+// the operation that can block forever -- and it caches its result once per process. `node --test`
+// runs each test file in its own child process, so in practice that means once per file: this
+// file's three FIFO tests share the single call below, and verify-gate.test.ts's FIFO test
+// performs its own separate probe call in its own process. That still satisfies "once per
+// process, not once per test" -- it just means "process" is per test-file here, not global.
+const mkfifoProbeResult = await getMkfifoProbe();
+const hasMkfifo = mkfifoProbeResult.ok;
+const mkfifoSkipReason = mkfifoProbeResult.reason ?? "mkfifo not available on this platform";
 
 // The real-FIFO scenario runs in a spawned child rather than in-process: a regressed isFile()
 // gate makes createReadStream block forever on a writerless FIFO, and that block happens inside
@@ -746,7 +760,7 @@ test("the same tree state produces an identical fingerprint across two calls fro
 
 test(
   "a tracked file replaced by a FIFO fingerprints promptly with a real hash; the FIFO appearing and disappearing moves the hash",
-  { skip: hasMkfifo ? false : "mkfifo not available on this platform" },
+  { skip: hasMkfifo ? false : mkfifoSkipReason },
   async () => {
     // Round 6's dispatch tested isSymbolicLink() then isDirectory() then fell straight through to
     // createReadStream with no isFile() check. A FIFO (a tracked file replaced via `mkfifo`,
@@ -824,7 +838,7 @@ test("an ENOENT status entry's encoded bytes carry a distinguishing ABSENT marke
 
 test(
   "a tracked path becoming a socket/char-device-shaped special file hashes as SPECIAL, distinct from a regular file of the same name",
-  { skip: hasMkfifo ? false : "mkfifo not available on this platform" },
+  { skip: hasMkfifo ? false : mkfifoSkipReason },
   async () => {
     // Round 7 task 1's marker applies uniformly to every non-regular, non-symlink, non-directory
     // inode kind -- FIFO is the reproducible one in a test environment, but the dispatch itself
@@ -862,7 +876,7 @@ test(
 
 test(
   "diffStat returns null on the original repro (a FIFO replacing a tracked file, plus a genuine large change elsewhere) -- never zeros",
-  { skip: hasMkfifo ? false : "mkfifo not available on this platform" },
+  { skip: hasMkfifo ? false : mkfifoSkipReason },
   async () => {
     // The defect this issue closes: a FIFO anywhere in the tree used to make the whole --numstat
     // probe fail, and diffStat's old swallow-all catch degraded that failure to {0, 0} -- letting
