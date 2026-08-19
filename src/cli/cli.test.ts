@@ -5,9 +5,10 @@ import { cp, mkdtemp, readFile, readdir, rm, writeFile, mkdir, symlink, lstat, r
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { TEST_DIST_DIR } from "../test-support/dist-dir.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const cli = join(here, "..", "..", "dist", "cli", "index.js");
+const cli = join(TEST_DIST_DIR, "cli", "index.js");
 
 interface Fixture {
   claudeHome: string;
@@ -23,14 +24,27 @@ async function teardownFixture(fixture: Fixture): Promise<void> {
 }
 
 function runCli(fixture: Fixture, args: string[], cliPath = cli): { stdout: string; status: number } {
+  // The default `cli` is spawned straight out of TEST_DIST_DIR, so its own DIST_DIR must resolve
+  // to that same tree (real dist/ under plain `pnpm test`, the scratch tree under `pnpm verify`)
+  // — otherwise it falls back to REPO_ROOT's real dist/, silently reading live build output while
+  // the suite reports green for the scratch one (issue #14 MAJOR 1).
+  //
+  // A custom cliPath is always setupRepoCopy's self-contained clone, which must resolve DIST_DIR
+  // relative to *its own* REPO_ROOT (the clone root) to exercise the CLI's self-relocation logic
+  // at all — inheriting the outer PRAXARCH_TEST_DIST_DIR override here would point it at the
+  // top-level scratch tree instead of the clone's own copied dist/, defeating that test.
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    PRAXARCH_TARGET_CLAUDE_HOME: fixture.claudeHome,
+    PRAXARCH_HOME: join(fixture.claudeHome, "praxarch"),
+  };
+  if (cliPath === cli) {
+    env["PRAXARCH_TEST_DIST_DIR"] = TEST_DIST_DIR;
+  } else {
+    delete env["PRAXARCH_TEST_DIST_DIR"];
+  }
   try {
-    const stdout = execFileSync("node", [cliPath, ...args], {
-      env: {
-        ...process.env,
-        PRAXARCH_TARGET_CLAUDE_HOME: fixture.claudeHome,
-        PRAXARCH_HOME: join(fixture.claudeHome, "praxarch"),
-      },
-    }).toString("utf8");
+    const stdout = execFileSync("node", [cliPath, ...args], { env }).toString("utf8");
     return { stdout, status: 0 };
   } catch (err) {
     const e = err as { stdout?: Buffer; status?: number };
@@ -47,12 +61,19 @@ const repoRoot = join(here, "..", "..");
  */
 async function setupRepoCopy(): Promise<{ root: string; cli: string }> {
   const root = await mkdtemp(join(tmpdir(), "praxarch-repo-"));
-  for (const entry of ["dist", "templates", "package.json"]) {
-    await cp(join(repoRoot, entry), join(root, entry), {
+  // "dist" is sourced from TEST_DIST_DIR (the scratch build under `pnpm verify`, the real one
+  // under plain `pnpm test`) rather than repoRoot, so this fixture never reads the live dist/.
+  const sources: [string, string][] = [
+    [TEST_DIST_DIR, "dist"],
+    [join(repoRoot, "templates"), "templates"],
+    [join(repoRoot, "package.json"), "package.json"],
+  ];
+  for (const [src, entry] of sources) {
+    await cp(src, join(root, entry), {
       recursive: true,
       // A stray backup in the dev's own tree (the artifact of the bug being fixed here) would
       // otherwise land in the fixture and trip the "no backups in the clone" assertions.
-      filter: (src) => !src.includes(".praxarch-backup-"),
+      filter: (s) => !s.includes(".praxarch-backup-"),
     });
   }
   return { root, cli: join(root, "dist", "cli", "index.js") };
@@ -157,6 +178,50 @@ test("doctor fails before install", async () => {
   try {
     const { status } = runCli(fixture, ["doctor"]);
     assert.equal(status, 1);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+// issue #14 MAJOR 2: a corrupt/hand-edited build-info.json must not take every other doctor check
+// down with it — readJsonIfExists' unguarded JSON.parse would otherwise crash the whole command.
+test("doctor does not crash on a corrupt build-info.json", async () => {
+  const fixture = await setupFixture();
+  try {
+    runCli(fixture, ["install", "--yes"]);
+    const buildInfoPath = join(fixture.claudeHome, "praxarch", "hooks", "build-info.json");
+    await writeFile(buildInfoPath, "not json {{{");
+
+    const { stdout, status } = runCli(fixture, ["doctor"]);
+    assert.equal(status, 0, stdout);
+    assert.match(stdout, /build ref is unknown/);
+    // Every other check still ran and printed — a crash would have lost the rest of the report.
+    assert.match(stdout, /checks passed/);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+// issue #14 Part B: doctor must name the branch/ref on a real mismatch, not just flag one.
+test("doctor detects and names a build ref mismatch against the checkout's current HEAD", async () => {
+  const fixture = await setupFixture();
+  try {
+    runCli(fixture, ["install", "--yes"]);
+    const buildInfoPath = join(fixture.claudeHome, "praxarch", "hooks", "build-info.json");
+    await writeFile(
+      buildInfoPath,
+      JSON.stringify({
+        ref: "0000000000000000000000000000000000000000",
+        branch: "some-old-branch",
+        dirty: false,
+        builtAt: "2020-01-01T00:00:00.000Z",
+      }),
+    );
+
+    const { stdout, status } = runCli(fixture, ["doctor"]);
+    assert.equal(status, 1, stdout);
+    assert.match(stdout, /✗ installed hooks were built from some-old-branch@000000000000/);
+    assert.match(stdout, /this checkout is now on/);
   } finally {
     await teardownFixture(fixture);
   }

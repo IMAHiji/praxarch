@@ -5,6 +5,7 @@ import { appendJsonl } from "./lib/jsonl.js";
 import { logFileForDate } from "./lib/paths.js";
 import { readSessionState, writeSessionState } from "./lib/session-state.js";
 import { emit, readHookInput, type StopInput, type StopOutput } from "./lib/hook-io.js";
+import { formatBuildRef, readBuildInfo } from "./lib/build-info.js";
 
 /**
  * Stop — blocks session completion when the diff since the session's recorded baseline commit
@@ -275,19 +276,26 @@ async function main(): Promise<void> {
           `${fileDeltaPhrase} since it was recorded`
         : `last verifier pass was ${verifier.verdict} with ${verifier.criticalOrMajorCount} critical/major finding(s)`;
 
+  // Only surfaced on a block, not on every allow — issue #14 Part B wants the running ref
+  // discoverable, not printed on every hook invocation. Names the branch/ref this gate was built
+  // from (e.g. "feat/x@a1b2c3d4e5f6"), so a block on branch code reads as branch code rather than
+  // silently looking like a merged-code enforcement decision.
+  const buildRef = formatBuildRef(await readBuildInfo());
+  const buildRefSuffix = buildRef ? ` [praxarch built from ${buildRef}]` : "";
+
   // A failed measurement has no real changedLines/changedFiles to report — the size-phrased
   // message above would print zeros and read as "trivial but blocked," which is backwards. This
   // variant states the actual reason (diff could not be measured) instead.
   const output: StopOutput = withConfigWarnings(
     {
       decision: "block",
-      reason: measurementFailed
+      reason: (measurementFailed
         ? "praxarch verify-gate: the session's diff could not be measured (git diff failed) — treating as " +
           'non-trivial. Run a verifier pass before reporting completion, or state "PRAXARCH_VERIFY_WAIVED: ' +
           '<reason>" if verification genuinely doesn\'t apply here.'
         : `praxarch verify-gate: this session changed ${changedLines} lines across ${changedFiles} files ` +
           `(non-trivial) but ${reasonDetail}. Run a verifier pass before reporting completion, or state ` +
-          `"PRAXARCH_VERIFY_WAIVED: <reason>" if verification genuinely doesn't apply here.`,
+          `"PRAXARCH_VERIFY_WAIVED: <reason>" if verification genuinely doesn't apply here.`) + buildRefSuffix,
       hookSpecificOutput: {
         hookEventName: "Stop",
         additionalContext:

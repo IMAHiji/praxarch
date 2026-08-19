@@ -2,14 +2,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { TEST_DIST_DIR } from "../../test-support/dist-dir.js";
 // Imports the compiled output, not the sibling .ts source: this test relies on paths.ts reading
 // process.env lazily per-call, and mutating process.env between in-process test cases only works
 // against a real module graph that's been resolved the way Node.js resolves it at runtime.
-const here = dirname(fileURLToPath(import.meta.url));
 const { loadConfig, DEFAULT_CONFIG } = (await import(
-  join(here, "..", "..", "..", "dist", "hooks", "lib", "config.js")
+  join(TEST_DIST_DIR, "hooks", "lib", "config.js")
 )) as typeof import("./config.js");
 
 test("returns defaults when no global or project config exists", async () => {

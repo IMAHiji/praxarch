@@ -1,5 +1,7 @@
+import { execFile } from "node:child_process";
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import {
   AGENTS_DIR,
   CLAUDE_MD_PATH,
@@ -11,6 +13,8 @@ import {
   TEMPLATES_DIR,
 } from "./lib/paths.js";
 import { exists, readJsonIfExists, readTextIfExists } from "./lib/fsops.js";
+
+const execFileAsync = promisify(execFile);
 
 // Lowercase "explore" — the template/installed file is explore.md (the agent's *name* is
 // "Explore", from frontmatter). Checking "Explore.md" only passed on case-insensitive filesystems.
@@ -141,6 +145,70 @@ async function checkDistTree(): Promise<Check[]> {
   return checks;
 }
 
+interface BuildInfo {
+  ref?: string | null;
+  branch?: string | null;
+}
+
+async function currentGitRef(): Promise<{ ref: string; branch: string | null } | null> {
+  try {
+    const [{ stdout: refOut }, { stdout: branchOut }] = await Promise.all([
+      execFileAsync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT }),
+      execFileAsync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: REPO_ROOT }),
+    ]);
+    const branch = branchOut.trim();
+    return { ref: refOut.trim(), branch: branch === "HEAD" ? null : branch };
+  } catch {
+    return null;
+  }
+}
+
+// Names the branch/ref the *installed* hooks were built from (issue #14 Part B) and compares it
+// against this checkout's live HEAD — the exact mismatch the issue describes (verifying a branch
+// silently installs it) is otherwise invisible until something in the hook's own output happens
+// to name it. Degrades to an informational pass, never a failure, when either side of the
+// comparison is unavailable (pre-#14 install, tarball install, git missing) — a stale-ref check
+// that can't determine staleness isn't a defect worth failing doctor over.
+// readJsonIfExists does an unguarded JSON.parse — fine for callers reading praxarch's own
+// well-formed output, but build-info.json can be hand-edited or truncated by an interrupted
+// write, and doctor's whole job is reporting on a broken install. A parse failure here must
+// degrade to "unknown," the same as a missing file, never take every other check down with it.
+async function readBuildInfoIfValid(path: string): Promise<BuildInfo | null> {
+  const raw = await readTextIfExists(path);
+  if (raw === null) return null;
+  try {
+    return JSON.parse(raw) as BuildInfo;
+  } catch {
+    return null;
+  }
+}
+
+async function checkBuildRef(): Promise<Check> {
+  const installed = await readBuildInfoIfValid(join(PRAXARCH_INSTALL_DIR, "hooks", "build-info.json"));
+  if (!installed?.ref) {
+    return {
+      ok: true,
+      message:
+        "installed hooks' build ref is unknown (pre-#14 install, git was unavailable at build time, or build-info.json is unreadable)",
+    };
+  }
+  const current = await currentGitRef();
+  const shortInstalled = installed.ref.slice(0, 12);
+  const installedLabel = `${installed.branch ?? "detached HEAD"}@${shortInstalled}`;
+  if (!current) {
+    return { ok: true, message: `installed hooks were built from ${installedLabel} — this checkout's current ref could not be determined` };
+  }
+  const currentLabel = `${current.branch ?? "detached HEAD"}@${current.ref.slice(0, 12)}`;
+  const ok = installed.ref === current.ref;
+  return {
+    ok,
+    message: ok
+      ? `installed hooks match this checkout's HEAD (${currentLabel})`
+      : `installed hooks were built from ${installedLabel} — this checkout is now on ${currentLabel}; ` +
+        "`pnpm build` to sync (or `git checkout main && pnpm build` to restore merged code)",
+  };
+}
+
 function checkEnv(): Check {
   return {
     ok: !process.env["CLAUDE_CODE_SUBAGENT_MODEL"],
@@ -156,6 +224,7 @@ export async function doctor(): Promise<void> {
     ...(await checkSkills()),
     ...(await checkDistTree()),
     await checkVersion(),
+    await checkBuildRef(),
     checkEnv(),
   ];
 

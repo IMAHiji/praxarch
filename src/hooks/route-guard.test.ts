@@ -3,9 +3,10 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { TEST_DIST_DIR } from "../test-support/dist-dir.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const script = join(here, "..", "..", "dist", "hooks", "route-guard.js");
+const script = join(TEST_DIST_DIR, "hooks", "route-guard.js");
 const knownRolesProject = join(here, "fixtures", "known-roles-project");
 const reviewRolesProject = join(here, "fixtures", "review-roles-project");
 const malformedConfigProject = join(here, "fixtures", "malformed-config-project");

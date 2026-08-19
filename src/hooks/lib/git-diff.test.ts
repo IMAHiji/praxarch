@@ -4,22 +4,22 @@ import { chmod, mkdir, mkdtemp, open, rm, symlink, writeFile } from "node:fs/pro
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import type { DiffCounts } from "./git-diff.js";
 import type { getMkfifoProbe as GetMkfifoProbe } from "./fixtures/mkfifo-probe.js";
+import { TEST_DIST_DIR } from "../../test-support/dist-dir.js";
 // Imports the compiled output, not the sibling .ts source — matches the convention in
 // config.test.ts (see the comment there): tests resolve modules the way Node does at runtime.
-const here = dirname(fileURLToPath(import.meta.url));
 const { diffStat, diffFingerprint } = (await import(
-  join(here, "..", "..", "..", "dist", "hooks", "lib", "git-diff.js")
+  join(TEST_DIST_DIR, "hooks", "lib", "git-diff.js")
 )) as typeof import("./git-diff.js");
 // Same convention as above: the shared mkfifo probe is test infra, not product code, but a bare
 // "./fixtures/mkfifo-probe.ts" specifier fails tsc (TS5097) since this project emits, and the
 // sibling fixtures/*-runner.ts files are already executed from dist -- this sits where the build
-// already handles it.
+// already handles it. Resolved through TEST_DIST_DIR (not a hardcoded "dist" segment) so it comes
+// from the scratch tree under `pnpm verify`, same as every other compiled-output import here.
 const { getMkfifoProbe } = (await import(
-  join(here, "..", "..", "..", "dist", "hooks", "lib", "fixtures", "mkfifo-probe.js")
+  join(TEST_DIST_DIR, "hooks", "lib", "fixtures", "mkfifo-probe.js")
 )) as { getMkfifoProbe: typeof GetMkfifoProbe };
 
 // `diffStat` returns `DiffCounts | null` (null means "could not measure"). Every call site below
@@ -53,19 +53,9 @@ const mkfifoSkipReason = mkfifoProbeResult.reason ?? "mkfifo not available on th
 // per-test timeout cannot fire against it (see git-diff.test.ts history / issue #3). Spawning
 // lets the parent SIGKILL the child on a deadline and turn the hang itself into an assertion
 // failure instead of wedging the whole suite.
-const fifoRunnerPath = join(here, "..", "..", "..", "dist", "hooks", "lib", "fixtures", "fifo-fingerprint-runner.js");
-const specialRunnerPath = join(here, "..", "..", "..", "dist", "hooks", "lib", "fixtures", "special-fingerprint-runner.js");
-const diffStatFifoRunnerPath = join(
-  here,
-  "..",
-  "..",
-  "..",
-  "dist",
-  "hooks",
-  "lib",
-  "fixtures",
-  "diffstat-fifo-runner.js",
-);
+const fifoRunnerPath = join(TEST_DIST_DIR, "hooks", "lib", "fixtures", "fifo-fingerprint-runner.js");
+const specialRunnerPath = join(TEST_DIST_DIR, "hooks", "lib", "fixtures", "special-fingerprint-runner.js");
+const diffStatFifoRunnerPath = join(TEST_DIST_DIR, "hooks", "lib", "fixtures", "diffstat-fifo-runner.js");
 
 interface FifoRunnerResult {
   before: string | null;
