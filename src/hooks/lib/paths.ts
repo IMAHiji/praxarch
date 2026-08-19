@@ -31,6 +31,16 @@ export function sessionStatePath(sessionId: string): string {
   return join(stateDir(), `${sessionId}.json`);
 }
 
+// Separate from sessionStatePath deliberately: session state is re-read, re-parsed,
+// re-serialized, and re-written on every PostToolUse (telemetry.ts), while an untracked-file
+// snapshot is written exactly once (SessionStart) and read rarely (a Stop-time diff measurement).
+// Inlining the snapshot into session state made every one of those per-tool-call round trips pay
+// for it -- a 2000-entry snapshot pushed a single hot-path write from ~10ms to ~3.5s. Opposite
+// access patterns must not share a file.
+export function untrackedBaselinePath(sessionId: string): string {
+  return join(stateDir(), `${sessionId}.untracked.json`);
+}
+
 export function projectConfigPath(cwd: string): string {
   return join(cwd, ".claude", "praxarch.json");
 }

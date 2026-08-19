@@ -6,7 +6,15 @@ stages:
 
 .node_pnpm:
   before_script:
-    - corepack enable
+    # `--install-directory` (rather than corepack's own default, /usr/local/bin) is required for
+    # the `test` job below to work as a non-root user: `corepack enable` with no
+    # `--install-directory` tries to symlink into /usr/local/bin, which EACCESes for anyone but
+    # root (verified live: `docker run --user node node:22-bookworm corepack enable` fails this
+    # way). $HOME is writable by whichever user the job actually runs as (root by default here,
+    # `node` for the `test` job), so this one before_script works unmodified for both.
+    - mkdir -p "$HOME/.local/bin"
+    - corepack enable --install-directory "$HOME/.local/bin"
+    - export PATH="$HOME/.local/bin:$PATH"
     - corepack prepare pnpm@11.8.0 --activate
     - pnpm config set store-dir .pnpm-store
     - pnpm install --frozen-lockfile
