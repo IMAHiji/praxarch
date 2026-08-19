@@ -70,6 +70,18 @@ export interface SessionState {
    */
   baselineHead?: string | null;
   /**
+   * Content keys (see `untrackedSnapshotKey` in `lib/untracked.ts`) for every untracked path that
+   * already existed at SessionStart -- the untracked counterpart to `baselineHead`. Absent (key
+   * missing from the object entirely) means never captured: a session predating this field, or a
+   * hook run that didn't reach the capture. `null` means capture was attempted and came back
+   * unusable -- not a git repo, the listing failed, or the snapshot exceeded its size cap. Both
+   * states mean the same thing to a measurement: count every untracked path, exactly as it did
+   * before this snapshot existed. Never re-captured mid-session (see `session-init.ts`'s `in`
+   * guard) -- a baseline that moved partway through would launder in-session files out of scope by
+   * making them look pre-existing on a later Stop.
+   */
+  baselineUntracked?: Record<string, string> | null;
+  /**
    * Diff fingerprint at the moment a `PRAXARCH_VERIFY_WAIVED:` waiver was accepted. The gate
    * measures the whole session's diff against `baselineHead`, so without this a waived diff
    * re-blocks on every subsequent stop — including turns that changed nothing at all, since the

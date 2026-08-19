@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { readSessionState, writeSessionState } from "./lib/session-state.js";
+import { captureUntrackedBaseline } from "./lib/untracked.js";
 import { emit, readHookInput, type SessionStartInput, type SessionStartOutput } from "./lib/hook-io.js";
 
 const execFileAsync = promisify(execFile);
@@ -41,6 +42,14 @@ async function main(): Promise<void> {
     } catch {
       state.baselineHead = null;
     }
+  }
+  // `in`, not a null/undefined test: `null` is itself a captured (if unusable) baseline and must
+  // not be retried on resume/clear/compact, the same class of bug the comment above guards
+  // baselineHead against. A null/undefined test would treat a null capture as "not yet captured"
+  // and re-run captureUntrackedBaseline on every SessionStart, silently moving the untracked
+  // baseline mid-session and laundering in-session files out of the measurement.
+  if (!("baselineUntracked" in state)) {
+    state.baselineUntracked = await captureUntrackedBaseline(input.cwd);
   }
   await writeSessionState(state);
 

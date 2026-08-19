@@ -272,3 +272,81 @@ export async function readUntrackedEntry(root: string, raw: Buffer): Promise<Unt
   }
   return { key: `f:${hash.digest("hex")}`, lines, readable: true };
 }
+
+// A SessionStart snapshot with more entries than this is pathological (a repo with thousands of
+// untracked paths at session start), not a normal working tree, and pathological means the whole
+// snapshot is untrustworthy rather than partially trusted -- see captureUntrackedBaseline's doc
+// comment for why the response is `null` (count everything), not a truncated snapshot.
+const MAX_BASELINE_ENTRIES = 2000;
+// Same reasoning for total bytes: at the ceiling this is ~160 KB of state on disk for a normal
+// tree, worst case for a session state file that every hook reads and re-writes on every turn.
+const MAX_BASELINE_BYTES = 64 * 1024 * 1024;
+
+/**
+ * The key a SessionStart snapshot (`captureUntrackedBaseline`'s `Record`) is indexed by, and the
+ * key a later measurement must recompute to look a path back up in it. A representable path
+ * (`UntrackedPath.path !== null`) keys on the path text itself, prefixed `"p:"`; an unrepresentable
+ * path (invalid UTF-8, or a lossy round-trip -- see `UntrackedPath.path`'s doc comment) keys on
+ * `"r:" + sha256(raw).hex` instead, since there is no safe string to synthesize for it, the same
+ * reasoning that makes `path` itself `null` rather than a synthesized marker. The two prefixes can
+ * never collide with each other or with a real path that happens to start with `"p:"` or `"r:"`,
+ * because the check is on the *source* (`path !== null`), not on the resulting string's shape.
+ *
+ * There is exactly one function that computes this key. The capture side
+ * (`captureUntrackedBaseline`) and the compare side (`diffStat`, added in a later change) must both
+ * call it rather than each deriving a key independently -- two call sites computing "the same" key
+ * by separate logic is how they drift apart on an edge case neither one owns alone, and a drifted
+ * key means every pre-existing untracked path with that shape looks new again on every measurement.
+ */
+export function untrackedSnapshotKey(entry: UntrackedPath): string {
+  if (entry.path !== null) return `p:${entry.path}`;
+  return `r:${createHash("sha256").update(entry.raw).digest("hex")}`;
+}
+
+/**
+ * The SessionStart baseline for `diffStat`'s untracked half: every untracked path's content key at
+ * the moment the session began, so a later measurement can tell "already there" apart from "the
+ * session created or changed this." `null` means no usable snapshot was taken -- `cwd` is not a git
+ * repo, the listing failed, or the tree was too large to snapshot (see the caps above) -- and a
+ * caller must treat `null` exactly like "count everything," the same fail-closed behaviour as
+ * before this snapshot existed.
+ *
+ * Entries with `readable: false` are omitted from the snapshot, never recorded under a placeholder
+ * key. A `"u:"` key is not unique to one unreadable path -- every unreadable path shares it -- so
+ * recording it would let two successive unreadable reads of two *different* paths compare equal in
+ * a later lookup keyed by the wrong path's baseline, and more directly: a path unreadable at both
+ * capture and measurement time would then read as "unchanged" and silently stop counting. Omitting
+ * it instead means the path has no baseline entry at all, so it is always treated as new and always
+ * counted -- the fail-closed direction this snapshot exists to preserve, not weaken.
+ */
+export async function captureUntrackedBaseline(cwd: string): Promise<Record<string, string> | null> {
+  const root = await repoRoot(cwd);
+  if (root === null) return null;
+
+  const paths = await listUntrackedPaths(cwd);
+  if (paths === null) return null;
+  if (paths.length > MAX_BASELINE_ENTRIES) return null;
+
+  const snapshot: Record<string, string> = {};
+  let bytesHashed = 0;
+  for (const p of paths) {
+    // A size probe feeding only the byte cap below -- readUntrackedEntry does its own lstat
+    // independently to decide readability and dispatch kind, and this one failing just contributes
+    // 0 bytes to the running total rather than aborting the capture; the real read below still runs
+    // and decides readability for itself.
+    try {
+      const fullPath = Buffer.concat([Buffer.from(root, "utf8"), PATH_SEP, p.raw]);
+      const st = await lstat(fullPath);
+      if (st.isFile()) bytesHashed += st.size;
+    } catch {
+      // Unreadable or vanished -- readUntrackedEntry below will land on the same outcome and this
+      // probe contributes nothing to the cap either way.
+    }
+    if (bytesHashed > MAX_BASELINE_BYTES) return null;
+
+    const entry = await readUntrackedEntry(root, p.raw);
+    if (!entry.readable) continue;
+    snapshot[untrackedSnapshotKey(p)] = entry.key;
+  }
+  return snapshot;
+}

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { appendFile, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { execFileSync, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,7 +12,7 @@ import type {
 import { TEST_DIST_DIR } from "../../test-support/dist-dir.js";
 // Imports the compiled output, not the sibling .ts source — matches the convention in
 // config.test.ts (see the comment there): tests resolve modules the way Node does at runtime.
-const { listUntrackedPaths, readUntrackedEntry, repoRoot } = (await import(
+const { listUntrackedPaths, readUntrackedEntry, repoRoot, untrackedSnapshotKey, captureUntrackedBaseline } = (await import(
   join(TEST_DIST_DIR, "hooks", "lib", "untracked.js")
 )) as typeof import("./untracked.js");
 // Same convention as above: this is test infra, not product code, but a bare
@@ -497,6 +497,98 @@ test(
       assert.equal(read.readable, true);
       assert.equal(read.lines, 200, "the file must still be read for its real content, not silently dropped");
     } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  },
+);
+
+// --- untrackedSnapshotKey / captureUntrackedBaseline (SessionStart snapshot) --------------------
+
+test("untrackedSnapshotKey keys a representable path on its text, prefixed p:", () => {
+  const key = untrackedSnapshotKey({ path: "some/file.txt", raw: rawOf("some/file.txt") });
+  assert.equal(key, "p:some/file.txt");
+});
+
+test("untrackedSnapshotKey keys an unrepresentable path on a hash of its raw bytes, prefixed r:, never on path", () => {
+  const raw = Buffer.from([0x61, 0xa5, 0x3c]); // not valid UTF-8
+  const key = untrackedSnapshotKey({ path: null, raw });
+  assert.ok(key.startsWith("r:"), `expected an "r:" key for an unrepresentable path, got: ${key}`);
+
+  const differentRaw = Buffer.from([0x62, 0xa5, 0x3c]);
+  const otherKey = untrackedSnapshotKey({ path: null, raw: differentRaw });
+  assert.notEqual(key, otherKey, "two distinct unrepresentable paths must never collide on the same r: key");
+});
+
+test("captureUntrackedBaseline records a p: key per untracked path, with the path's real content key as the value", async () => {
+  const repo = await makeRepo();
+  try {
+    await writeFile(join(repo, "a.txt"), "v1\n");
+    await writeFile(join(repo, "b.txt"), "v1\nv2\n");
+
+    const snapshot = await captureUntrackedBaseline(repo);
+    assert.notEqual(snapshot, null);
+    const s = snapshot as Record<string, string>;
+    assert.equal(Object.keys(s).length, 2, `expected exactly 2 entries, got: ${JSON.stringify(s)}`);
+    assert.ok(s["p:a.txt"]?.startsWith("f:"), `expected an f: key for a.txt, got: ${JSON.stringify(s)}`);
+    assert.ok(s["p:b.txt"]?.startsWith("f:"), `expected an f: key for b.txt, got: ${JSON.stringify(s)}`);
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test("captureUntrackedBaseline returns null on a directory that is not a git repo at all", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "praxarch-untracked-baseline-nogit-"));
+  try {
+    const snapshot = await captureUntrackedBaseline(dir);
+    assert.equal(snapshot, null);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a snapshot value goes stale (no longer matches a fresh read) once the file's content changes after capture", async () => {
+  const repo = await makeRepo();
+  try {
+    await writeFile(join(repo, "drift.txt"), "v1\n");
+    const snapshot = await captureUntrackedBaseline(repo);
+    assert.notEqual(snapshot, null);
+    const capturedKey = (snapshot as Record<string, string>)["p:drift.txt"];
+    assert.ok(capturedKey);
+
+    await writeFile(join(repo, "drift.txt"), "v2\n");
+    const fresh = await readUntrackedEntry(repo, rawOf("drift.txt"));
+    assert.notEqual(fresh.key, capturedKey, "recomputing the entry after a content change must not match the captured baseline");
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test(
+  "captureUntrackedBaseline omits an unreadable entry (permission-denied) rather than recording a placeholder key",
+  // Root bypasses file permission checks entirely, so this only reproduces as a non-root user --
+  // the same asymmetry the mkfifo/non-UTF-8 probes above guard against, just for `chmod` instead
+  // of a filesystem feature.
+  { skip: typeof process.getuid === "function" && process.getuid() === 0 ? "running as root; permission checks are bypassed" : false },
+  async () => {
+    const repo = await makeRepo();
+    try {
+      await writeFile(join(repo, "present.txt"), "v1\n");
+      await writeFile(join(repo, "locked.txt"), "v1\n");
+      await chmod(join(repo, "locked.txt"), 0o000);
+
+      const direct = await readUntrackedEntry(repo, rawOf("locked.txt"));
+      assert.equal(direct.readable, false, "test setup assumption: a chmod 000 file must read as unreadable");
+
+      const snapshot = await captureUntrackedBaseline(repo);
+      assert.notEqual(snapshot, null);
+      const s = snapshot as Record<string, string>;
+      assert.ok("p:present.txt" in s, `expected present.txt in the snapshot, got: ${JSON.stringify(s)}`);
+      assert.ok(
+        !("p:locked.txt" in s),
+        `an unreadable entry must never appear in the snapshot, got: ${JSON.stringify(s)}`,
+      );
+    } finally {
+      await chmod(join(repo, "locked.txt"), 0o644).catch(() => undefined);
       await rm(repo, { recursive: true, force: true });
     }
   },
