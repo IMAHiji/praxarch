@@ -128,6 +128,49 @@ test("records a verdict and verify-gate then allows the unchanged tree", async (
   }
 });
 
+// Acceptance criterion 6, simulated: a resumed agent's SendMessage reply is invisible to
+// telemetry.ts (it only fires on PostToolUse(Agent) — see telemetry.ts:55), so the orchestrator is
+// expected to pipe that reply through `praxarch record-verdict` instead. This test drives the CLI
+// exactly the way that hand-off would: REFUTED verdict recorded on the pre-fix tree (verify-gate
+// blocks), a fix changes the tree, then a second `record-verdict` call for the same session/role
+// records CONFIRMED — standing in for the resumed verifier's reply — and verify-gate must pass on
+// the new tree state with no `PRAXARCH_VERIFY_WAIVED` waiver anywhere in this test.
+test("REFUTED then a fix then CONFIRMED via record-verdict (simulated resumed-agent flow) clears verify-gate with no waiver", async () => {
+  const fixture = await setupFixture();
+  try {
+    await writeFile(join(fixture.repo, "file.txt"), "changed line\n".repeat(100));
+
+    const refuted = runRecordVerdict(
+      fixture,
+      ["--session", "s15", "--role", "verifier"],
+      verifierText("REFUTED", [{ severity: "critical" }]),
+    );
+    assert.equal(refuted.status, 0, refuted.stderr);
+
+    const blockedGate = runVerifyGate(fixture, "s15");
+    assert.equal(blockedGate.decision, "block", JSON.stringify(blockedGate));
+
+    // The fix: further tree movement, standing in for the orchestrator addressing the REFUTED
+    // findings before re-dispatching (resuming) the verifier.
+    await writeFile(join(fixture.repo, "file.txt"), "fixed line\n".repeat(120));
+
+    const confirmed = runRecordVerdict(
+      fixture,
+      ["--session", "s15", "--role", "verifier"],
+      verifierText("CONFIRMED"),
+    );
+    assert.equal(confirmed.status, 0, confirmed.stderr);
+
+    const state = await readState(fixture.home, "s15");
+    assert.equal((state["lastVerifier"] as { verdict: string }).verdict, "CONFIRMED");
+
+    const passingGate = runVerifyGate(fixture, "s15");
+    assert.equal(passingGate.decision, undefined, JSON.stringify(passingGate));
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
 // Acceptance criterion 2: a role outside verdictRoles is refused, non-zero exit, state untouched.
 test("refuses a role outside verdictRoles and leaves state untouched", async () => {
   const fixture = await setupFixture();
