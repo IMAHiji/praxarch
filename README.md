@@ -15,10 +15,12 @@ for the full rationale and the delta from pilotfish.
 
 ## What you get
 
-- **Nine role-based subagents** (`scout`, `Explore` override, `mech-executor`, `executor`,
-  `verifier`, `security-executor`, `planner`, `implementer`, `plan-reviewer`), each pinned to a
-  cost-appropriate model tier via frontmatter, named in policy — never by model ID — so the whole
-  thing survives model deprecations untouched.
+- **Ten role-based subagents** (`scout`, `Explore` override, `mech-executor`, `executor`,
+  `verifier`, `checker`, `security-executor`, `planner`, `implementer`, `plan-reviewer`), each
+  pinned to a cost-appropriate model tier via frontmatter, named in policy — never by model ID —
+  so the whole thing survives model deprecations untouched. `checker` is a sonnet-tier
+  counterpart to opus `verifier`, scoped to re-verification after a REFUTED verdict and
+  sub-threshold first-pass verification.
 - **Enforcement hooks**, not just policy text:
   - `route-guard` hard-denies ad-hoc fan-out delegations with no explicit model, and
     security-flavored work not routed to `security-executor` — except for `executor`
@@ -115,7 +117,7 @@ the last thing in it.
 
 ## Using it
 
-Once installed, delegate from your main Claude Code session using the nine roles — see the
+Once installed, delegate from your main Claude Code session using the ten roles — see the
 orchestration policy praxarch adds to your global `CLAUDE.md` for the full delegation protocol
 (complete specs, cheapest-role-first, bounded escalation, mandatory security routing, verify
 before claiming done). Run `/praxarch-report` any time to see what's actually been delegated

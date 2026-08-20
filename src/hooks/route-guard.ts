@@ -10,7 +10,7 @@ import { emit, readHookInput, type PreToolUseInput, type PreToolUseOutput } from
  * explicit `model`, which would override the role's frontmatter binding.
  */
 
-// The nine praxarch-installed roles. Config (routeGuard.knownRoles) extends this set at runtime
+// The ten praxarch-installed roles. Config (routeGuard.knownRoles) extends this set at runtime
 // for defined roles praxarch doesn't own — see RouteGuardConfig.
 const BUILTIN_ROLES = [
   "scout",
@@ -18,6 +18,7 @@ const BUILTIN_ROLES = [
   "mech-executor",
   "executor",
   "verifier",
+  "checker",
   "security-executor",
   "planner",
   "implementer",

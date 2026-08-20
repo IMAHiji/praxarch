@@ -10,6 +10,7 @@ import { TEST_DIST_DIR } from "../test-support/dist-dir.js";
 
 const script = join(TEST_DIST_DIR, "hooks", "verify-gate.js");
 const sessionInitScript = join(TEST_DIST_DIR, "hooks", "session-init.js");
+const telemetryScript = join(TEST_DIST_DIR, "hooks", "telemetry.js");
 const cli = join(TEST_DIST_DIR, "cli", "index.js");
 
 // `which mkfifo` proves only that the binary is on PATH, not that mkfifo(2) actually works here
@@ -208,6 +209,31 @@ function runSessionInit(fixture: Fixture, sessionId: string): void {
   });
 }
 
+// Drives the real PostToolUse(Agent) hook so a checker-sourced lastVerifier record is written
+// through the same code path production uses (telemetry.ts's extractTrailingJson/summarizeVerdict),
+// rather than the test hand-seeding the state file's lastVerifier shape.
+function runTelemetryVerdict(
+  fixture: Fixture,
+  sessionId: string,
+  role: string,
+  verdict: "CONFIRMED" | "REFUTED",
+  findings: { severity: string; file: string; line: number; summary: string; failure_scenario: string }[] = [],
+): void {
+  const text = ["```json", JSON.stringify({ verdict, findings }), "```"].join("\n");
+  execFileSync("node", [telemetryScript], {
+    cwd: fixture.repo,
+    input: JSON.stringify({
+      session_id: sessionId,
+      cwd: fixture.repo,
+      hook_event_name: "PostToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: role, model: "sonnet" },
+      tool_response: { status: "completed", content: [{ type: "text", text }] },
+    }),
+    env: { ...process.env, PRAXARCH_HOME: fixture.home },
+  });
+}
+
 function verifierText(verdict: "CONFIRMED" | "REFUTED", findings: { severity: string }[] = []): string {
   return ["Some prose the resumed agent wrote before its verdict.", "```json", JSON.stringify({ verdict, findings }), "```"].join(
     "\n",
@@ -367,6 +393,44 @@ test("blocks a non-trivial diff with a REFUTED verifier record", async () => {
       criticalOrMajorCount: 1,
       findingsCount: 1,
     });
+    const result = run(fixture, {
+      session_id: "s1",
+      cwd: fixture.repo,
+      hook_event_name: "Stop",
+    }) as { decision?: string; reason?: string };
+    assert.equal(result.decision, "block");
+    assert.match(result.reason ?? "", /REFUTED with 1 critical\/major/);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+// Issue #21 AC1: a checker-sourced verdict must satisfy verify-gate end-to-end, not just parse
+// into session state in isolation -- drives the real telemetry.ts PostToolUse hook (subagent_type
+// "checker") and then the real verify-gate.ts Stop hook against the state it wrote.
+test("allows a non-trivial diff with a CONFIRMED checker record (end-to-end via telemetry hook)", async () => {
+  const fixture = await setupFixture();
+  try {
+    await makeNonTrivialDiff(fixture.repo);
+    runTelemetryVerdict(fixture, "s1", "checker", "CONFIRMED");
+    const result = run(fixture, {
+      session_id: "s1",
+      cwd: fixture.repo,
+      hook_event_name: "Stop",
+    }) as { decision?: string };
+    assert.equal(result.decision, undefined);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("blocks a non-trivial diff with a REFUTED checker record (end-to-end via telemetry hook)", async () => {
+  const fixture = await setupFixture();
+  try {
+    await makeNonTrivialDiff(fixture.repo);
+    runTelemetryVerdict(fixture, "s1", "checker", "REFUTED", [
+      { severity: "critical", file: "a.ts", line: 1, summary: "x", failure_scenario: "y" },
+    ]);
     const result = run(fixture, {
       session_id: "s1",
       cwd: fixture.repo,

@@ -17,6 +17,7 @@ live in `~/.claude/agents/*.md` frontmatter and shift independently as models ch
 | `mech-executor` | Fully-specified mechanical work: renames, pattern refactors, docs, boilerplate |
 | `executor` | Work needing local design judgment: features, fixes, non-security tradeoffs |
 | `verifier` | Fresh-context adversarial review of non-trivial completed work |
+| `checker` | Cheaper sonnet-tier re-verify after a REFUTED verdict, or a sub-threshold first pass — never the first pass on a diff the gate would block on, never security-sensitive work |
 | `security-executor` | Auth, authz, secrets, crypto, trust-boundary validation — always, no exceptions |
 | `planner` | Decomposes a task into a numbered, self-contained implementation plan (`/orchestrate` pipeline) |
 | `implementer` | Executes exactly one numbered task from a planner's plan file (`/orchestrate` pipeline) |
@@ -68,6 +69,17 @@ live in `~/.claude/agents/*.md` frontmatter and shift independently as models ch
    hook observes that reply. Run `praxarch record-verdict --session <id> --role <role>` with the
    agent's output (stdin or `--file`) instead of waiving; that's what keeps re-verification cheap
    without training you to reach for `PRAXARCH_VERIFY_WAIVED` on genuinely verified work.
+   **Scoped re-verify:** `verifier` remains mandatory for the first pass on any diff the gate would
+   block on, and for anything security-sensitive. But once `verifier` REFUTEs and you fix the
+   findings, dispatch the re-verify to `checker` instead of a fresh `verifier` sweep — carry the
+   prior findings verbatim plus `git diff <verdict-time-ref>` (the diff since the REFUTED verdict),
+   and instruct it to confirm each finding is resolved and check the fix for regressions, not redo
+   the broad sweep. `checker` is also the right choice for a first-pass verification you want on a
+   diff below verify-gate's non-trivial threshold. If `checker`'s scoped re-verify itself REFUTEs,
+   escalate the next pass back to `verifier`. `checker` may also decline a dispatch before
+   attempting verification — the diff exceeded its scope, or touched security-sensitive
+   territory — in which case it returns plain text, not a verdict block, and you re-dispatch to
+   `verifier` for a normal fresh pass.
 7. **Scout findings are leads, not facts.** Sanity-check anything scout found that the plan
    actually depends on before acting on it.
 8. **Parallel fan-out for independent units.** When you have three or more genuinely independent,

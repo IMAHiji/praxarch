@@ -142,6 +142,70 @@ test("counts critical/major findings from a REFUTED verdict", async () => {
   });
 });
 
+// Issue #21: checker is a sonnet-tier verdict role, identical verdict-block contract to verifier
+// — parsed into the same lastVerifier state shape verify-gate reads regardless of which role
+// produced it.
+test("parses a checker's trailing JSON verdict into session state (CONFIRMED)", async () => {
+  await withPraxarchHome(async (home) => {
+    const checkerText = [
+      "Confirmed the prior findings are resolved; no regressions in the fix.",
+      "",
+      "```json",
+      JSON.stringify({ verdict: "CONFIRMED", findings: [] }),
+      "```",
+    ].join("\n");
+
+    run(home, {
+      session_id: "s1",
+      cwd: process.cwd(),
+      hook_event_name: "PostToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: "checker", model: "sonnet" },
+      tool_response: { status: "completed", content: [{ type: "text", text: checkerText }] },
+    });
+
+    const statePath = join(home, "state", "s1.json");
+    const state = JSON.parse(await readFile(statePath, "utf8")) as {
+      lastVerifier: { verdict: string; criticalOrMajorCount: number } | null;
+    };
+    assert.equal(state.lastVerifier?.verdict, "CONFIRMED");
+    assert.equal(state.lastVerifier?.criticalOrMajorCount, 0);
+  });
+});
+
+test("counts critical/major findings from a checker's REFUTED verdict", async () => {
+  await withPraxarchHome(async (home) => {
+    const checkerText = [
+      "```json",
+      JSON.stringify({
+        verdict: "REFUTED",
+        findings: [
+          { severity: "critical", file: "a.ts", line: 1, summary: "x", failure_scenario: "y" },
+          { severity: "minor", file: "b.ts", line: 2, summary: "x", failure_scenario: "y" },
+        ],
+      }),
+      "```",
+    ].join("\n");
+
+    run(home, {
+      session_id: "s1",
+      cwd: process.cwd(),
+      hook_event_name: "PostToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: "checker", model: "sonnet" },
+      tool_response: { status: "completed", content: [{ type: "text", text: checkerText }] },
+    });
+
+    const statePath = join(home, "state", "s1.json");
+    const state = JSON.parse(await readFile(statePath, "utf8")) as {
+      lastVerifier: { verdict: string; criticalOrMajorCount: number; findingsCount: number };
+    };
+    assert.equal(state.lastVerifier?.verdict, "REFUTED");
+    assert.equal(state.lastVerifier?.criticalOrMajorCount, 1);
+    assert.equal(state.lastVerifier?.findingsCount, 2);
+  });
+});
+
 test("records a verdict from a config-added verdictRole", async () => {
   await withPraxarchHome(async (home) => {
     await writeFile(

@@ -13,7 +13,7 @@
   than one per task. `plan-reviewer`'s JSON verdict block is now a built-in `verifyGate.verdictRoles`
   and `routeGuard.reviewRoles` entry, so a project's own config no longer needs to add it. (Note:
   `README.zh-TW.md` hasn't been updated for this change yet.)
-- **route-guard: `routeGuard.knownRoles` config extends the defined-role set.** The built-in nine
+- **route-guard: `routeGuard.knownRoles` config extends the defined-role set.** The built-in ten
   roles are praxarch's own; agents installed by other tools with their own frontmatter bindings
   (plugin agents) were caught by the ad-hoc rule: strict mode denied them for lacking `model`,
   and passing `model` to satisfy it overrides the binding the guard exists to protect.
@@ -23,14 +23,15 @@
   Telemetry recorded trailing JSON verdicts only from the `verifier` role, so an /orchestrate
   run's plan-reviewer pass went unrecorded and verify-gate demanded a second review at session
   stop. Roles listed in `verifyGate.verdictRoles` (additive over the default
-  `["verifier", "plan-reviewer"]`) now get their verdict blocks recorded; the added role's report
-  contract must end with the verifier template's JSON verdict block.
+  `["verifier", "checker", "plan-reviewer"]`) now get their verdict blocks recorded; the added role's
+  report contract must end with the verifier template's JSON verdict block.
 - **route-guard: `routeGuard.reviewRoles` generalizes the verifier security exemption.** The
   2026-07-08 exemption was hardcoded to `subagent_type === "verifier"`, so other read-only
   review agents (pr-review-toolkit's reviewers) hit the identical deadlock: reviewing
   auth/secrets code mentions the keywords, strict mode denies the dispatch. Config-listed
   review roles are now exempt alongside verifier; additive merge over the default
-  `["verifier", "plan-reviewer"]`, so the canonical exemption can be extended but never dropped.
+  `["verifier", "checker", "plan-reviewer", "planner"]`, so the canonical exemption can be
+  extended but never dropped.
 - **route-guard: `routeGuard.softDenyRoles` downgrades the security-keyword deny to a warning for
   `executor`.** `executor` shares `security-executor`'s model tier, so the hard deny on a matched
   keyword was buying process overhead — reword-and-retry loops — rather than real classifier
@@ -43,6 +44,18 @@
   on a known role, or an ad-hoc call with no model, still deny outright and the warning is dropped
   in that case). Everything else — `mech-executor`, `scout`/`Explore`/`implementer`, ad-hoc
   dispatches — keeps the hard deny.
+- **New `checker` role: sonnet-bound re-verification, cheaper than opus `verifier`.** Verdict
+  telemetry showed the opus `verifier` role dominating spend (~11.3M tokens vs ~4.2M for
+  `executor`), with 53 back-to-back verifier→verifier dispatches where every post-fix re-verify
+  paid full opus price for a scoped follow-up. `checker` (model `sonnet`, effort `medium`) covers
+  two cases: re-verifying a fix against a prior REFUTED verdict (scoped — the dispatch carries the
+  prior findings plus `git diff` since that verdict, no full sweep), and first-pass verification on
+  diffs below verify-gate's non-trivial thresholds. It's wired into `BUILTIN_ROLES`, the default
+  `verdictRoles` and `reviewRoles`, and installer/doctor/uninstaller, with the same frozen verdict
+  block contract as `verifier`. A checker dispatch that finds the diff exceeds its scope or touches
+  security-sensitive territory declines rather than verifying: no verdict block, plain-text
+  explanation, re-dispatch to `verifier` — verify-gate simply stays blocked on a decline, which is
+  the safe state. A REFUTED checker re-verify escalates the next pass back to opus `verifier`.
 
 ### Fixed
 
