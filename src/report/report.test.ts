@@ -319,6 +319,101 @@ test("role bindings: absent agents directory and a malformed agent file both deg
   });
 });
 
+// --- Model provenance section (issue #24) ---------------------------------------------------
+// #7 was filed off a hand-rolled count that read two disjoint sets (540 "inherited" rows, 163
+// "general-purpose" rows, zero overlap) as if one were a subset of the other. These fixtures
+// reproduce that exact shape and assert the #7 question — "do any general-purpose rows inherit?"
+// — is answerable straight from this section's output, with no separate data-analysis pass.
+
+test("model provenance: per-role dispatch count, explicit/inherited split, and distinct resolvedModel values", async () => {
+  await withPraxarchHome(async (home) => {
+    await withAgentsDir(async (agentsDir) => {
+      await mkdir(join(home, "logs"), { recursive: true });
+      const file = logFilePath(home);
+      const lines = [
+        { at: "t1", sessionId: "s1", role: "verifier", model: "inherited", resolvedModel: "claude-opus-4-8", batchId: null, verdict: "CONFIRMED", criticalOrMajorCount: 0 },
+        { at: "t2", sessionId: "s1", role: "verifier", model: "inherited", resolvedModel: "claude-sonnet-5", batchId: null, verdict: "CONFIRMED", criticalOrMajorCount: 0 },
+        { at: "t3", sessionId: "s2", role: "general-purpose", model: "sonnet", resolvedModel: "claude-sonnet-5", batchId: null, verdict: null, criticalOrMajorCount: null },
+        { at: "t4", sessionId: "s2", role: "general-purpose", model: "sonnet", resolvedModel: "claude-sonnet-5", batchId: null, verdict: null, criticalOrMajorCount: null },
+      ];
+      await writeFile(file, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+
+      const out = run(home, agentsDir);
+      assert.match(out, /Model provenance/);
+      assert.match(out, /verifier: 2 dispatch\(es\), 0 explicit \/ 2 inherited, resolvedModel: claude-opus-4-8, claude-sonnet-5/);
+      // The #7 question, answered directly: general-purpose rows are 100% explicit, zero inherited
+      // — no general-purpose row inherits, straight from this line, no separate join required.
+      assert.match(out, /general-purpose: 2 dispatch\(es\), 2 explicit \/ 0 inherited, resolvedModel: claude-sonnet-5/);
+    });
+  });
+});
+
+test("model provenance: a legacy row with no resolvedModel still counts toward the dispatch/split totals", async () => {
+  await withPraxarchHome(async (home) => {
+    await withAgentsDir(async (agentsDir) => {
+      await mkdir(join(home, "logs"), { recursive: true });
+      const file = logFilePath(home);
+      const lines = [
+        { at: "t1", sessionId: "s1", role: "mech-executor", model: "sonnet", batchId: null, verdict: null, criticalOrMajorCount: null },
+      ];
+      await writeFile(file, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+
+      const out = run(home, agentsDir);
+      assert.match(out, /mech-executor: 1 dispatch\(es\), 1 explicit \/ 0 inherited, resolvedModel: none observed/);
+    });
+  });
+});
+
+test("model provenance: event rows (verifyGateFailOpen) are excluded from the section", async () => {
+  await withPraxarchHome(async (home) => {
+    await withAgentsDir(async (agentsDir) => {
+      await mkdir(join(home, "logs"), { recursive: true });
+      const file = logFilePath(home);
+      const lines = [
+        { at: "t1", sessionId: "s1", event: "verifyGateFailOpen", reason: "error", detail: "boom" },
+      ];
+      await writeFile(file, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+
+      const out = run(home, agentsDir);
+      assert.match(out, /Model provenance/);
+      assert.match(out, /no delegations in this window/);
+    });
+  });
+});
+
+test("model provenance: a record-verdict row (via: record-verdict, model: n/a) is excluded from dispatch counts", async () => {
+  await withPraxarchHome(async (home) => {
+    await withAgentsDir(async (agentsDir) => {
+      await mkdir(join(home, "logs"), { recursive: true });
+      const file = logFilePath(home);
+      const lines = [
+        { at: "t1", sessionId: "s1", role: "verifier", model: "inherited", resolvedModel: "claude-opus-4-8", batchId: null, verdict: "CONFIRMED", criticalOrMajorCount: 0 },
+        {
+          at: "t2",
+          sessionId: "s1",
+          role: "verifier",
+          model: "n/a",
+          resolvedModel: null,
+          totalTokens: null,
+          durationMs: null,
+          batchId: null,
+          verdict: "CONFIRMED",
+          findingsCount: 0,
+          criticalOrMajorCount: 0,
+          via: "record-verdict",
+        },
+      ];
+      await writeFile(file, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+
+      const out = run(home, agentsDir);
+      assert.match(out, /Model provenance/);
+      // Only the real dispatch counts — the record-verdict row is excluded, not bucketed as
+      // "explicit" (model:"n/a" is neither a real explicit model nor "inherited").
+      assert.match(out, /verifier: 1 dispatch\(es\), 0 explicit \/ 1 inherited, resolvedModel: claude-opus-4-8/);
+    });
+  });
+});
+
 test("role bindings: a dangling symlink agent file is skipped and named, not a report crash", async () => {
   await withPraxarchHome(async (home) => {
     await withAgentsDir(async (agentsDir) => {

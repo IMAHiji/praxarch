@@ -66,6 +66,29 @@
   security-sensitive territory declines rather than verifying: no verdict block, plain-text
   explanation, re-dispatch to `verifier` — verify-gate simply stays blocked on a decline, which is
   the safe state. A REFUTED checker re-verify escalates the next pass back to opus `verifier`.
+- **route-guard: crashes now append a `guard-crash` JSONL row instead of failing open silently
+  (issue #24).** verify-gate already logged its own crash-fail-opens (`event:
+  "verifyGateFailOpen"`, `reason: "error"`); route-guard's crash path failed open the same way but
+  left no trace in telemetry — an operator had no way to tell "route-guard never fired" from
+  "route-guard fired and crashed" after the fact. route-guard now appends `event: "guard-crash"`
+  (a distinct event name from verify-gate's, kept separate deliberately — see `docs/design.md`)
+  best-effort on its own crash catch, still failing open regardless of whether the log write
+  itself succeeds.
+- **`praxarch doctor`: inherited-model audit cross-checks recent `model:"inherited"` dispatches
+  against installed agent bindings (issue #24).** route-guard enforces "no explicit model on a
+  known role" only at dispatch time, before a model resolves — whether an inherited dispatch
+  actually landed on its role's bound tier was previously unanswerable without a manual telemetry
+  read. `doctor` now reads the last 7 days of monthly JSONL logs, groups `resolvedModel` by role,
+  and warns when an observed model diverges from the role's frontmatter binding, or when a role
+  with recent dispatches has no installed agent file to check it against.
+- **`praxarch report`: new "Model provenance" section — per-role dispatch count, explicit-vs-
+  inherited split, and distinct `resolvedModel` values (issue #7, #24).** issue #7 was filed off a
+  hand-rolled join (540 "inherited" rows and 163 "general-purpose" rows misread as one being a
+  subset of the other) that took a fresh jq/python session to redo each time the question came up.
+  This section makes that join a permanent one-command answer. Rows written by `praxarch
+  record-verdict` (`model: "n/a"`, `via: "record-verdict"`) are excluded — they're verdict
+  records, not dispatches, and counting them would inflate totals and misreport "n/a" as
+  "explicit".
 
 ### Fixed
 

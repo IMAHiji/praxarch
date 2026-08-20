@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { TEST_DIST_DIR } from "../test-support/dist-dir.js";
@@ -440,4 +442,64 @@ test("strict:false does not double-print or misbehave on the soft-deny path: sin
       '"credential*") but is going to "executor"; if it touches auth/secrets/crypto/trust-boundary ' +
       "validation, route it to security-executor instead.",
   );
+});
+
+// --- Crash-visibility (issue #24) ---------------------------------------------------------------
+// Before #24, a route-guard crash allowed and wrote only a stderr line no one sees — issue #7's
+// "did the guard crash and fail open?" hypothesis was permanently unfalsifiable as a result. These
+// pin the guard-crash JSONL row alongside the untouched fail-open contract.
+
+async function readMonthlyLog(home: string): Promise<Record<string, unknown>[]> {
+  const now = new Date();
+  const path = join(home, "logs", `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}.jsonl`);
+  const raw = await readFile(path, "utf8");
+  return raw
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+// tool_input: null forces main()'s `const { subagent_type, ... } = input.tool_input` destructure
+// to throw a real TypeError — a fault injected past input-parsing (session_id is already known),
+// deliberately not simulated via a mocked catch handler.
+function crashInput(sessionId: string): unknown {
+  return {
+    session_id: sessionId,
+    cwd: process.cwd(),
+    hook_event_name: "PreToolUse",
+    tool_name: "Agent",
+    tool_input: null,
+  };
+}
+
+test("a route-guard crash still allows and appends a guard-crash row to the monthly JSONL", async () => {
+  const home = await mkdtemp(join(tmpdir(), "praxarch-routeguard-home-"));
+  try {
+    const { decision } = await run(crashInput("s-crash-1"), { PRAXARCH_HOME: home });
+    assert.equal(decision, "allow");
+
+    const log = await readMonthlyLog(home);
+    const crashRows = log.filter((r) => r["event"] === "guard-crash");
+    assert.equal(crashRows.length, 1);
+    assert.equal(crashRows[0]?.["hook"], "route-guard");
+    assert.equal(crashRows[0]?.["sessionId"], "s-crash-1");
+    assert.match(String(crashRows[0]?.["error"]), /destructure/i);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("a route-guard crash still allows even when the guard-crash row write also fails", async () => {
+  // PRAXARCH_HOME pointed at a plain file (not a directory): appendJsonl's mkdir(dirname(logPath))
+  // fails with ENOTDIR, so the row write itself fails. The original crash must not be masked and
+  // fail-open must not become fail-closed because logging failed on top of it.
+  const homeFile = await mkdtemp(join(tmpdir(), "praxarch-routeguard-badhome-"));
+  const notADir = join(homeFile, "not-a-directory");
+  await writeFile(notADir, "not a directory");
+  try {
+    const { decision } = await run(crashInput("s-crash-2"), { PRAXARCH_HOME: notADir });
+    assert.equal(decision, "allow");
+  } finally {
+    await rm(homeFile, { recursive: true, force: true });
+  }
 });
