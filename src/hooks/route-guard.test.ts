@@ -134,6 +134,48 @@ test("allows a security-flavored delegation to verifier (review role, verify-gat
   assert.equal(decision, "allow");
 });
 
+// Issue #21: checker is a builtin role (sonnet-tier verdict role, verifier's re-verify
+// counterpart) — same known-role and review-exemption treatment as verifier.
+test("allows a checker delegation with no explicit model (known builtin role)", async () => {
+  const { decision } = await run({
+    session_id: "s1",
+    cwd: process.cwd(),
+    hook_event_name: "PreToolUse",
+    tool_name: "Agent",
+    tool_input: { subagent_type: "checker", prompt: "re-verify the fix against the prior findings" },
+  });
+  assert.equal(decision, "allow");
+});
+
+test("denies a checker delegation that passes an explicit model", async () => {
+  const { decision } = await run({
+    session_id: "s1",
+    cwd: process.cwd(),
+    hook_event_name: "PreToolUse",
+    tool_name: "Agent",
+    tool_input: {
+      subagent_type: "checker",
+      model: "sonnet",
+      prompt: "re-verify the fix against the prior findings",
+    },
+  });
+  assert.equal(decision, "deny");
+});
+
+test("allows a security-flavored delegation to checker (review role, same exemption as verifier)", async () => {
+  const { decision } = await run({
+    session_id: "s1",
+    cwd: process.cwd(),
+    hook_event_name: "PreToolUse",
+    tool_name: "Agent",
+    tool_input: {
+      subagent_type: "checker",
+      prompt: "Re-verify the JWT secret rotation and authentication fix against the prior findings.",
+    },
+  });
+  assert.equal(decision, "allow");
+});
+
 test("denies a defined-role delegation that passes an explicit model", async () => {
   const { decision } = await run({
     session_id: "s1",

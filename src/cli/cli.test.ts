@@ -133,6 +133,31 @@ test("install --yes writes settings, CLAUDE.md, agents, skills, and praxarch/ tr
   }
 });
 
+// Issue #21: checker (sonnet-tier verifier re-verify counterpart) must be installed, reported by
+// doctor, and removed by uninstall exactly like every other role file.
+test("install places checker.md, doctor reports it, and uninstall removes it", async () => {
+  const fixture = await setupFixture();
+  try {
+    let { status, stdout } = runCli(fixture, ["install", "--yes"]);
+    assert.equal(status, 0, stdout);
+
+    const checkerAgent = await readFile(join(fixture.claudeHome, "agents", "checker.md"), "utf8");
+    assert.match(checkerAgent, /name: checker/);
+    assert.match(checkerAgent, /model: sonnet/);
+
+    ({ stdout, status } = runCli(fixture, ["doctor"]));
+    assert.equal(status, 0, stdout);
+    assert.match(stdout, /✓ agents\/checker\.md is installed/);
+
+    ({ status } = runCli(fixture, ["uninstall", "--yes"]));
+    assert.equal(status, 0);
+
+    await assert.rejects(readFile(join(fixture.claudeHome, "agents", "checker.md"), "utf8"));
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
 test("install does not overwrite a user's existing model setting", async () => {
   const fixture = await setupFixture();
   try {

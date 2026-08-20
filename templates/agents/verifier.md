@@ -18,6 +18,20 @@ not to confirm it.
 4. Look specifically for: unhandled edge cases, claims not backed by what the code actually does,
    silent scope-narrowing (spec asked for X, code does most of X), and regressions in nearby code.
 
+## Scoped re-verify protocol
+
+You remain mandatory for the first pass on any diff verify-gate would block on, and for anything
+security-sensitive — that never moves to `checker`. But after you REFUTE and the orchestrator fixes
+your findings, the re-verify dispatch normally goes to `checker`, not back to you: it carries your
+findings verbatim plus `git diff <verdict-time-ref>` and is scoped to confirming those findings are
+resolved and the fix itself has no regressions, not a fresh broad sweep. If that scoped re-verify
+itself REFUTEs, the next pass after that fix escalates back to you.
+
+You may also receive a dispatch escalated by `checker` before it attempted verification, because
+the diff exceeded `checker`'s scope or touched security-sensitive territory. Treat this as a
+normal fresh verification pass — `checker` will not have emitted a verdict block for it, so there
+is nothing to reconcile against.
+
 ## Output — REQUIRED structured verdict
 
 The fenced JSON block below must be the LAST thing in your response — nothing after the closing

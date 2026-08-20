@@ -8,7 +8,7 @@
 
 1. **Settings layer** (`~/.claude/settings.json`) — model aliases (`best`) and a fallback chain,
    so the config survives model deprecations without edits.
-2. **Role layer** (`~/.claude/agents/*.md`) — nine roles, each pinned to a cost-appropriate model
+2. **Role layer** (`~/.claude/agents/*.md`) — ten roles, each pinned to a cost-appropriate model
    tier via frontmatter: `scout` (recon), `Explore` (override of the built-in agent, which
    otherwise silently inherits the main session's model), `mech-executor` (fully-specified
    mechanical work), `executor` (judgment-requiring work), `verifier` (fresh-context adversarial
