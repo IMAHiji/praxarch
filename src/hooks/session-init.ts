@@ -19,7 +19,8 @@ const execFileAsync = promisify(execFile);
 
 // Lowercase "explore" — the installed file is explore.md (the agent *name* "Explore" comes from
 // frontmatter). Checking "Explore.md" only passed on case-insensitive filesystems.
-const ROLE_FILES = ["scout", "explore", "mech-executor", "executor", "verifier", "security-executor", "planner", "implementer", "plan-reviewer"];
+// Keep in sync with ROLE_FILES in src/cli/doctor.ts.
+const ROLE_FILES = ["scout", "explore", "mech-executor", "executor", "verifier", "checker", "security-executor", "planner", "implementer", "plan-reviewer"];
 
 async function fileExists(path: string): Promise<boolean> {
   try {
