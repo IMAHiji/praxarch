@@ -2,7 +2,6 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { lstat, readlink } from "node:fs/promises";
-import { join } from "node:path";
 import { promisify } from "node:util";
 import { listUntrackedPaths, lookupUntrackedBaseline, readUntrackedEntry, repoRoot } from "./untracked.js";
 import { resolveEffectiveBaseline } from "./upstream-baseline.js";
@@ -27,6 +26,13 @@ const MAX_GIT_BUFFER = 64 * 1024 * 1024;
 // flags are harmless to pass alongside it too, so every `git diff` invocation in this file gets
 // them rather than special-casing which ones strictly need it.
 const NEUTRALIZE_DIFF_CONFIG = ["--no-ext-diff", "--no-textconv"];
+
+// git always prints "/" as the path separator in its own output (status, ls-files) regardless of
+// host OS — mirrors untracked.ts's identically-named, identically-reasoned constant. `fullPath`
+// below is built by concatenating raw Buffers with this literal separator, never `node:path.join`
+// (string-only, and would force a decode step this module exists to avoid) and never
+// `node:path`'s OS-dependent separator.
+const PATH_SEP = Buffer.from("/");
 
 export interface DiffCounts {
   changedLines: number;
@@ -294,9 +300,47 @@ export async function diffStat(
   return { changedLines, changedFiles };
 }
 
-interface StatusEntry {
-  path: string;
+// Exported (not module-private) solely so git-diff.test.ts can pin its Buffer-splitting and
+// sort-order logic directly against synthetic invalid-UTF-8-byte input on a filesystem (macOS)
+// that cannot itself host a file with such a name — see the test's own comment for why that
+// matters. Not used by any other module.
+export interface StatusEntry {
+  /**
+   * The path exactly as git printed it, as raw bytes — never a decoded string. `-z` stops git
+   * itself from quoting a path (see below), but `execFile`'s default encoding still UTF-8-decodes
+   * the whole child stdout before this module ever sees it, and a tracked filename containing
+   * bytes that are not valid UTF-8 (permitted by ext4/xfs on Linux; rejected outright by APFS on
+   * macOS, which is why this is invisible in local development) gets silently replaced with
+   * U+FFFD by that decode. This is the same defect `listUntrackedPaths` closed for the untracked
+   * half of the tree (untracked.ts) — the fingerprint side had the identical bug for tracked
+   * files: a corrupted path joins to an ENOENT, which hashes as the fixed `"ABSENT"` marker
+   * regardless of the file's real content, so an edited file with an unrepresentable name could
+   * never move the fingerprint at all.
+   *
+   * There is no `path: string | null` split here the way `UntrackedPath` has one: nothing in
+   * `diffFingerprint` ever matches a path against `ignorePatterns` or uses it as a display key (it
+   * deliberately ignores `ignorePatterns` — see the function doc comment), so there's no
+   * string-typed use case to serve. Every consumer — sorting, hashing, and addressing the
+   * filesystem — operates on these raw bytes directly.
+   */
+  path: Buffer;
   statusCode: string;
+}
+
+// Splits on the raw 0x00 byte, not on a decoded string's "\0" — decoding first is exactly the bug
+// this function exists to close (see StatusEntry.path's doc comment), so the delimiter search
+// itself must run on the untouched bytes. Mirrors untracked.ts's splitOnNul.
+function splitOnNul(buf: Buffer): Buffer[] {
+  const entries: Buffer[] = [];
+  let start = 0;
+  for (let i = 0; i < buf.length; i++) {
+    if (buf[i] === 0x00) {
+      if (i > start) entries.push(buf.subarray(start, i));
+      start = i + 1;
+    }
+  }
+  if (start < buf.length) entries.push(buf.subarray(start));
+  return entries;
 }
 
 // Parses `git status --porcelain -z --no-renames --untracked-files=all` output. Each entry is
@@ -305,11 +349,16 @@ interface StatusEntry {
 // --no-renames guarantees every entry is a single self-contained "XY path" — no second,
 // NUL-delimited "orig path" segment to account for, which the default (rename-detecting) format
 // would otherwise interleave for R/C entries.
-function parseStatusZ(stdout: string): StatusEntry[] {
-  return stdout
-    .split("\0")
-    .filter((entry) => entry.length > 0)
-    .map((entry) => ({ statusCode: entry.slice(0, 2), path: entry.slice(3) }));
+//
+// Operates on the raw stdout `Buffer`, not a decoded string — see StatusEntry.path's doc comment
+// for why. The two-byte status code is always ASCII by construction (git's own fixed alphabet of
+// status letters and spaces), so decoding just that slice is safe; the path slice is kept as raw
+// bytes all the way through.
+export function parseStatusZ(stdout: Buffer): StatusEntry[] {
+  return splitOnNul(stdout).map((entry) => ({
+    statusCode: entry.subarray(0, 2).toString("utf8"),
+    path: entry.subarray(3),
+  }));
 }
 
 /**
@@ -392,12 +441,16 @@ function parseStatusZ(stdout: string): StatusEntry[] {
  * after establishing they actually need a fingerprint.
  */
 export async function diffFingerprint(cwd: string): Promise<string | null> {
-  let statusOut: string;
+  // `encoding: "buffer"` keeps `execFile` from UTF-8-decoding stdout — see StatusEntry.path's doc
+  // comment for why a decode here silently corrupts any tracked path with invalid-UTF-8 bytes,
+  // and untracked.ts's `listUntrackedPaths` for the identical fix already applied on the
+  // untracked-file half of the tree.
+  let statusOut: Buffer;
   try {
     const { stdout } = await execFileAsync(
       "git",
       ["status", "--porcelain", "-z", "--no-renames", "--untracked-files=all"],
-      { cwd, maxBuffer: MAX_GIT_BUFFER },
+      { cwd, maxBuffer: MAX_GIT_BUFFER, encoding: "buffer" },
     );
     statusOut = stdout;
   } catch {
@@ -417,27 +470,36 @@ export async function diffFingerprint(cwd: string): Promise<string | null> {
   // Porcelain paths are repo-root-relative, not cwd-relative — resolved once here rather than
   // joined against `cwd` below. See the doc comment above for why a failure here is `null`, not a
   // silent fallback to `cwd`.
-  let root: string;
+  // `encoding: "buffer"` here too, and `root` stays a `Buffer` all the way to `fullPath` below —
+  // same reasoning as untracked.ts's `repoRoot`: a repo root whose own on-disk name contains
+  // invalid-UTF-8 bytes must not be corrupted to U+FFFD before every status entry is joined
+  // against it, which would ENOENT every single entry regardless of its real content.
+  let root: Buffer;
   try {
     const { stdout } = await execFileAsync("git", ["rev-parse", "--show-toplevel"], {
       cwd,
       maxBuffer: MAX_GIT_BUFFER,
+      encoding: "buffer",
     });
-    // Strips only git's single terminating newline, not `.trim()`'s arbitrary trailing whitespace
-    // — same fix, and same reasoning, as untracked.ts's repoRoot: a repo whose own directory name
-    // ends in whitespace would otherwise come back truncated to a path that doesn't exist, and
-    // every status entry below would then `lstat` ENOENT against that wrong root regardless of its
-    // real on-disk content. Strictly `\n`, not `\r?\n`: git writes LF through a pipe, never CRLF,
-    // so an optional `\r` here protects nothing real and instead eats a LEGAL trailing carriage
-    // return that's part of the directory name itself, reintroducing the exact truncation bug this
-    // line exists to fix (verified: a repo directory named "dircr\r" collapses to a nonexistent
-    // "dircr" root under `\r?\n$`, and the fingerprint stops moving on edits entirely).
-    root = stdout.replace(/\n$/, "");
+    // Strips only git's single terminating 0x0A byte, not `.trim()`'s arbitrary trailing
+    // whitespace and not a `\r?` variant — same fix, and same reasoning, as untracked.ts's
+    // repoRoot: a repo whose own directory name ends in whitespace would otherwise come back
+    // truncated to a path that doesn't exist, and every status entry below would then `lstat`
+    // ENOENT against that wrong root regardless of its real on-disk content. Strictly the single
+    // trailing byte, not `\r?\n`: git writes LF through a pipe, never CRLF, so an optional `\r`
+    // here protects nothing real and instead eats a LEGAL trailing carriage return that's part of
+    // the directory name itself, reintroducing the exact truncation bug this line exists to fix
+    // (verified: a repo directory named "dircr\r" collapses to a nonexistent "dircr" root under
+    // `\r?\n$`, and the fingerprint stops moving on edits entirely). Working on the raw bytes
+    // (rather than `.replace()` on a decoded string) is what makes stripping only the exact
+    // trailing byte possible at all.
+    const last = stdout.length - 1;
+    root = last >= 0 && stdout[last] === 0x0a ? stdout.subarray(0, last) : stdout;
   } catch {
     return null;
   }
 
-  const entries = parseStatusZ(statusOut).sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  const entries = parseStatusZ(statusOut).sort((a, b) => Buffer.compare(a.path, b.path));
 
   const hash = createHash("sha256");
   hash.update(head);
@@ -449,7 +511,11 @@ export async function diffFingerprint(cwd: string): Promise<string | null> {
     hash.update(statusCode);
     hash.update("\0");
 
-    const fullPath = join(root, path);
+    // Concatenated as raw Buffers with a literal "/" separator, not `node:path.join` — see
+    // PATH_SEP's doc comment above for why. `path` is already the exact bytes git printed (see
+    // StatusEntry.path), so this is the only representation of the on-disk path used from here
+    // on: every fs call below (`lstat`, `readlink`, `createReadStream`) takes `fullPath` directly.
+    const fullPath = Buffer.concat([root, PATH_SEP, path]);
 
     // lstat, never stat: a symlink must be inspected as itself, not followed, so its branch below
     // can decide what "not following" means rather than transparently reading through it.

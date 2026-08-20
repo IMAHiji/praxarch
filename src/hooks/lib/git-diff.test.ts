@@ -8,12 +8,15 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { DiffCounts } from "./git-diff.js";
 import type { getMkfifoProbe as GetMkfifoProbe } from "./fixtures/mkfifo-probe.js";
-import type { getNonUtf8FilenameProbe as GetNonUtf8FilenameProbe } from "./fixtures/non-utf8-filename-probe.js";
+import type {
+  getNonUtf8FilenameProbe as GetNonUtf8FilenameProbe,
+  nonUtf8FilenameBytes as NonUtf8FilenameBytes,
+} from "./fixtures/non-utf8-filename-probe.js";
 import type { getUnreadableFileProbe as GetUnreadableFileProbe } from "./fixtures/unreadable-file-probe.js";
 import { TEST_DIST_DIR } from "../../test-support/dist-dir.js";
 // Imports the compiled output, not the sibling .ts source — matches the convention in
 // config.test.ts (see the comment there): tests resolve modules the way Node does at runtime.
-const { diffStat, diffFingerprint } = (await import(
+const { diffStat, diffFingerprint, parseStatusZ } = (await import(
   join(TEST_DIST_DIR, "hooks", "lib", "git-diff.js")
 )) as typeof import("./git-diff.js");
 // Task 4 tests build the untracked baseline the same way session-init actually does, rather than
@@ -31,9 +34,9 @@ const { captureUntrackedBaseline } = (await import(
 const { getMkfifoProbe } = (await import(
   join(TEST_DIST_DIR, "hooks", "lib", "fixtures", "mkfifo-probe.js")
 )) as { getMkfifoProbe: typeof GetMkfifoProbe };
-const { getNonUtf8FilenameProbe } = (await import(
+const { getNonUtf8FilenameProbe, nonUtf8FilenameBytes } = (await import(
   join(TEST_DIST_DIR, "hooks", "lib", "fixtures", "non-utf8-filename-probe.js")
-)) as { getNonUtf8FilenameProbe: typeof GetNonUtf8FilenameProbe };
+)) as { getNonUtf8FilenameProbe: typeof GetNonUtf8FilenameProbe; nonUtf8FilenameBytes: typeof NonUtf8FilenameBytes };
 const { getUnreadableFileProbe } = (await import(
   join(TEST_DIST_DIR, "hooks", "lib", "fixtures", "unreadable-file-probe.js")
 )) as { getUnreadableFileProbe: typeof GetUnreadableFileProbe };
@@ -1556,3 +1559,105 @@ test("diffStat's effective-baseline coupling: a local commit that was never pull
     await rm(session, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------------------------
+// Issue #19: diffFingerprint's `git status` parse used to UTF-8-decode stdout, so a TRACKED
+// file's name containing invalid-UTF-8 bytes corrupted to U+FFFD before parseStatusZ ever saw it.
+// Joining that corrupted path against root ENOENTs unconditionally, and the ENOENT branch hashes
+// the fixed "ABSENT" marker regardless of the file's real on-disk content -- so editing such a
+// file could never move the fingerprint, and a CONFIRMED verdict recorded against it would never
+// go stale (verify-gate.ts:~182-200 reads the unmoved hash as "still matches").
+// ---------------------------------------------------------------------------------------------
+
+test("parseStatusZ keeps a status entry's path as the exact raw bytes, even when two distinct invalid-UTF-8 byte sequences would decode to the identical U+FFFD string (synthetic Buffer input -- runs on every platform, including this sandbox's macOS, which cannot host such a filename on disk)", () => {
+  // The bug this pins is exactly the "string-typed path parameter" class the issue warns about:
+  // a `string`-typed StatusEntry.path would have UTF-8-decoded these two genuinely different byte
+  // sequences into the identical replacement-character string, collapsing two distinct tracked
+  // paths onto one entry and making the hash blind to whichever one didn't happen to be the
+  // "real" ENOENT target. 0xff and 0xfe are each, on their own, an invalid UTF-8 byte (neither is
+  // a legal single-byte code point nor a valid multi-byte lead byte), so Node's own
+  // `Buffer.toString("utf8")` maps each to a single U+FFFD -- proven directly below rather than
+  // assumed, since that mapping is exactly what this test exists to route around.
+  const pathA = Buffer.from([0x61, 0xff]); // "a" + one invalid byte
+  const pathB = Buffer.from([0x61, 0xfe]); // "a" + a different invalid byte
+  assert.equal(
+    pathA.toString("utf8"),
+    pathB.toString("utf8"),
+    "test setup assumption: these two distinct byte sequences must decode to the identical string -- that collision is the whole bug this test exists to route around",
+  );
+
+  const entryA = Buffer.concat([Buffer.from(" M "), pathA]);
+  const entryB = Buffer.concat([Buffer.from("A  "), pathB]);
+  const statusOut = Buffer.concat([entryA, Buffer.from([0x00]), entryB, Buffer.from([0x00])]);
+
+  const entries = parseStatusZ(statusOut);
+  assert.equal(entries.length, 2, `expected two distinct entries, got: ${JSON.stringify(entries.map((e) => e.path.toString("hex")))}`);
+
+  const first = entries[0];
+  const second = entries[1];
+  assert.ok(first && second, "expected exactly two parsed entries");
+  assert.ok(Buffer.isBuffer(first.path), "StatusEntry.path must be a Buffer, never a decoded string");
+  assert.ok(first.path.equals(pathA), "the first entry's path must be the exact raw bytes git printed for it");
+  assert.ok(second.path.equals(pathB), "the second entry's path must be the exact raw bytes git printed for it");
+  assert.equal(
+    first.path.equals(second.path),
+    false,
+    "two distinct raw-byte paths must never compare equal, even though they'd decode to the identical U+FFFD string",
+  );
+  assert.equal(first.statusCode, " M");
+  assert.equal(second.statusCode, "A ");
+
+  // Buffer.compare, not a string "<"/">" comparison: a string compare of the decoded paths could
+  // never tell these two entries apart (both decode to the same string), which is exactly the
+  // blindness a `string`-typed path would reintroduce into diffFingerprint's sort.
+  const sorted = [...entries].sort((a, b) => Buffer.compare(a.path, b.path));
+  assert.ok(sorted[0]?.path.equals(pathB), "byte-wise 0xfe sorts before 0xff -- the sort must be sensitive to the actual bytes");
+  assert.ok(sorted[1]?.path.equals(pathA));
+});
+
+test(
+  "diffFingerprint moves when a TRACKED file with an invalid-UTF-8 name has its contents edited (issue #19's literal acceptance criterion)",
+  { skip: hasNonUtf8Filenames ? false : nonUtf8SkipReason },
+  async () => {
+    // Must be verified on Linux (ext4/xfs permit such a filename); APFS (macOS, this sandbox)
+    // rejects it outright with EILSEQ at the write() syscall, which is exactly what
+    // hasNonUtf8Filenames gates on -- see non-utf8-filename-probe.ts. Expected to be among this
+    // suite's pre-existing platform-gated skips when run here.
+    //
+    // Both fingerprint calls below see the identical " M <path>" status entry for this file (same
+    // path, same status code) -- only its on-disk content differs between them. That's
+    // deliberate, mirroring the trailing-space/trailing-CR tests above (git-diff.test.ts:1280-1356
+    // in this file): a bare "commit, then take one fingerprint, then edit and take a second"
+    // comparison would also pass under the bug, since the entry doesn't even exist in `git
+    // status` until the file is first made dirty -- that shape can't distinguish "the fingerprint
+    // is content-sensitive" from "the fingerprint just noticed a new status line." Two edits, both
+    // already dirty, is the one comparison that actually exercises whether the ENOENT/"ABSENT"
+    // fallback is (still) swallowing every edit to this path.
+    const repo = await makeRepo();
+    try {
+      const nameBytes = nonUtf8FilenameBytes();
+      const filePath = Buffer.concat([Buffer.from(`${repo}/`), nameBytes]);
+      await writeFile(filePath, "v0\n".repeat(50));
+      execFileSync("git", ["add", "."], { cwd: repo });
+      execFileSync("git", ["commit", "-q", "-m", "add tracked non-UTF-8-named file"], { cwd: repo });
+
+      await writeFile(filePath, "v1\n".repeat(50));
+      const first = await diffFingerprint(repo);
+      assert.notEqual(
+        first,
+        null,
+        "a tracked file with an invalid-UTF-8 name must not make the whole fingerprint unknown",
+      );
+
+      await writeFile(filePath, "v2\n".repeat(50));
+      const second = await diffFingerprint(repo);
+      assert.notEqual(
+        first,
+        second,
+        "two different edits to the same still-modified, invalid-UTF-8-named tracked file must produce different hashes -- if they don't, the entry is still being hashed as the fixed ABSENT marker regardless of its real content",
+      );
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  },
+);
