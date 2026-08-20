@@ -1,0 +1,5 @@
+{
+  "routeGuard": {
+    "softDenyRoles": ["plugin:reviewer"]
+  }
+}

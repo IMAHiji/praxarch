@@ -56,7 +56,9 @@ live in `~/.claude/agents/*.md` frontmatter and shift independently as models ch
 5. **Security routing is not optional.** Anything touching authentication, authorization, secrets,
    cryptography, or trust-boundary input validation goes to `security-executor`, full stop — this
    keeps benign defensive-security work away from safety classifiers tuned for general use, and
-   keeps that code path held to one consistently careful standard.
+   keeps that code path held to one consistently careful standard. (Roles in
+   `routeGuard.softDenyRoles`, default `["executor"]`, get a warning instead of a block on a
+   security-keyword match — route deliberately, don't rely on the warning as the check.)
 6. **Verify before claiming done.** Non-trivial changes (anything beyond a trivial fix) get a
    `verifier` pass before you report completion. Verifier returns a structured verdict — gate on
    `verdict` and zero unresolved `critical`/`major` findings, not on prose tone.

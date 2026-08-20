@@ -102,17 +102,44 @@ async function main(): Promise<void> {
   // security-sensitive tickets. Default is ["verifier"]; config adds, never removes.
   const reviewRoles = new Set(config.routeGuard.reviewRoles);
   const isReviewRole = subagentType !== undefined && reviewRoles.has(subagentType);
+  // A soft-deny warning carried forward from the security-keyword check below, if any, to be
+  // attached to the eventual decision. It must never short-circuit the known-role/ad-hoc rules
+  // that run after this block — see the softDenyRoles handling below for why.
+  let softDenyReason: string | undefined;
+
   if (matchedKeyword !== undefined && subagentType !== "security-executor" && !isReviewRole) {
-    emit(
-      decide(
-        config.routeGuard.strict,
-        `this delegation looks security-sensitive (matched keyword "${matchedKeyword}") but ` +
-          `subagent_type is "${subagentType ?? "unset"}", not "security-executor". Route ` +
-          `auth/secrets/crypto/validation work to security-executor per the orchestration policy.`,
-        warnings,
-      ),
-    );
-    return;
+    // Soft-deny roles (default ["executor"]) get a warning instead of the hard deny below: same
+    // model tier as security-executor, so the deny was buying process overhead, not classifier
+    // avoidance, at the cost of reword-and-retry loops. Checked only after the review-role
+    // exemption above, so a role that's already exempt never gets this warning layered on top.
+    const softDenyRoles = new Set(config.routeGuard.softDenyRoles);
+    const isSoftDenyRole = subagentType !== undefined && softDenyRoles.has(subagentType);
+    if (isSoftDenyRole) {
+      // IMPORTANT: do not decide()+return here. A security-keyword match against a soft-deny
+      // role must not bypass the explicit-model-override and ad-hoc-no-model rules below — those
+      // rules exist independently of the security check and a known role passing an explicit
+      // model (or an ad-hoc call passing none) is still wrong even when the prompt also happens
+      // to look security-sensitive. Stash the warning and fall through; it's only ever surfaced
+      // if nothing later in the chain decides to deny. If a later rule denies, that deny's
+      // message wins outright and this warning is dropped — never silently downgrade a real deny
+      // to "just a warning", and the later deny paths must stay byte-compatible with today's
+      // messages regardless of whether a soft-deny warning was also pending.
+      softDenyReason =
+        `warning — this delegation looks security-sensitive (matched keyword "${matchedKeyword}") ` +
+        `but is going to "${subagentType}"; if it touches auth/secrets/crypto/trust-boundary ` +
+        `validation, route it to security-executor instead.`;
+    } else {
+      emit(
+        decide(
+          config.routeGuard.strict,
+          `this delegation looks security-sensitive (matched keyword "${matchedKeyword}") but ` +
+            `subagent_type is "${subagentType ?? "unset"}", not "security-executor". Route ` +
+            `auth/secrets/crypto/validation work to security-executor per the orchestration policy.`,
+          warnings,
+        ),
+      );
+      return;
+    }
   }
 
   const knownRoles = new Set([...BUILTIN_ROLES, ...config.routeGuard.knownRoles]);
@@ -144,6 +171,14 @@ async function main(): Promise<void> {
         warnings,
       ),
     );
+    return;
+  }
+
+  // Nothing later in the chain denied. If a soft-deny security warning was pending, surface it
+  // now (unconditionally allow — strict=false to decide() — since the soft-deny posture doesn't
+  // vary with routeGuard.strict); otherwise plain allow.
+  if (softDenyReason !== undefined) {
+    emit(decide(false, softDenyReason, warnings));
     return;
   }
 

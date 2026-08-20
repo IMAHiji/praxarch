@@ -21,7 +21,10 @@ for the full rationale and the delta from pilotfish.
   thing survives model deprecations untouched.
 - **Enforcement hooks**, not just policy text:
   - `route-guard` hard-denies ad-hoc fan-out delegations with no explicit model, and
-    security-flavored work not routed to `security-executor`.
+    security-flavored work not routed to `security-executor` — except for `executor`
+    (`routeGuard.softDenyRoles`, config-extensible), where the same rule is a warning, not a
+    block: `executor` shares `security-executor`'s model tier, so the deny there bought process
+    overhead, not real classifier avoidance.
   - `verify-gate` blocks session completion on non-trivial diffs with no `CONFIRMED`,
     zero-critical/major verifier record on file (escape hatches included).
   - `telemetry` logs every delegation to JSONL, including the verifier's structured verdict.

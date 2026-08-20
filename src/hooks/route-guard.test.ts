@@ -10,6 +10,10 @@ const script = join(TEST_DIST_DIR, "hooks", "route-guard.js");
 const knownRolesProject = join(here, "fixtures", "known-roles-project");
 const reviewRolesProject = join(here, "fixtures", "review-roles-project");
 const malformedConfigProject = join(here, "fixtures", "malformed-config-project");
+const softDenyRolesProject = join(here, "fixtures", "soft-deny-roles-project");
+const malformedSoftDenyProject = join(here, "fixtures", "malformed-soft-deny-project");
+const softDenyAdhocProject = join(here, "fixtures", "soft-deny-adhoc-project");
+const strictFalseProject = join(here, "fixtures", "strict-false-project");
 
 async function run(
   input: unknown,
@@ -84,7 +88,7 @@ test("denies a security-flavored delegation not routed to security-executor", as
     cwd: process.cwd(),
     hook_event_name: "PreToolUse",
     tool_name: "Agent",
-    tool_input: { subagent_type: "executor", prompt: "rotate the JWT secret handling in auth.ts" },
+    tool_input: { subagent_type: "mech-executor", prompt: "rotate the JWT secret handling in auth.ts" },
   });
   assert.equal(decision, "deny");
 });
@@ -96,7 +100,7 @@ test("does not flag 'author'/'authored' as security-sensitive", async () => {
     hook_event_name: "PreToolUse",
     tool_name: "Agent",
     tool_input: {
-      subagent_type: "executor",
+      subagent_type: "mech-executor",
       prompt: "Update the CHANGELOG authors section; each entry was authored by a Co-Authored-By trailer.",
     },
   });
@@ -110,7 +114,7 @@ test("flags stem-matched keywords like 'authentication' and 'encrypted'", async 
       cwd: process.cwd(),
       hook_event_name: "PreToolUse",
       tool_name: "Agent",
-      tool_input: { subagent_type: "executor", prompt },
+      tool_input: { subagent_type: "mech-executor", prompt },
     });
     assert.equal(decision, "deny", `expected deny for: ${prompt}`);
   }
@@ -208,7 +212,7 @@ test("security redirect still applies to non-review roles under a reviewRoles co
       cwd: reviewRolesProject,
       hook_event_name: "PreToolUse",
       tool_name: "Agent",
-      tool_input: { subagent_type: "executor", prompt: "rotate the JWT secret handling in auth.ts" },
+      tool_input: { subagent_type: "mech-executor", prompt: "rotate the JWT secret handling in auth.ts" },
     },
     HERMETIC_ENV,
   );
@@ -242,4 +246,156 @@ test("malformed project config does not disable the guard: defined-role delegati
   );
   assert.equal(decision, "deny");
   assert.match(systemMessage ?? "", /praxarch\.json is unreadable or not valid JSON/);
+});
+
+test("soft-denies (warns, does not block) a security-flavored delegation to executor", async () => {
+  const { decision, systemMessage, stdout } = await run({
+    session_id: "s1",
+    cwd: process.cwd(),
+    hook_event_name: "PreToolUse",
+    tool_name: "Agent",
+    tool_input: { subagent_type: "executor", prompt: "audit the credential rotation logic" },
+  });
+  const parsed = stdout as { hookSpecificOutput: { permissionDecisionReason?: string } };
+  assert.equal(decision, "allow");
+  assert.equal(
+    systemMessage,
+    'praxarch route-guard: warning — this delegation looks security-sensitive (matched keyword ' +
+      '"credential*") but is going to "executor"; if it touches auth/secrets/crypto/trust-boundary ' +
+      "validation, route it to security-executor instead.",
+  );
+  assert.match(parsed.hookSpecificOutput.permissionDecisionReason ?? "", /route it to security-executor instead/);
+});
+
+test("still hard-denies a security-flavored delegation to mech-executor, message unchanged from today", async () => {
+  const { decision, systemMessage } = await run({
+    session_id: "s1",
+    cwd: process.cwd(),
+    hook_event_name: "PreToolUse",
+    tool_name: "Agent",
+    tool_input: { subagent_type: "mech-executor", prompt: "audit the credential rotation logic" },
+  });
+  assert.equal(decision, "deny");
+  assert.equal(
+    systemMessage,
+    'praxarch route-guard: blocked — this delegation looks security-sensitive (matched keyword ' +
+      '"credential*") but subagent_type is "mech-executor", not "security-executor". Route ' +
+      "auth/secrets/crypto/validation work to security-executor per the orchestration policy.",
+  );
+});
+
+test("ad-hoc dispatch with explicit model still denies on a security keyword match (soft-deny does not apply)", async () => {
+  const { decision } = await run({
+    session_id: "s1",
+    cwd: process.cwd(),
+    hook_event_name: "PreToolUse",
+    tool_name: "Agent",
+    tool_input: {
+      subagent_type: "general-purpose",
+      model: "sonnet",
+      prompt: "audit the credential rotation logic",
+    },
+  });
+  assert.equal(decision, "deny");
+});
+
+test("review-role exemption wins outright over soft-deny: verifier gets a plain allow, no warning layered on", async () => {
+  const { decision, systemMessage } = await run({
+    session_id: "s1",
+    cwd: process.cwd(),
+    hook_event_name: "PreToolUse",
+    tool_name: "Agent",
+    tool_input: { subagent_type: "verifier", prompt: "audit the credential rotation logic" },
+  });
+  assert.equal(decision, "allow");
+  assert.equal(systemMessage, undefined);
+});
+
+test("config softDenyRoles extends the warn set additively: implementer also gets warn-only", async () => {
+  const { decision, systemMessage } = await run(
+    {
+      session_id: "s1",
+      cwd: softDenyRolesProject,
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: "implementer", prompt: "audit the credential rotation logic" },
+    },
+    HERMETIC_ENV,
+  );
+  assert.equal(decision, "allow");
+  assert.match(systemMessage ?? "", /is going to "implementer"/);
+});
+
+test("malformed softDenyRoles config value warns and falls back to the default [\"executor\"]", async () => {
+  const { decision, systemMessage } = await run(
+    {
+      session_id: "s1",
+      cwd: malformedSoftDenyProject,
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: "executor", prompt: "audit the credential rotation logic" },
+    },
+    HERMETIC_ENV,
+  );
+  assert.equal(decision, "allow");
+  assert.match(systemMessage ?? "", /routeGuard\.softDenyRoles must be an array of strings/);
+  assert.match(systemMessage ?? "", /is going to "executor"/);
+});
+
+// Regression coverage for the soft-deny-as-bypass bug (GitLab issue #8): a security-keyword
+// match against a softDenyRoles member must not short-circuit the explicit-model-override or
+// ad-hoc-no-model rules that run later in the chain — the warning is only ever surfaced when
+// nothing else in the chain would deny the delegation.
+
+test("explicit-model-override deny wins over a soft-deny warning: executor + model + keyword denies, not a warning-allow", async () => {
+  const { decision, systemMessage } = await run({
+    session_id: "s1",
+    cwd: process.cwd(),
+    hook_event_name: "PreToolUse",
+    tool_name: "Agent",
+    tool_input: { subagent_type: "executor", model: "haiku", prompt: "audit the credential rotation logic" },
+  });
+  assert.equal(decision, "deny");
+  assert.equal(
+    systemMessage,
+    'praxarch route-guard: blocked — delegation to defined role "executor" passes explicit model ' +
+      '"haiku", which overrides the role\'s frontmatter binding and defeats tiered routing. Omit ' +
+      "model — role→model bindings live in the agent file.",
+  );
+});
+
+test("ad-hoc-no-model deny wins over a soft-deny warning: a softDenyRoles role outside knownRoles, dispatched ad-hoc with no model, still denies", async () => {
+  const { decision, systemMessage } = await run(
+    {
+      session_id: "s1",
+      cwd: softDenyAdhocProject,
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: "plugin:reviewer", prompt: "audit the credential rotation logic" },
+    },
+    HERMETIC_ENV,
+  );
+  assert.equal(decision, "deny");
+  assert.match(systemMessage ?? "", /ad-hoc fan-out Agent call/);
+  assert.doesNotMatch(systemMessage ?? "", /security-executor instead/);
+});
+
+test("strict:false does not double-print or misbehave on the soft-deny path: single message, allow", async () => {
+  const { decision, systemMessage } = await run(
+    {
+      session_id: "s1",
+      cwd: strictFalseProject,
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: "executor", prompt: "audit the credential rotation logic" },
+    },
+    HERMETIC_ENV,
+  );
+  assert.equal(decision, "allow");
+  assert.equal(
+    systemMessage,
+    'praxarch route-guard: warning — this delegation looks security-sensitive (matched keyword ' +
+      '"credential*") but is going to "executor"; if it touches auth/secrets/crypto/trust-boundary ' +
+      "validation, route it to security-executor instead.",
+  );
 });

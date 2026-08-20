@@ -46,6 +46,18 @@ export interface RouteGuardConfig {
    * verifier exemption.
    */
   reviewRoles: string[];
+  /**
+   * Roles for which a security-keyword match is a warning (allow + systemMessage) instead of a
+   * hard deny. Default ["executor"]: it shares security-executor's model tier, so the deny there
+   * was buying process overhead, not real classifier avoidance, and its measured cost was
+   * reword-and-retry loops. Everything else (mech-executor, scout/Explore/implementer, ad-hoc
+   * dispatches) keeps the hard deny — mech-executor's contract is "no judgment", wrong for
+   * security work, and ad-hoc dispatches have no vetted system prompt. Additive over the default,
+   * same posture as reviewRoles, so a config can widen the warn set but never remove `executor`
+   * from it. A role already exempt via reviewRoles is unaffected by this list — the review
+   * exemption wins outright and is checked first.
+   */
+  softDenyRoles: string[];
 }
 
 // Role→model bindings deliberately have no override key here: they live in agent frontmatter,
@@ -74,6 +86,7 @@ export const DEFAULT_CONFIG: PraxarchConfig = {
     securityKeywords: [],
     knownRoles: [],
     reviewRoles: ["verifier", "plan-reviewer", "planner"],
+    softDenyRoles: ["executor"],
   },
 };
 
@@ -191,6 +204,10 @@ function validateLayer(path: string, raw: unknown, warnings: string[]): ConfigLa
         const roles = stringArray(path, "routeGuard.reviewRoles", rg["reviewRoles"], warnings);
         if (roles !== undefined) validated.reviewRoles = roles;
       }
+      if ("softDenyRoles" in rg) {
+        const roles = stringArray(path, "routeGuard.softDenyRoles", rg["softDenyRoles"], warnings);
+        if (roles !== undefined) validated.softDenyRoles = roles;
+      }
       result.routeGuard = validated;
     } else {
       warnings.push(`praxarch config: ${path} routeGuard must be an object — ignoring it`);
@@ -219,6 +236,10 @@ function mergeConfig(base: PraxarchConfig, override: ConfigLayer | null): Praxar
       ],
       knownRoles: [...base.routeGuard.knownRoles, ...(override.routeGuard?.knownRoles ?? [])],
       reviewRoles: [...base.routeGuard.reviewRoles, ...(override.routeGuard?.reviewRoles ?? [])],
+      softDenyRoles: [
+        ...base.routeGuard.softDenyRoles,
+        ...(override.routeGuard?.softDenyRoles ?? []),
+      ],
     },
   };
 }
