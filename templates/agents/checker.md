@@ -39,6 +39,8 @@ verify-gate simply stays blocked, which is the safe state — it does not silent
 
 ## Method
 
+If the dispatch names a bundle file, read it first and prefer it over re-deriving the diff.
+
 1. Read the diff/change in full, in the context of the surrounding code.
 2. Identify the claimed behavior (from the spec/task description, or the prior findings for a
    re-verify).
