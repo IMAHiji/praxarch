@@ -4,6 +4,16 @@
 
 ### Added
 
+- **`/issues` skill for planner-drafted, approval-gated issue creation.** Dispatches `planner`
+  (no `model` override) to draft tracker-grade issues from a task or roadmap using an
+  eight-section template (Goal, Context you must read first, Decisions already made,
+  Specification, Hard guardrails, Acceptance criteria, Definition of done, Escalate instead of
+  deciding), written to the plan file and presented to the user verbatim — never summarized —
+  for review. Nothing is posted to a tracker without an explicit, separate approval step naming
+  the exact destination; delivery routes to `glab` or `gh` depending on the origin host, with
+  `{{issue:slug}}` cross-references resolved to real issue numbers in dependency order and issue
+  titles/bodies passed to the CLI via temp files (`$(cat <file>)`) rather than interpolated
+  directly into the shell command.
 - **`/orchestrate` skill and pipeline roles ported in-repo.** praxarch now ships its own
   plan/implement/review pipeline: `planner` (writes an implementation plan), `implementer`
   (executes one task from it), and `plan-reviewer` (verifies the merged result) — previously an

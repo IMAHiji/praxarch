@@ -158,6 +158,30 @@ test("install places checker.md, doctor reports it, and uninstall removes it", a
   }
 });
 
+// Issue #11: /issues skill must be installed, reported by doctor, and removed by uninstall
+// exactly like every other skill (fan-out, orchestrate, praxarch-report).
+test("install places the issues skill, doctor reports it, and uninstall removes it", async () => {
+  const fixture = await setupFixture();
+  try {
+    let { status, stdout } = runCli(fixture, ["install", "--yes"]);
+    assert.equal(status, 0, stdout);
+
+    const issuesSkill = await readFile(join(fixture.claudeHome, "skills", "issues", "SKILL.md"), "utf8");
+    assert.match(issuesSkill, /name: issues/);
+
+    ({ stdout, status } = runCli(fixture, ["doctor"]));
+    assert.equal(status, 0, stdout);
+    assert.match(stdout, /✓ skills\/issues is installed/);
+
+    ({ status } = runCli(fixture, ["uninstall", "--yes"]));
+    assert.equal(status, 0);
+
+    await assert.rejects(readFile(join(fixture.claudeHome, "skills", "issues", "SKILL.md"), "utf8"));
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
 test("install does not overwrite a user's existing model setting", async () => {
   const fixture = await setupFixture();
   try {

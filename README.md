@@ -45,6 +45,11 @@ for the full rationale and the delta from pilotfish.
   an implementation plan, you approve it, `implementer` executes it task-by-task (dispatching
   independent tasks in parallel via worktree isolation, same as `/fan-out`), and a high-tier
   `plan-reviewer` verifies the merged result.
+- **`/issues` skill**: dispatches `planner` to draft tracker-grade issues from a task or roadmap,
+  presents the drafts verbatim for approval, then creates them on the repo's GitLab or GitHub
+  tracker (`glab`/`gh`, detected from `git remote get-url origin`) with `{{issue:slug}}`
+  cross-references resolved to real issue numbers in dependency order. Nothing is posted without
+  an explicit, separate approval step.
 
 ## Install
 
