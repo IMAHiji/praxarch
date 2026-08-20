@@ -28,9 +28,38 @@ export async function readTextIfExists(path: string): Promise<string | null> {
   }
 }
 
-export async function readJsonIfExists<T>(path: string): Promise<T | null> {
+export type JsonReadResult<T> =
+  | { status: "absent" }
+  | { status: "ok"; value: T }
+  | { status: "malformed"; error: Error };
+
+/**
+ * Never throws — a malformed file is a distinct, reportable outcome from a missing one, not an
+ * exception a caller has to remember to catch. Conflating "absent" and "malformed" into a single
+ * null (the old signature) let a corrupt settings.json get silently treated as no-settings-at-all
+ * by install/uninstall, which is exactly the wrong call for a recoverable user file (issue #18).
+ */
+export async function readJsonIfExists<T>(path: string): Promise<JsonReadResult<T>> {
   const raw = await readTextIfExists(path);
-  return raw === null ? null : (JSON.parse(raw) as T);
+  if (raw === null) return { status: "absent" };
+  try {
+    return { status: "ok", value: JSON.parse(raw) as T };
+  } catch (err) {
+    return { status: "malformed", error: err as Error };
+  }
+}
+
+/**
+ * True if a successfully-parsed JSON value is actually an object (not null, not an array, not a
+ * bare primitive). `JSON.parse` happily accepts `"null"`, `"[]"`, `"42"` as well-formed JSON, so a
+ * `status: "ok"` result from readJsonIfExists is not by itself proof the value has the shape a
+ * caller expecting settings/config keys assumes — property access on those would throw or silently
+ * do nothing. Callers that need object shape must check this themselves; it is deliberately not
+ * folded into readJsonIfExists' own "ok"/"malformed" distinction, since a top-level array or number
+ * is still well-formed JSON, just not the shape this particular caller wants.
+ */
+export function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export async function writeJson(path: string, value: unknown): Promise<void> {

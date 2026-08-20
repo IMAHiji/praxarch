@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { cp, mkdtemp, readFile, readdir, rm, writeFile, mkdir, symlink, lstat, readlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -23,7 +23,11 @@ async function teardownFixture(fixture: Fixture): Promise<void> {
   await rm(fixture.claudeHome, { recursive: true, force: true });
 }
 
-function runCli(fixture: Fixture, args: string[], cliPath = cli): { stdout: string; status: number } {
+function runCli(
+  fixture: Fixture,
+  args: string[],
+  cliPath = cli,
+): { stdout: string; stderr: string; status: number } {
   // The default `cli` is spawned straight out of TEST_DIST_DIR, so its own DIST_DIR must resolve
   // to that same tree (real dist/ under plain `pnpm test`, the scratch tree under `pnpm verify`)
   // — otherwise it falls back to REPO_ROOT's real dist/, silently reading live build output while
@@ -43,13 +47,12 @@ function runCli(fixture: Fixture, args: string[], cliPath = cli): { stdout: stri
   } else {
     delete env["PRAXARCH_TEST_DIST_DIR"];
   }
-  try {
-    const stdout = execFileSync("node", [cliPath, ...args], { env }).toString("utf8");
-    return { stdout, status: 0 };
-  } catch (err) {
-    const e = err as { stdout?: Buffer; status?: number };
-    return { stdout: e.stdout?.toString("utf8") ?? "", status: e.status ?? 1 };
-  }
+  const result = spawnSync("node", [cliPath, ...args], { env });
+  return {
+    stdout: result.stdout?.toString("utf8") ?? "",
+    stderr: result.stderr?.toString("utf8") ?? "",
+    status: result.status ?? 1,
+  };
 }
 
 const repoRoot = join(here, "..", "..");
@@ -184,7 +187,7 @@ test("doctor fails before install", async () => {
 });
 
 // issue #14 MAJOR 2: a corrupt/hand-edited build-info.json must not take every other doctor check
-// down with it — readJsonIfExists' unguarded JSON.parse would otherwise crash the whole command.
+// down with it — an unguarded JSON.parse in readBuildInfoIfValid would otherwise crash the whole command.
 test("doctor does not crash on a corrupt build-info.json", async () => {
   const fixture = await setupFixture();
   try {
@@ -784,6 +787,178 @@ test("uninstall unlinks leaf symlinks that point into a praxarch checkout", asyn
     );
   } finally {
     await rm(clone.root, { recursive: true, force: true });
+    await teardownFixture(fixture);
+  }
+});
+
+// issue #18: readJsonIfExists' bare JSON.parse crashed doctor outright on a malformed
+// settings.json, losing every other check along with it.
+test("doctor survives a malformed settings.json, names it in a failed check, and still runs every other check", async () => {
+  const fixture = await setupFixture();
+  try {
+    runCli(fixture, ["install", "--yes"]);
+    const settingsPath = join(fixture.claudeHome, "settings.json");
+    await writeFile(settingsPath, "not json {{{");
+
+    const { stdout, status } = runCli(fixture, ["doctor"]);
+    assert.equal(status, 1, stdout);
+    assert.match(stdout, /is not valid JSON/);
+    assert.match(stdout, new RegExp(settingsPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    // Every other check still ran — CLAUDE.md, agents, skills, etc, not just the settings check.
+    assert.match(stdout, /CLAUDE\.md has the praxarch orchestration policy block/);
+    assert.match(stdout, /checks passed/);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("doctor survives a malformed VERSION.json and names it in a failed check", async () => {
+  const fixture = await setupFixture();
+  try {
+    runCli(fixture, ["install", "--yes"]);
+    const versionPath = join(fixture.claudeHome, "praxarch", "VERSION.json");
+    await writeFile(versionPath, "not json {{{");
+
+    const { stdout, status } = runCli(fixture, ["doctor"]);
+    assert.equal(status, 1, stdout);
+    assert.match(stdout, /is not valid JSON/);
+    assert.match(stdout, /checks passed/);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+// A malformed settings.json is the user's real config — treating it as absent would let install
+// clobber a recoverable file. It must refuse outright instead.
+test("install refuses to run over a malformed settings.json instead of clobbering it", async () => {
+  const fixture = await setupFixture();
+  try {
+    await mkdir(fixture.claudeHome, { recursive: true });
+    const settingsPath = join(fixture.claudeHome, "settings.json");
+    await writeFile(settingsPath, "not json {{{");
+
+    const { stderr, status } = runCli(fixture, ["install", "--yes"]);
+    assert.notEqual(status, 0, stderr);
+    // Pins the deliberate refusal wording, not just any crash-shaped failure — a bare JSON.parse
+    // crash (main, pre-#18-fix) also exits non-zero and can mention "not valid JSON" in its own
+    // generic error, so this must assert on wording only the refusal path produces.
+    assert.match(stderr, /refusing to install over it/);
+    assert.equal(await readFile(settingsPath, "utf8"), "not json {{{", "must leave the file untouched");
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+// A `null` settings.json is well-formed JSON (JSON.parse("null") succeeds) but not the object
+// shape install/doctor expect — must be refused/reported the same as malformed JSON, not crash on
+// property access.
+test("install refuses to run over a `null` settings.json instead of crashing", async () => {
+  const fixture = await setupFixture();
+  try {
+    await mkdir(fixture.claudeHome, { recursive: true });
+    const settingsPath = join(fixture.claudeHome, "settings.json");
+    await writeFile(settingsPath, "null");
+
+    const { stderr, status } = runCli(fixture, ["install", "--yes"]);
+    assert.notEqual(status, 0, stderr);
+    assert.match(stderr, /does not contain a JSON object/);
+    assert.match(stderr, /refusing to install over it/);
+    assert.equal(await readFile(settingsPath, "utf8"), "null", "must leave the file untouched");
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("doctor survives a `null` settings.json instead of crashing on property access", async () => {
+  const fixture = await setupFixture();
+  try {
+    runCli(fixture, ["install", "--yes"]);
+    const settingsPath = join(fixture.claudeHome, "settings.json");
+    await writeFile(settingsPath, "null");
+
+    const { stdout, status } = runCli(fixture, ["doctor"]);
+    assert.equal(status, 1, stdout);
+    assert.match(stdout, /does not contain a JSON object/);
+    assert.match(stdout, /CLAUDE\.md has the praxarch orchestration policy block/);
+    assert.match(stdout, /checks passed/);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("doctor survives a `null` VERSION.json instead of crashing on property access", async () => {
+  const fixture = await setupFixture();
+  try {
+    runCli(fixture, ["install", "--yes"]);
+    const versionPath = join(fixture.claudeHome, "praxarch", "VERSION.json");
+    await writeFile(versionPath, "null");
+
+    const { stdout, status } = runCli(fixture, ["doctor"]);
+    assert.equal(status, 1, stdout);
+    assert.match(stdout, /does not contain a JSON object/);
+    assert.match(stdout, /checks passed/);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+// A malformed templates/settings.fragment.json (praxarch's own shipped file, not a user file) must
+// surface as a doctor failure naming the file — not silently drop to zero hook-wiring checks, which
+// would otherwise report every one of them as vacuously "passing" (issue #18 follow-up finding).
+test("doctor fails when the shipped settings.fragment.json is malformed, instead of silently skipping every hook check", async () => {
+  const fixture = await setupFixture();
+  const clone = await setupRepoCopy();
+  try {
+    runCli(fixture, ["install", "--yes"], clone.cli);
+    const fragmentPath = join(clone.root, "templates", "settings.fragment.json");
+    await writeFile(fragmentPath, "not json {{{");
+
+    const { stdout, status } = runCli(fixture, ["doctor"], clone.cli);
+    assert.equal(status, 1, stdout);
+    assert.match(stdout, /is not valid JSON/);
+    assert.match(stdout, new RegExp(fragmentPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    // Must not silently report every hook-wiring check as passing.
+    assert.doesNotMatch(stdout, /wires the praxarch/);
+  } finally {
+    await rm(clone.root, { recursive: true, force: true });
+    await teardownFixture(fixture);
+  }
+});
+
+// uninstall must not silently no-op on a malformed settings.json as if it were simply absent —
+// that would look like a clean uninstall while leaving praxarch's hook entries in place.
+test("uninstall refuses to silently skip a malformed settings.json", async () => {
+  const fixture = await setupFixture();
+  try {
+    runCli(fixture, ["install", "--yes"]);
+    const settingsPath = join(fixture.claudeHome, "settings.json");
+    await writeFile(settingsPath, "not json {{{");
+
+    const { stdout } = runCli(fixture, ["uninstall", "--yes"]);
+    assert.match(stdout, /is not valid JSON/, stdout);
+    assert.equal(await readFile(settingsPath, "utf8"), "not json {{{", "must leave the file untouched");
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+// A malformed settings.json means uninstall can't strip praxarch's hook entries from it — that is
+// an incomplete uninstall, and reporting a bare "praxarch uninstalled." would tell a scripted
+// caller everything went fine when settings.json still points at now-deleted hook scripts.
+test("uninstall reports incomplete (not a bare success) when settings.json is left uncleaned", async () => {
+  const fixture = await setupFixture();
+  try {
+    runCli(fixture, ["install", "--yes"]);
+    const settingsPath = join(fixture.claudeHome, "settings.json");
+    await writeFile(settingsPath, "not json {{{");
+
+    const { stdout, status } = runCli(fixture, ["uninstall", "--yes"]);
+    assert.notEqual(status, 0, stdout);
+    assert.doesNotMatch(stdout, /^praxarch uninstalled\.$/m, "must not report a bare success");
+    assert.match(stdout, /incomplete/i);
+    // The rest of uninstall still proceeds — the settings.json refusal doesn't abort the command.
+    await assert.rejects(readFile(join(fixture.claudeHome, "praxarch", "VERSION.json"), "utf8"));
+  } finally {
     await teardownFixture(fixture);
   }
 });

@@ -12,7 +12,7 @@ import {
   SKILLS_DIR,
   TEMPLATES_DIR,
 } from "./lib/paths.js";
-import { exists, readJsonIfExists, readTextIfExists } from "./lib/fsops.js";
+import { exists, isJsonObject, readJsonIfExists, readTextIfExists } from "./lib/fsops.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -30,25 +30,67 @@ interface Check {
 // events praxarch registers — so a newly added event is checked automatically without a matching
 // edit here. A hardcoded list would silently stop covering new events (issue #15's failure shape:
 // a hook that isn't firing, with no diagnostic).
-async function shippedHookEvents(): Promise<string[]> {
-  const fragment = await readJsonIfExists<{ hooks?: Record<string, unknown> }>(
-    join(TEMPLATES_DIR, "settings.fragment.json"),
-  );
-  return Object.keys(fragment?.hooks ?? {});
+//
+// A malformed or absent fragment must NOT be treated as "zero events to check" — that would make
+// every hook-wiring check vacuously pass (iterating zero events reports nothing failing), exactly
+// how a broken shipped template silently turned into "21/21 checks passed" even though nothing
+// about the hooks was actually verified. So this returns a Check on failure instead of `[]`, and
+// the caller must surface it rather than swallow it.
+async function shippedHookEvents(): Promise<{ events: string[] } | { failure: Check }> {
+  const fragmentPath = join(TEMPLATES_DIR, "settings.fragment.json");
+  const fragment = await readJsonIfExists<{ hooks?: Record<string, unknown> }>(fragmentPath);
+  if (fragment.status === "absent") {
+    return { failure: { ok: false, message: `${fragmentPath} does not exist — cannot verify praxarch's hooks are wired.` } };
+  }
+  if (fragment.status === "malformed") {
+    return { failure: { ok: false, message: `${fragmentPath} is not valid JSON: ${fragment.error.message}` } };
+  }
+  if (!isJsonObject(fragment.value)) {
+    return {
+      failure: {
+        ok: false,
+        message: `${fragmentPath} does not contain a JSON object — cannot verify praxarch's hooks are wired.`,
+      },
+    };
+  }
+  return { events: Object.keys(fragment.value.hooks ?? {}) };
 }
 
 async function checkSettings(): Promise<Check[]> {
   const checks: Check[] = [];
-  const settings = await readJsonIfExists<Record<string, unknown>>(SETTINGS_PATH);
-  if (!settings) {
+  const result = await readJsonIfExists<Record<string, unknown>>(SETTINGS_PATH);
+  if (result.status === "absent") {
     return [{ ok: false, message: `${SETTINGS_PATH} does not exist — run \`praxarch install\`.` }];
   }
+  if (result.status === "malformed") {
+    // Hooks/statusLine checks below need a parsed object to inspect — nothing to check against a
+    // file that didn't parse, so report the one failure and stop here. doctor() itself still runs
+    // every other top-level check; only this function's own remaining logic is skipped.
+    return [{ ok: false, message: `${SETTINGS_PATH} is not valid JSON: ${result.error.message}` }];
+  }
+  if (!isJsonObject(result.value)) {
+    // Well-formed JSON (e.g. `null`, `[]`, `42`) that isn't an object — same "nothing to check
+    // against" situation as malformed, so report it the same way rather than crashing on property
+    // access below.
+    return [
+      {
+        ok: false,
+        message: `${SETTINGS_PATH} does not contain a JSON object (got ${JSON.stringify(result.value)}) — run \`praxarch install\` to fix it.`,
+      },
+    ];
+  }
+  const settings = result.value;
   checks.push({ ok: settings["model"] !== undefined, message: "settings.json has a model set" });
   const hooks = settings["hooks"] as Record<string, { hooks?: { command: string }[] }[]> | undefined;
   const hasHook = (event: string): boolean =>
     (hooks?.[event] ?? []).some((g) => (g.hooks ?? []).some((h) => h.command.includes("praxarch")));
-  for (const event of await shippedHookEvents()) {
-    checks.push({ ok: hasHook(event), message: `settings.json wires the praxarch ${event} hook` });
+  const shipped = await shippedHookEvents();
+  if ("failure" in shipped) {
+    checks.push(shipped.failure);
+  } else {
+    for (const event of shipped.events) {
+      checks.push({ ok: hasHook(event), message: `settings.json wires the praxarch ${event} hook` });
+    }
   }
   const statusLine = settings["statusLine"] as { command?: string } | undefined;
   checks.push({
@@ -87,10 +129,21 @@ async function checkSkills(): Promise<Check[]> {
 }
 
 async function checkVersion(): Promise<Check> {
-  const installed = await readJsonIfExists<{ version: string }>(join(PRAXARCH_INSTALL_DIR, "VERSION.json"));
-  if (!installed) {
+  const versionPath = join(PRAXARCH_INSTALL_DIR, "VERSION.json");
+  const result = await readJsonIfExists<{ version: string }>(versionPath);
+  if (result.status === "absent") {
     return { ok: false, message: "no VERSION.json found in ~/.claude/praxarch — run `praxarch install`." };
   }
+  if (result.status === "malformed") {
+    return { ok: false, message: `${versionPath} is not valid JSON: ${result.error.message}` };
+  }
+  if (!isJsonObject(result.value)) {
+    return {
+      ok: false,
+      message: `${versionPath} does not contain a JSON object (got ${JSON.stringify(result.value)}) — run \`praxarch install\` to fix it.`,
+    };
+  }
+  const installed = result.value;
   const repoVersion = (JSON.parse(await readFile(join(REPO_ROOT, "package.json"), "utf8")) as { version: string })
     .version;
   const ok = installed.version === repoVersion;
@@ -169,10 +222,10 @@ async function currentGitRef(): Promise<{ ref: string; branch: string | null } |
 // to name it. Degrades to an informational pass, never a failure, when either side of the
 // comparison is unavailable (pre-#14 install, tarball install, git missing) — a stale-ref check
 // that can't determine staleness isn't a defect worth failing doctor over.
-// readJsonIfExists does an unguarded JSON.parse — fine for callers reading praxarch's own
-// well-formed output, but build-info.json can be hand-edited or truncated by an interrupted
-// write, and doctor's whole job is reporting on a broken install. A parse failure here must
-// degrade to "unknown," the same as a missing file, never take every other check down with it.
+// Kept separate from readJsonIfExists' {absent,ok,malformed} result: build-info.json can be
+// hand-edited or truncated by an interrupted write, and checkBuildRef's contract is to degrade a
+// malformed file to "unknown," the same as a missing one — never surface it as its own failed
+// check the way checkSettings/checkVersion do for settings.json/VERSION.json.
 async function readBuildInfoIfValid(path: string): Promise<BuildInfo | null> {
   const raw = await readTextIfExists(path);
   if (raw === null) return null;
