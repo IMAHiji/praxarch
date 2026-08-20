@@ -31,7 +31,20 @@ What it does report, honestly:
   necessarily bad — it means the gate is catching things — but it's worth surfacing either way.
 - **Fan-out batch count** — how many `/fan-out` batches ran (delegations tagged
   `[fanout:<id>]` in their description), as a rough signal of whether parallel fan-out is being
-  used at all.
+  used at all, plus a per-batch token subtotal.
+- **Token spend** — total tokens per (role, resolved model) pair, straight from what telemetry
+  already captures (`resolvedModel`/`totalTokens` on each delegation row) — no dollar conversion,
+  no pricing. Rows logged before token capture existed (or carrying a malformed token count) are
+  counted separately as "unmeasured (pre-token-capture)", never backfilled or estimated.
+- **Role bindings** — the role→model binding table read live from `~/.claude/agents/*.md`
+  frontmatter, plus reconciliation against the log window: a bound role never seen in the logs is
+  flagged unused, a role seen in the logs with no matching agent file is flagged unbound/removed,
+  and a role whose current binding disagrees with what was actually observed running is flagged
+  explicitly. This table reflects *current intent* (frontmatter, right now); the token-spend
+  section's `resolvedModel` reflects *historical truth* (what actually ran) — the two can diverge
+  after a binding change, and the report labels them separately rather than conflating them.
 
 If the log directory doesn't exist yet or the window is empty, the report says so plainly — that
-means no delegations have happened in the requested window, not that the tool is broken.
+means no delegations have happened in the requested window, not that the tool is broken. Likewise,
+if `~/.claude/agents` doesn't exist or isn't readable, the role-bindings section says so rather
+than silently showing an empty table.
