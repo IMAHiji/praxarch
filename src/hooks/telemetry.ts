@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { loadConfig } from "./lib/config.js";
 import { appendJsonl } from "./lib/jsonl.js";
+import { resolveMeasurementCwd } from "./lib/measurement-cwd.js";
 import { logFileForDate } from "./lib/paths.js";
 import { readSessionState, updateSessionState, type VerifierRecord } from "./lib/session-state.js";
 import { readUntrackedBaseline } from "./lib/untracked-baseline-store.js";
@@ -92,26 +93,33 @@ async function main(): Promise<void> {
     criticalOrMajorCount: parsedVerdict?.criticalOrMajorCount ?? null,
   });
 
-  // Fingerprint the tree this verdict was recorded against, so verify-gate can later tell
-  // whether it's still current. Only computed here (a verdict was actually parsed) — the far
-  // more common PostToolUse(Agent) call, for a non-verdict role, never needs it. Hoisted above
-  // the state read: unlike diffStat, diffFingerprint doesn't consume any field of session state,
-  // so nothing stops it running before the read — shrinking (not eliminating; diffStat still
-  // needs `baselineHead` from the read) the window in which a concurrent writer's change could
-  // land before this hook's own merge-write below picks it up.
-  // A failure here degrades to null inside captureDiffHash — verify-gate treats a present-but-null
-  // diffHash as unverifiable (no free pass), unlike a record that omits the key entirely
-  // (genuinely predates this feature).
-  const diffHash: string | null = parsedVerdict ? await captureDiffHash(input.cwd) : null;
-
-  // Read only for `baselineHead`, which diffStat needs below — never mutated and never written
-  // back directly. The eventual write goes through `updateSessionState`, which re-reads the
-  // freshest snapshot immediately before applying telemetry's owned mutations, so this read being
-  // stale by the time we get to the bottom of this function is fine: it's not what gets persisted.
+  // Read only for `baselineHead`/`baselineCwd`, which the measurements below need — never mutated
+  // and never written back directly. The eventual write goes through `updateSessionState`, which
+  // re-reads the freshest snapshot immediately before applying telemetry's owned mutations, so this
+  // read being stale by the time we get to the bottom of this function is fine: it's not what gets
+  // persisted. Moved ahead of the diffHash capture below (unlike before this anchor existed) because
+  // resolving the measurement cwd needs `state.baselineCwd` — the JSONL log write above still stays
+  // first, unaffected by this reordering, so a corrupt state file still can't cost that row.
   const state = await readSessionState(input.session_id);
 
   let verifierRecord: VerifierRecord | null = null;
   if (parsedVerdict) {
+    // Resolved once and reused by both the fingerprint and the counts below — see
+    // measurement-cwd.ts's doc comment for why a dead (or laundering) anchor becomes `null`
+    // rather than falling back to `input.cwd`. Gated behind `parsedVerdict`, not run
+    // unconditionally on every PostToolUse(Agent) call: it's an `access()` syscall (plus, for a
+    // non-repo anchor, up to two more `git rev-parse` calls), and the far more common non-verdict
+    // call never consumes its result at all.
+    const measurementCwd = await resolveMeasurementCwd(state.baselineCwd, input.cwd);
+
+    // Fingerprint the tree this verdict was recorded against, so verify-gate can later tell
+    // whether it's still current.
+    // A failure here degrades to null inside captureDiffHash — verify-gate treats a present-but-null
+    // diffHash as unverifiable (no free pass), unlike a record that omits the key entirely
+    // (genuinely predates this feature). A dead anchor (measurementCwd === null) degrades the same
+    // way, never fingerprinting the wrong (hook) tree.
+    const diffHash: string | null = measurementCwd !== null ? await captureDiffHash(measurementCwd) : null;
+
     // This read is gated behind `parsedVerdict`, not hoisted to every PostToolUse(Agent) call —
     // the whole point of moving the untracked snapshot into its own sidecar file was to keep
     // per-tool-call work flat (see untracked-baseline-store.ts and paths.ts's
@@ -120,12 +128,12 @@ async function main(): Promise<void> {
     // verdict-bearing PostToolUse(Agent) call is rare relative to the hot path, so reading the
     // sidecar here does not reintroduce that cost.
     const untrackedBaseline = await readUntrackedBaseline(input.session_id);
-    const { changedLines, changedFiles } = await captureDiffCounts(
-      input.cwd,
-      config.verifyGate.ignorePatterns,
-      state.baselineHead,
-      untrackedBaseline,
-    );
+    // A dead anchor never reaches diffStat — same fail-closed reasoning as verify-gate.ts (diffStat
+    // returns `{0, 0}` for a non-repo cwd, which must not be handed back as "nothing changed").
+    const { changedLines, changedFiles } =
+      measurementCwd === null
+        ? { changedLines: null, changedFiles: null }
+        : await captureDiffCounts(measurementCwd, config.verifyGate.ignorePatterns, state.baselineHead, untrackedBaseline);
     // Invariant verify-gate relies on: diffHash must be a real `string | null` here, never
     // `undefined` — it distinguishes a legacy record (key absent) from a failed fingerprint
     // (key present, null) only because JSON.stringify drops undefined-valued keys but keeps

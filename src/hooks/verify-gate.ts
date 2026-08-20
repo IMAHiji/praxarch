@@ -2,6 +2,7 @@
 import { loadConfig } from "./lib/config.js";
 import { diffFingerprint, diffStat } from "./lib/git-diff.js";
 import { appendJsonl } from "./lib/jsonl.js";
+import { resolveMeasurementCwd } from "./lib/measurement-cwd.js";
 import { logFileForDate } from "./lib/paths.js";
 import { readSessionState, writeSessionState } from "./lib/session-state.js";
 import { readUntrackedBaseline } from "./lib/untracked-baseline-store.js";
@@ -98,14 +99,23 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Resolved once, before any measurement in this function, and reused at every site below (the
+  // waiver fingerprint here, diffStat, and the block-path fingerprint further down) — see
+  // measurement-cwd.ts's doc comment for why a dead anchor becomes `null` rather than a fallback
+  // to `input.cwd`. `loadConfig` below deliberately keeps using `input.cwd`: which project's
+  // config applies is a property of the hook invocation, not of which tree is being measured.
+  const measurementCwd = await resolveMeasurementCwd(state.baselineCwd, input.cwd);
+
   const waiverMatch = input.last_assistant_message ? WAIVER_PATTERN.exec(input.last_assistant_message) : null;
   if (waiverMatch) {
     // Remember which diff was waived. The gate measures the session's whole diff against
     // baselineHead, so a waiver that only allowed this one stop would re-block on every later
     // stop — including turns that changed nothing, because the cumulative diff hasn't shrunk.
     // A null fingerprint is deliberately not stored: an unhashable diff would otherwise be
-    // waived forever, since the "has it moved?" test below could never disprove it.
-    const waivedHash = await diffFingerprint(input.cwd);
+    // waived forever, since the "has it moved?" test below could never disprove it. A dead anchor
+    // (measurementCwd === null) is treated identically to an unhashable diff — never fingerprinted
+    // against the wrong (hook) cwd.
+    const waivedHash = measurementCwd === null ? null : await diffFingerprint(measurementCwd);
     if (waivedHash !== null) state.verifyGateWaivedHash = waivedHash;
     // Written unconditionally rather than via clearBlockCounters, which skips the write when no
     // counter was set — that would drop the waiver on a first-round stop, the common case.
@@ -124,15 +134,23 @@ async function main(): Promise<void> {
   // safe to `null` (count every untracked path) on a missing, unreadable, or corrupt sidecar file
   // — never throws, never resolves to `{}`.
   const untrackedBaseline = await readUntrackedBaseline(input.session_id);
-  const currentCounts = await diffStat(input.cwd, config.verifyGate.ignorePatterns, state.baselineHead, untrackedBaseline);
+  // A dead anchor never reaches diffStat at all — diffStat returns `{0, 0}` (allow) when its cwd
+  // argument isn't a git repo, which is exactly the fail-open this anchor exists to prevent for a
+  // deleted/moved checkout. `measurementCwd === null` short-circuits straight to `null` counts
+  // instead.
+  const currentCounts =
+    measurementCwd === null
+      ? null
+      : await diffStat(measurementCwd, config.verifyGate.ignorePatterns, state.baselineHead, untrackedBaseline);
 
-  // `null` means the diff couldn't be measured at all (see diffStat's doc comment). Reading that
-  // as trivial is exactly the bypass this fix exists to close, so a failed measurement is treated
-  // as non-trivial unconditionally — it skips the early allow below and falls through to the same
-  // verdict-demanding path as any other non-trivial diff, with its own message variant at the
-  // bottom of this function. `current` still gets zeroed counts so the delta math further down
-  // (which only runs once a verdict is already being demanded) has real numbers to subtract
-  // against; measurementFailed is what actually drives every branching decision.
+  // `null` means the diff couldn't be measured at all (see diffStat's doc comment, and the dead-
+  // anchor short-circuit above). Reading that as trivial is exactly the bypass this fix exists to
+  // close, so a failed measurement is treated as non-trivial unconditionally — it skips the early
+  // allow below and falls through to the same verdict-demanding path as any other non-trivial
+  // diff, with its own message variant at the bottom of this function. `current` still gets
+  // zeroed counts so the delta math further down (which only runs once a verdict is already being
+  // demanded) has real numbers to subtract against; measurementFailed is what actually drives
+  // every branching decision.
   const measurementFailed = currentCounts === null;
   const current = currentCounts ?? { changedLines: 0, changedFiles: 0 };
   const { changedLines, changedFiles } = current;
@@ -149,8 +167,10 @@ async function main(): Promise<void> {
 
   // Only fetched past this point: the trivial-diff early return above is the common case, and it
   // never needs a fingerprint — diffFingerprint reads every dirty/untracked file's full current
-  // contents, where diffStat's counts above are cheap by comparison.
-  const currentHash = await diffFingerprint(input.cwd);
+  // contents, where diffStat's counts above are cheap by comparison. A dead anchor is already
+  // `measurementFailed` via `currentCounts` above and must not fingerprint the wrong (hook) tree
+  // here either.
+  const currentHash = measurementCwd === null ? null : await diffFingerprint(measurementCwd);
 
   // A waiver stands until the work moves. Without this the gate re-blocks on every stop for the
   // rest of the session, because it measures the cumulative diff against baselineHead — so even a
@@ -292,14 +312,27 @@ async function main(): Promise<void> {
 
   // A failed measurement has no real changedLines/changedFiles to report — the size-phrased
   // message above would print zeros and read as "trivial but blocked," which is backwards. This
-  // variant states the actual reason (diff could not be measured) instead.
+  // variant states the actual reason (diff could not be measured) instead, and — when the anchor
+  // itself is the reason — names the recorded path rather than the generic "git diff failed"
+  // phrasing. `measurementCwd === null` while `baselineCwd` is set covers two distinct causes
+  // (measurement-cwd.ts's doc comment): the anchor directory is genuinely gone (deleted worktree,
+  // moved checkout), or it still exists but isn't a git repo while the hook cwd IS one (the
+  // laundering case — work happened in a repo the anchor never named). The message is worded to
+  // cover both without asserting the directory is missing when it might merely be unusable.
+  const anchorDead = measurementCwd === null;
+  const measurementFailedReason = anchorDead
+    ? `praxarch verify-gate: the session's baseline directory (${state.baselineCwd ?? "unknown"}) is missing ` +
+      'or unusable for measurement — treating the diff as unmeasurable and non-trivial. Run a verifier pass ' +
+      'before reporting completion, or state "PRAXARCH_VERIFY_WAIVED: <reason>" if verification genuinely ' +
+      "doesn't apply here."
+    : "praxarch verify-gate: the session's diff could not be measured (git diff failed) — treating as " +
+      'non-trivial. Run a verifier pass before reporting completion, or state "PRAXARCH_VERIFY_WAIVED: ' +
+      '<reason>" if verification genuinely doesn\'t apply here.';
   const output: StopOutput = withConfigWarnings(
     {
       decision: "block",
       reason: (measurementFailed
-        ? "praxarch verify-gate: the session's diff could not be measured (git diff failed) — treating as " +
-          'non-trivial. Run a verifier pass before reporting completion, or state "PRAXARCH_VERIFY_WAIVED: ' +
-          '<reason>" if verification genuinely doesn\'t apply here.'
+        ? measurementFailedReason
         : `praxarch verify-gate: this session changed ${changedLines} lines across ${changedFiles} files ` +
           `(non-trivial) but ${reasonDetail}. Run a verifier pass before reporting completion, or state ` +
           `"PRAXARCH_VERIFY_WAIVED: <reason>" if verification genuinely doesn't apply here.`) + buildRefSuffix,

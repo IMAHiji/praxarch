@@ -326,6 +326,62 @@ test(
   },
 );
 
+test("records baselineCwd on first run and does not move it on a second run (resume, different cwd)", async () => {
+  await withPraxarchHome(async (home) => {
+    const repoA = await mkdtemp(join(tmpdir(), "praxarch-sessioninit-cwd-a-"));
+    const repoB = await mkdtemp(join(tmpdir(), "praxarch-sessioninit-cwd-b-"));
+    try {
+      run(home, { session_id: "s1", cwd: repoA, hook_event_name: "SessionStart", source: "startup" });
+      const stateAfterFirst = JSON.parse(await readFile(join(home, "state", "s1.json"), "utf8")) as {
+        baselineCwd?: string;
+      };
+      assert.equal(stateAfterFirst.baselineCwd, repoA);
+
+      // A second SessionStart (resume) from a different cwd -- the worktree-cd repro -- must not
+      // move the anchor to wherever the shell now sits.
+      run(home, { session_id: "s1", cwd: repoB, hook_event_name: "SessionStart", source: "resume" });
+      const stateAfterSecond = JSON.parse(await readFile(join(home, "state", "s1.json"), "utf8")) as {
+        baselineCwd?: string;
+      };
+      assert.equal(stateAfterSecond.baselineCwd, repoA);
+    } finally {
+      await rm(repoA, { recursive: true, force: true });
+      await rm(repoB, { recursive: true, force: true });
+    }
+  });
+});
+
+test("a resume on a legacy state file (no baselineCwd key) does not add one", async () => {
+  await withPraxarchHome(async (home) => {
+    const repo = await mkdtemp(join(tmpdir(), "praxarch-sessioninit-cwd-legacy-"));
+    try {
+      const stateDir = join(home, "state");
+      await mkdir(stateDir, { recursive: true });
+      await writeFile(
+        join(stateDir, "s1.json"),
+        JSON.stringify({
+          sessionId: "s1",
+          startedAt: new Date().toISOString(),
+          delegations: [],
+          lastVerifier: null,
+          baselineHead: null,
+        }),
+        "utf8",
+      );
+
+      run(home, { session_id: "s1", cwd: repo, hook_event_name: "SessionStart", source: "resume" });
+      const state = JSON.parse(await readFile(join(stateDir, "s1.json"), "utf8")) as { baselineCwd?: string };
+      assert.equal(
+        state.baselineCwd,
+        undefined,
+        "a legacy state file must never gain baselineCwd from a non-startup SessionStart",
+      );
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+});
+
 test("no warning when role files and env are clean (best-effort against real home)", async () => {
   await withPraxarchHome(async (home) => {
     const result = run(home, {

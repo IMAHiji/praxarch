@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { loadConfig } from "./lib/config.js";
 import { readHookInput, type SubagentStopInput } from "./lib/hook-io.js";
+import { resolveMeasurementCwd } from "./lib/measurement-cwd.js";
 import { readSessionState, updateSessionState, type VerifierRecord } from "./lib/session-state.js";
 import { readUntrackedBaseline } from "./lib/untracked-baseline-store.js";
 import {
@@ -85,19 +86,30 @@ async function main(): Promise<void> {
   const at = new Date().toISOString();
   const agentId = typeof input.agent_id === "string" && input.agent_id ? input.agent_id : null;
 
-  // Same ordering contract as telemetry.ts: fingerprint before the state read, counts after (the
-  // read is only for `baselineHead`, which `captureDiffCounts` needs).
-  const diffHash = await captureDiffHash(input.cwd);
+  // Ordering contract: state read first (it feeds anchor resolution below), then the
+  // fingerprint/counts capture -- see verdict.ts's module doc comment for the full ordering
+  // contract this and telemetry.ts share.
   const state = await readSessionState(input.session_id);
+  // Resolved once and reused by both the fingerprint and the counts below -- see
+  // measurement-cwd.ts's doc comment for why a dead (or laundering) anchor becomes `null` rather
+  // than falling back to `input.cwd`. This hook is the primary automatic writer of `lastVerifier`
+  // (issue #15) so an unanchored measurement here is exactly the vector that let a `cd`'d-into
+  // worktree launder its diff into the recorded verdict (see the plan's observed repro).
+  const measurementCwd = await resolveMeasurementCwd(state.baselineCwd, input.cwd);
+  // A dead/laundering anchor never reaches diffFingerprint/diffStat -- same fail-closed reasoning
+  // as telemetry.ts and verify-gate.ts (diffStat returns `{0, 0}` for a non-repo cwd, which must
+  // not be handed back as "nothing changed", and diffFingerprint would fingerprint the wrong
+  // tree). `diffHash` is always assigned a real `string | null`, never `undefined` -- see
+  // verify-gate.ts's `verifierHasFingerprint` comment for the invariant this must preserve (no
+  // object spread over `VerifierRecord` may reintroduce an `undefined` value here).
+  const diffHash = measurementCwd === null ? null : await captureDiffHash(measurementCwd);
   // One store read per subagent completion, not per tool call -- this hook only runs at
   // SubagentStop, so it carries none of telemetry.ts's hot-path constraint.
   const untrackedBaseline = await readUntrackedBaseline(input.session_id);
-  const { changedLines, changedFiles } = await captureDiffCounts(
-    input.cwd,
-    config.verifyGate.ignorePatterns,
-    state.baselineHead,
-    untrackedBaseline,
-  );
+  const { changedLines, changedFiles } =
+    measurementCwd === null
+      ? { changedLines: null, changedFiles: null }
+      : await captureDiffCounts(measurementCwd, config.verifyGate.ignorePatterns, state.baselineHead, untrackedBaseline);
 
   const verifierRecord: VerifierRecord = {
     ...summary,

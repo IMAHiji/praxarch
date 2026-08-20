@@ -59,6 +59,21 @@
 
 ### Fixed
 
+- **verify-gate/telemetry/record-verdict: the diff measurement now anchors to the session's own
+  checkout, not the hook/CLI's cwd (issue #23).** Reported live: a session shell that `cd`'d into
+  `.claude/worktrees/agent-*` had every Stop charge a 6-line fix as "1202 lines across 7 files" —
+  the worktree's own diff plus its untracked `.claude/` — against a baseline pinned in the primary
+  checkout, and `record-verdict` run from that same cwd recorded the inflated numbers into
+  `lastVerifier`. `session-init` now records `state.baselineCwd` from SessionStart's cwd (never on
+  resume/clear/compact, so an in-flight session's anchor can't move), and a single
+  `resolveMeasurementCwd` dispatch (`measurement-cwd.ts`) is what every measurement site resolves
+  through before touching `diffStat`/`diffFingerprint`. A legacy session (no recorded anchor)
+  measures from the hook cwd exactly as before; a recorded-but-now-missing anchor fails closed —
+  `null`, never a silent fallback to the hook cwd, since `diffStat` returns `{0, 0}` for a cwd
+  that isn't a git repo and a fallback there would read a dead anchor as a trivial diff instead of
+  the measurement failure it is. `verify-gate` blocks on a dead anchor naming the missing path;
+  `loadConfig` deliberately keeps resolving from the hook cwd everywhere, since which project's
+  settings apply doesn't depend on which tree is measured.
 - **verify-gate: the loop-guard counter and the recorded verdict are now both self-invalidating.**
   Two related holes let the Stop gate silently stop enforcing: (1) the consecutive-block counter
   was never cleared on a genuine allow path, so it could accumulate across unrelated stop cycles;
