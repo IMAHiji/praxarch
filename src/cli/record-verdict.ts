@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { loadConfig } from "../hooks/lib/config.js";
 import { appendJsonl } from "../hooks/lib/jsonl.js";
+import { resolveMeasurementCwd } from "../hooks/lib/measurement-cwd.js";
 import { logFileForDate } from "../hooks/lib/paths.js";
 import { readSessionState, updateSessionState, type VerifierRecord } from "../hooks/lib/session-state.js";
 import { readUntrackedBaseline } from "../hooks/lib/untracked-baseline-store.js";
@@ -105,25 +106,38 @@ export async function recordVerdict(argv: string[], cwd: string = process.cwd())
   }
   const at = new Date().toISOString();
 
-  // Fingerprint captured here, independently, against the real tree — never derived from
-  // anything the caller supplied. Ordering mirrors telemetry.ts: hash first, then the state read
-  // (for baselineHead), then the counts.
-  const diffHash = await captureDiffHash(cwd);
+  // State read first (for baselineHead and baselineCwd) — the CLI's own `cwd` argument (default
+  // `process.cwd()`) is exactly the vector that recorded the issue's 1202/7 repro: a verdict
+  // recorded from whatever directory the shell happened to be in. `cwd` now only serves as the
+  // legacy fallback inside `resolveMeasurementCwd` when the session predates the anchor.
   let baselineHead: string | null | undefined;
+  let baselineCwd: string | undefined;
   try {
-    baselineHead = (await readSessionState(args.session)).baselineHead;
+    const state = await readSessionState(args.session);
+    baselineHead = state.baselineHead;
+    baselineCwd = state.baselineCwd;
   } catch (err) {
     return fail(`session state unwritable: ${String(err)}`);
   }
-  // One store read, alongside the one `readSessionState` call above — matches telemetry.ts's
-  // fail-safe contract (a missing/corrupt sidecar reads as `null`, never throws).
+  // Resolved once and reused by both the fingerprint and the counts below — see
+  // measurement-cwd.ts's doc comment for why a dead anchor becomes `null` rather than falling back
+  // to the CLI's own cwd, which would silently reintroduce the bug this anchor exists to close.
+  const measurementCwd = await resolveMeasurementCwd(baselineCwd, cwd);
+
+  // Fingerprint captured here, independently, against the real (resolved) tree — never derived
+  // from anything the caller supplied. A dead anchor degrades to null exactly like an unhashable
+  // diff does (see captureDiffHash's own doc comment), never fingerprinting the CLI's own cwd.
+  const diffHash = measurementCwd === null ? null : await captureDiffHash(measurementCwd);
+  // One store read, alongside the state read above — matches telemetry.ts's fail-safe contract (a
+  // missing/corrupt sidecar reads as `null`, never throws).
   const untrackedBaseline = await readUntrackedBaseline(args.session);
-  const { changedLines, changedFiles } = await captureDiffCounts(
-    cwd,
-    config.verifyGate.ignorePatterns,
-    baselineHead,
-    untrackedBaseline,
-  );
+  // A dead anchor never reaches diffStat — same fail-closed reasoning as verify-gate.ts and
+  // telemetry.ts (diffStat returns `{0, 0}` for a non-repo cwd, which must not be handed back as
+  // "nothing changed").
+  const { changedLines, changedFiles } =
+    measurementCwd === null
+      ? { changedLines: null, changedFiles: null }
+      : await captureDiffCounts(measurementCwd, config.verifyGate.ignorePatterns, baselineHead, untrackedBaseline);
 
   const verifierRecord: VerifierRecord = {
     ...summary,

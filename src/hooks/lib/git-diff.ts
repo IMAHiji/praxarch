@@ -107,7 +107,10 @@ function isBadObjectError(err: unknown): boolean {
 // all). `git rev-parse --is-inside-work-tree` succeeds in any working tree, including one with an
 // unborn HEAD and zero commits, and fails (non-zero exit, "not a git repository" on stderr)
 // everywhere else — that boolean is the only thing this function reports.
-async function isGitRepo(cwd: string): Promise<boolean> {
+// Exported so measurement-cwd.ts (issue #23) can reuse the exact same positive check to decide
+// whether a live-but-non-repo anchor should still be trusted — see that module's doc comment for
+// why `diffStat`'s own `{0, 0}`-on-non-repo fallback is not safe to reuse for that decision.
+export async function isGitRepo(cwd: string): Promise<boolean> {
   try {
     await execFileAsync("git", ["rev-parse", "--is-inside-work-tree"], { cwd });
     return true;

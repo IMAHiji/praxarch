@@ -206,6 +206,25 @@ hooks that check the two rules most worth enforcing mechanically:
     reason, or a crash — is logged to the monthly JSONL (`event: "verifyGateFailOpen"`) and
     surfaced via `systemMessage`, and `praxarch report` totals them separately from delegation
     stats so a gate that's gone quiet doesn't look identical to one that's passing.
+  - **The measurement is anchored to the session's own checkout, not the hook's cwd (issue #23).**
+    Observed live: a session shell that `cd`'d into `.claude/worktrees/agent-*` had every Stop
+    measure that worktree's diff (1202 lines across 7 files) against a baseline pinned in the
+    primary checkout, for an actual 6-line fix. `session-init.ts` now records `state.baselineCwd`
+    from SessionStart's `input.cwd` (guarded identically to `baselineUntrackedCaptured`: only on
+    `source === "startup"`, never on resume/clear/compact, so a mid-flight session never gets its
+    anchor moved out from under it). `resolveMeasurementCwd` (`measurement-cwd.ts`) is the single
+    dispatch every measurement site resolves through before touching `diffStat`/`diffFingerprint`:
+    `verify-gate`'s waiver fingerprint, `diffStat`, and the block-path fingerprint; telemetry's
+    `captureDiffHash`/`captureDiffCounts`; `record-verdict`'s equivalents. An absent anchor (a
+    session that predates this field) falls back to the hook/CLI cwd exactly as before — legacy
+    sessions keep today's behavior. A recorded-but-now-missing anchor (a deleted worktree, a moved
+    checkout) resolves to `null`, which every caller treats as a measurement failure, never a
+    fallback to the hook cwd: `diffStat` returns `{0, 0}` (allow) for a cwd that isn't a git repo,
+    so quietly substituting the hook cwd there would hand back a trivially-empty diff instead of
+    the failure this actually is. In `verify-gate`, `null` drives `measurementFailed` and blocks
+    with a message naming the missing anchor path rather than the generic unmeasurable-diff text.
+    `loadConfig` deliberately keeps resolving from the hook cwd in every caller — which project's
+    settings apply is a property of the invocation, not of which tree is being measured.
   - **Known limit of the size-delta rule**: it detects *growth* (or a hash-unknown situation),
     not just any change. A same-size in-place rewrite after the verdict was recorded — the file
     count and line count both stay flat, only the content differs — passes as fresh, because its
@@ -326,6 +345,13 @@ a hook can't safely make.
 - **A `git pull` still invalidates a standing `PRAXARCH_VERIFY_WAIVED` waiver** — the waiver
   compares raw fingerprints, which are HEAD-sensitive by design, not size deltas. See the residual
   note under the `verify-gate` bullet above.
+- **A primary-checkout session's edits inside a worktree checkout aren't charged to it** — the
+  measurement anchor (issue #23) is the directory SessionStart captured baselines in, so a session
+  that only `cd`'s into `.claude/worktrees/agent-*` without having been launched there measures its
+  own checkout, not the worktree's. This is the deterministic version of the behavior those edits
+  already had whenever the shell happened to sit at the session's root before this change — a
+  worktree session is charged for its own work exactly as it always was, since it launches with
+  the worktree as its own `baselineCwd`.
 
 ### Fail-opens mutation testing found, not review (issue #16)
 

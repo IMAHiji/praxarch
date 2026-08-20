@@ -5,9 +5,13 @@ import { diffFingerprint, diffStat } from "./git-diff.js";
  * on a resumed-capable Agent call) and the `praxarch record-verdict` CLI (the explicit path for
  * verdicts that arrive outside a hookable event, e.g. a resumed agent's SendMessage reply).
  *
- * Moved out of telemetry.ts verbatim — see telemetry.ts for the ordering contract this must not
- * disturb (JSONL log before session state; diffHash captured before the state read, diffStat
- * after). Callers own their own call order; this module only owns what each individual step does.
+ * Moved out of telemetry.ts verbatim — see telemetry.ts (and subagent-stop.ts, which shares the
+ * same contract) for the ordering this must not disturb: the JSONL delegation log, where it
+ * exists, is written before session state is ever touched; the state read comes first among the
+ * measurement steps themselves, because `resolveMeasurementCwd` (issue #23) needs
+ * `state.baselineCwd` before either `captureDiffHash` or `captureDiffCounts` can run against the
+ * right tree — both now happen after the state read, not before it. Callers own their own call
+ * order; this module only owns what each individual step does.
  */
 
 export interface VerifierVerdictJson {

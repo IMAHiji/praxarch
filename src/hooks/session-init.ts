@@ -64,6 +64,17 @@ async function main(): Promise<void> {
     await writeUntrackedBaseline(input.session_id, baseline);
     state.baselineUntrackedCaptured = true;
   }
+  // Same laundering trap as the untracked-baseline guard above: gating on `source === "startup"`
+  // alone (dropping the `undefined` check) would move the anchor on every resume/clear/compact,
+  // measuring later diffs from wherever the shell happened to `cd` to at that resume rather than
+  // where the session's baselines were actually captured -- see baselineCwd's doc comment in
+  // session-state.ts and this issue's repro (a `cd` into a worktree got charged against the
+  // primary checkout's baseline). `undefined` (not `!= null`) is deliberate: baselineCwd, once
+  // set, is always a real string -- there is no "attempted and unusable" null state to guard
+  // against here, unlike baselineHead.
+  if (input.source === "startup" && state.baselineCwd === undefined) {
+    state.baselineCwd = input.cwd;
+  }
   await writeSessionState(state);
 
   const warnings: string[] = [];

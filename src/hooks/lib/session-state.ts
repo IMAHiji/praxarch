@@ -89,6 +89,21 @@ export interface SessionState {
    */
   baselineUntrackedCaptured?: boolean;
   /**
+   * cwd (SessionStart's `input.cwd`, stored verbatim) that every later measurement must return to
+   * -- `baselineHead` and the untracked snapshot above are captured from this same directory, so a
+   * hook or CLI invocation that later runs from a different cwd (e.g. a shell that `cd`'d into a
+   * worktree) must still measure this one, not wherever it happens to be sitting; see
+   * `resolveMeasurementCwd` in `lib/measurement-cwd.ts`, the single place every measurement site
+   * resolves against this field. Absent (key missing) means legacy: a session that started before
+   * this field existed, which must keep measuring from the hook/CLI cwd exactly as before -- an
+   * absent anchor is never "captured late" on a resume, the same laundering trap
+   * `baselineUntrackedCaptured` guards against (see that field's comment and
+   * `session-init.ts`'s guard). Present-but-unreachable (the directory no longer exists) is a
+   * distinct case from absent and must fail the measurement closed rather than falling back to the
+   * hook cwd -- silently falling back would resurrect exactly the bug this field exists to close.
+   */
+  baselineCwd?: string;
+  /**
    * Diff fingerprint at the moment a `PRAXARCH_VERIFY_WAIVED:` waiver was accepted. The gate
    * measures the whole session's diff against `baselineHead`, so without this a waived diff
    * re-blocks on every subsequent stop — including turns that changed nothing at all, since the
