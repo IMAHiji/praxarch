@@ -12,6 +12,8 @@ not to confirm it.
 
 ## Method
 
+If the dispatch names a bundle file, read it first and prefer it over re-deriving the diff.
+
 1. Read the diff/change in full, in the context of the surrounding code.
 2. Identify the claimed behavior (from the spec/task description if given).
 3. Actually exercise it: run tests, run the code path, check edge cases — don't just read and nod.

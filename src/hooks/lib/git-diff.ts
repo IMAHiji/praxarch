@@ -15,17 +15,26 @@ const execFileAsync = promisify(execFile);
 // status` call — status output is paths, not patch text, so hitting this ceiling is pathological,
 // and pathological means the fingerprint becomes unknown (`null`), never a hash silently computed
 // from a truncated listing.
-const MAX_GIT_BUFFER = 64 * 1024 * 1024;
+// Exported so verify-bundle.ts (src/cli/verify-bundle.ts) can size its own git diff/status
+// invocations identically instead of redeclaring its own, smaller ceiling.
+export const MAX_GIT_BUFFER = 64 * 1024 * 1024;
 
-// Both flags neutralize config-driven nondeterminism that would otherwise blank the diff we're
-// measuring: `diff.external` (or an inherited GIT_EXTERNAL_DIFF) can replace `git diff`'s output
-// with whatever the external driver prints — including nothing — while leaving --numstat
-// unaffected, and a textconv filter can rewrite content before it's diffed. Either one, left
-// unchecked, would collapse the fingerprint to a constant value and silently defeat the staleness
-// check this module exists to support. --numstat is unaffected by external diff drivers, but the
-// flags are harmless to pass alongside it too, so every `git diff` invocation in this file gets
-// them rather than special-casing which ones strictly need it.
-const NEUTRALIZE_DIFF_CONFIG = ["--no-ext-diff", "--no-textconv"];
+// All three flags neutralize config-driven nondeterminism that would otherwise blank or truncate
+// the diff we're measuring: `diff.external` (or an inherited GIT_EXTERNAL_DIFF) can replace `git
+// diff`'s output with whatever the external driver prints — including nothing — while leaving
+// --numstat unaffected, a textconv filter can rewrite content before it's diffed, and
+// `diff.relative` (when set true in the invoking repo's config) restricts diff/numstat/raw output
+// to paths under the current *cwd*, silently dropping every changed file outside it — not merely
+// a display change, since --numstat and --raw are filtered by it identically to the full diff.
+// Left unchecked, any of the three would collapse the fingerprint to a constant (or wrong, or
+// silently incomplete) value and silently defeat the staleness check this module exists to
+// support. --numstat is unaffected by external diff drivers and textconv, but the flags are
+// harmless to pass alongside it too, so every `git diff` invocation in this file gets them rather
+// than special-casing which ones strictly need it.
+// Exported for the same reason as MAX_GIT_BUFFER above — verify-bundle.ts's own git diff
+// invocations (numstat, raw, --stat, and full patch) must neutralize the same config-driven
+// nondeterminism.
+export const NEUTRALIZE_DIFF_CONFIG = ["--no-ext-diff", "--no-textconv", "--no-relative"];
 
 // git always prints "/" as the path separator in its own output (status, ls-files) regardless of
 // host OS — mirrors untracked.ts's identically-named, identically-reasoned constant. `fullPath`
@@ -49,7 +58,11 @@ export interface DiffCounts {
 // substring match: it isn't a segment name, and anchoring it the same way would silently stop
 // matching a minified file anywhere but at the very start of a path, breaking every default
 // pattern of that shape.
-function matchesIgnorePattern(path: string, pattern: string): boolean {
+// Exported so verify-bundle.ts can filter its own numstat/untracked-path listings with the exact
+// same segment-anchored matching rule, rather than reimplementing a subtly different one — see the
+// comment above for why an unanchored substring match on a "/"-suffixed pattern is a real bug, not
+// a style nit.
+export function matchesIgnorePattern(path: string, pattern: string): boolean {
   if (!pattern.endsWith("/")) return path.includes(pattern);
   let from = 0;
   for (;;) {

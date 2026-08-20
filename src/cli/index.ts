@@ -3,6 +3,7 @@ import { install } from "./install.js";
 import { doctor } from "./doctor.js";
 import { uninstall } from "./uninstall.js";
 import { recordVerdict } from "./record-verdict.js";
+import { verifyBundle } from "./verify-bundle.js";
 
 function printUsage(): void {
   process.stdout.write(
@@ -17,6 +18,11 @@ function printUsage(): void {
       "                      Record a verdict (verifier output on stdin or --file) into session",
       "                      state so verify-gate sees it — for verdicts delivered by a resumed",
       "                      agent, which no hook observes.",
+      "  verify-bundle [--base <ref>] [--out <path>] [--test-cmd <cmd>]",
+      "                      Write a single markdown artifact (base ref, diff --stat, full diff,",
+      "                      untracked-file contents, optional test output) for a verification",
+      "                      pass to read instead of exploring the repo. Read-only; prints the",
+      "                      output path.",
       "",
       "Options:",
       "  --yes    Skip the confirmation prompt (for scripted use)",
@@ -40,6 +46,9 @@ async function main(): Promise<void> {
       return;
     case "record-verdict":
       process.exitCode = await recordVerdict(rest);
+      return;
+    case "verify-bundle":
+      process.exitCode = await verifyBundle(rest);
       return;
     default:
       printUsage();
