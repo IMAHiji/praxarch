@@ -12,7 +12,7 @@ import {
   SKILLS_DIR,
   TEMPLATES_DIR,
 } from "./lib/paths.js";
-import { copyWithBackup, exists, isSymlink, linkResolves, realpathOrNull, resolvesIntoPraxarchRepo, sameContent, readJsonIfExists, readTextIfExists, writeJson, backupThenWriteJson, backupThenWriteText } from "./lib/fsops.js";
+import { copyWithBackup, exists, isJsonObject, isSymlink, linkResolves, realpathOrNull, resolvesIntoPraxarchRepo, sameContent, readJsonIfExists, readTextIfExists, writeJson, backupThenWriteJson, backupThenWriteText } from "./lib/fsops.js";
 import { mergeSettings, type SettingsFragment } from "./lib/settings-merge.js";
 import { upsertOrchestrationBlock } from "./lib/claude-md-merge.js";
 import { DEFAULT_CONFIG } from "../hooks/lib/config.js";
@@ -59,12 +59,62 @@ async function clearBrokenDirLink(dir: string): Promise<void> {
   if ((await isSymlink(dir)) && !(await linkResolves(dir))) await rm(dir, { force: true });
 }
 
+/**
+ * Reads settings.json, refusing outright on malformed JSON rather than treating it as absent.
+ * settings.json is the user's real, hand-editable config — silently treating a corrupt copy as
+ * "no prior settings" would let install proceed as if there were nothing there, clobbering a file
+ * that's still recoverable by hand. Shared by planSummary (the dry-run preview) and install
+ * (the apply) so the plan and the actual write can never disagree about this.
+ */
+async function readSettingsOrThrow(): Promise<Record<string, unknown>> {
+  const result = await readJsonIfExists<Record<string, unknown>>(SETTINGS_PATH);
+  if (result.status === "malformed") {
+    throw new Error(
+      `${SETTINGS_PATH} is not valid JSON — refusing to install over it, since that could clobber a ` +
+        `file you can still recover by hand. Fix or remove it, then rerun \`praxarch install\`.\n  ${result.error.message}`,
+    );
+  }
+  if (result.status === "ok" && !isJsonObject(result.value)) {
+    // Well-formed JSON that isn't an object (e.g. `null`, `[]`) — same "can't safely merge into
+    // this" situation as malformed, so refuse the same way rather than crashing on property access
+    // in mergeSettings.
+    throw new Error(
+      `${SETTINGS_PATH} does not contain a JSON object (got ${JSON.stringify(result.value)}) — refusing ` +
+        `to install over it, since that could clobber a file you can still recover by hand. Fix or remove ` +
+        "it, then rerun `praxarch install`.",
+    );
+  }
+  return result.status === "ok" ? result.value : {};
+}
+
+/**
+ * settings.fragment.json ships with the repo and should basically never be malformed, but if it
+ * is, that's a praxarch template bug, not a user file — refuse with a clear message rather than
+ * guessing at what hooks/statusLine to install.
+ */
+async function readFragmentOrThrow(): Promise<SettingsFragment> {
+  const fragmentPath = join(TEMPLATES_DIR, "settings.fragment.json");
+  const result = await readJsonIfExists<SettingsFragment>(fragmentPath);
+  if (result.status === "malformed") {
+    throw new Error(
+      `${fragmentPath} is not valid JSON — this is a praxarch template bug, not a user file: ${result.error.message}`,
+    );
+  }
+  if (result.status === "ok" && !isJsonObject(result.value)) {
+    throw new Error(
+      `${fragmentPath} does not contain a JSON object (got ${JSON.stringify(result.value)}) — this is a ` +
+        "praxarch template bug, not a user file.",
+    );
+  }
+  return result.status === "ok" ? result.value : {};
+}
+
 async function planSummary(): Promise<{ lines: string[]; settingsFragment: SettingsFragment }> {
   const lines: string[] = [];
 
-  const fragmentRaw = (await readJsonIfExists<SettingsFragment>(join(TEMPLATES_DIR, "settings.fragment.json"))) ?? {};
+  const fragmentRaw = await readFragmentOrThrow();
   const { $comment: _comment, ...settingsFragment } = fragmentRaw;
-  const existingSettings = (await readJsonIfExists<Record<string, unknown>>(SETTINGS_PATH)) ?? {};
+  const existingSettings = await readSettingsOrThrow();
   const { changes: settingsChanges } = mergeSettings(existingSettings, settingsFragment);
   lines.push(`~/.claude/settings.json (${SETTINGS_PATH}):`);
   lines.push(...settingsChanges.map((c) => `  - ${c}`));
@@ -165,7 +215,7 @@ export async function install(options: InstallOptions): Promise<void> {
     }
   }
 
-  const existingSettings = (await readJsonIfExists<Record<string, unknown>>(SETTINGS_PATH)) ?? {};
+  const existingSettings = await readSettingsOrThrow();
   const { merged } = mergeSettings(existingSettings, settingsFragment);
   await backupThenWriteJson(SETTINGS_PATH, merged);
 

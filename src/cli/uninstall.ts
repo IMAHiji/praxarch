@@ -2,7 +2,7 @@ import { rm } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { join } from "node:path";
 import { AGENTS_DIR, CLAUDE_MD_PATH, PRAXARCH_INSTALL_DIR, SETTINGS_PATH, SKILLS_DIR } from "./lib/paths.js";
-import { exists, isSymlink, resolvesIntoPraxarchRepo, realpathOrNull, readJsonIfExists, readTextIfExists, backupThenWriteJson, backupThenWriteText } from "./lib/fsops.js";
+import { exists, isJsonObject, isSymlink, resolvesIntoPraxarchRepo, realpathOrNull, readJsonIfExists, readTextIfExists, backupThenWriteJson, backupThenWriteText } from "./lib/fsops.js";
 
 /**
  * Removes something praxarch installed, without ever deleting into the repo itself.
@@ -92,8 +92,31 @@ export async function uninstall(options: UninstallOptions): Promise<void> {
     }
   }
 
-  const settings = await readJsonIfExists<Record<string, unknown>>(SETTINGS_PATH);
-  if (settings) {
+  const settingsResult = await readJsonIfExists<Record<string, unknown>>(SETTINGS_PATH);
+  // Absent settings.json: nothing to clean either way, so the existing no-op is correct as-is.
+  // Malformed (or well-formed JSON that isn't an object, e.g. `null`) is a different case —
+  // silently no-op-ing there would look like a clean uninstall while leaving praxarch's hook
+  // entries in place, so it gets a loud refusal instead (issue #18). Deliberate choice: warn and
+  // move on to the rest of uninstall, rather than aborting the whole command — the file the user
+  // actually wants gone (~/.claude/praxarch/) still gets removed below. settingsUncleaned tracks
+  // this so the final summary doesn't report a bare, misleading "uninstalled" success.
+  let settingsUncleaned = false;
+  if (settingsResult.status === "malformed") {
+    process.stdout.write(
+      `\n${SETTINGS_PATH} is not valid JSON — leaving it untouched. Uninstall cannot safely strip ` +
+        `praxarch's hook entries from a file it can't parse. Fix the JSON and rerun \`praxarch uninstall\`, ` +
+        `or edit it by hand.\n  ${settingsResult.error.message}\n`,
+    );
+    settingsUncleaned = true;
+  } else if (settingsResult.status === "ok" && !isJsonObject(settingsResult.value)) {
+    process.stdout.write(
+      `\n${SETTINGS_PATH} does not contain a JSON object (got ${JSON.stringify(settingsResult.value)}) — ` +
+        "leaving it untouched. Uninstall cannot safely strip praxarch's hook entries from it. Fix it by " +
+        "hand and rerun `praxarch uninstall`.\n",
+    );
+    settingsUncleaned = true;
+  } else if (settingsResult.status === "ok") {
+    const settings = settingsResult.value;
     const cleaned = { ...settings };
     cleaned["hooks"] = stripPraxarchHooks(cleaned["hooks"] as HooksMap | undefined);
     const statusLine = cleaned["statusLine"] as { command?: string } | undefined;
@@ -122,5 +145,13 @@ export async function uninstall(options: UninstallOptions): Promise<void> {
 
   await rm(PRAXARCH_INSTALL_DIR, { recursive: true, force: true });
 
-  process.stdout.write("praxarch uninstalled.\n");
+  if (settingsUncleaned) {
+    process.stdout.write(
+      "\npraxarch uninstall incomplete — settings.json still has praxarch's hook entries; " +
+        "see the warning above and clean it up by hand.\n",
+    );
+    process.exitCode = 1;
+  } else {
+    process.stdout.write("praxarch uninstalled.\n");
+  }
 }
