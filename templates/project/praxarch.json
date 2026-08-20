@@ -10,10 +10,11 @@
   },
 
   "routeGuard": {
-    "$comment": "strict:false turns hard denials into warnings. securityKeywords are ADDED to the built-in set that forces routing to security-executor. Keywords match whole words case-insensitively; end one with * to match a stem (e.g. \"tokeniz*\" matches tokenize/tokenizer/tokenization). knownRoles are ADDED to the built-in six roles and treated the same way: their model comes from agent frontmatter, so calls to them must omit `model` — list agents praxarch doesn't install here (e.g. orchestrate-pipeline roles) instead of passing `model` to satisfy the ad-hoc rule. reviewRoles are ADDED to the default [\"verifier\"]: read-only reviewers exempt from the security-keyword redirect (they legitimately mention auth/secrets when reviewing security code); a role usually belongs in BOTH knownRoles and reviewRoles.",
+    "$comment": "strict:false turns hard denials into warnings. securityKeywords are ADDED to the built-in set that forces routing to security-executor. Keywords match whole words case-insensitively; end one with * to match a stem (e.g. \"tokeniz*\" matches tokenize/tokenizer/tokenization). knownRoles are ADDED to the built-in six roles and treated the same way: their model comes from agent frontmatter, so calls to them must omit `model` — list agents praxarch doesn't install here (e.g. orchestrate-pipeline roles) instead of passing `model` to satisfy the ad-hoc rule. reviewRoles are ADDED to the default [\"verifier\"]: read-only reviewers exempt from the security-keyword redirect (they legitimately mention auth/secrets when reviewing security code); a role usually belongs in BOTH knownRoles and reviewRoles. softDenyRoles are ADDED to the default [\"executor\"]: roles for which a security-keyword match is a warning (allow + systemMessage) instead of a hard deny. reviewRoles bypasses the security-keyword check entirely and is checked first, so a role listed there is exempt regardless of softDenyRoles; a role that hits the security check but is in neither reviewRoles nor softDenyRoles still gets the hard deny, including roles added to knownRoles.",
     "strict": true,
     "securityKeywords": [],
     "knownRoles": [],
-    "reviewRoles": []
+    "reviewRoles": [],
+    "softDenyRoles": []
   }
 }

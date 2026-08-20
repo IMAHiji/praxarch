@@ -31,6 +31,18 @@
   auth/secrets code mentions the keywords, strict mode denies the dispatch. Config-listed
   review roles are now exempt alongside verifier; additive merge over the default
   `["verifier", "plan-reviewer"]`, so the canonical exemption can be extended but never dropped.
+- **route-guard: `routeGuard.softDenyRoles` downgrades the security-keyword deny to a warning for
+  `executor`.** `executor` shares `security-executor`'s model tier, so the hard deny on a matched
+  keyword was buying process overhead — reword-and-retry loops — rather than real classifier
+  avoidance; transcript mining (2026-08-19) found 40+ blocks tripped by benign mentions of
+  `credential`/`secret` in registry/npmrc prose, and a laundering workaround had already appeared
+  in one project's agent memory. Roles listed in `routeGuard.softDenyRoles` (default `["executor"]`,
+  additive — never removes `executor`) now get `permissionDecision: "allow"` with a systemMessage
+  naming the matched keyword and suggesting `security-executor`, instead of a deny — but only when
+  nothing else in route-guard's rule chain would deny the delegation anyway (explicit-model-override
+  on a known role, or an ad-hoc call with no model, still deny outright and the warning is dropped
+  in that case). Everything else — `mech-executor`, `scout`/`Explore`/`implementer`, ad-hoc
+  dispatches — keeps the hard deny.
 
 ### Fixed
 
