@@ -98,9 +98,12 @@ export interface SessionState {
    * this field existed, which must keep measuring from the hook/CLI cwd exactly as before -- an
    * absent anchor is never "captured late" on a resume, the same laundering trap
    * `baselineUntrackedCaptured` guards against (see that field's comment and
-   * `session-init.ts`'s guard). Present-but-unreachable (the directory no longer exists) is a
-   * distinct case from absent and must fail the measurement closed rather than falling back to the
-   * hook cwd -- silently falling back would resurrect exactly the bug this field exists to close.
+   * `session-init.ts`'s guard). Present-but-unusable -- either the directory no longer exists, or
+   * it exists but isn't a git repo while the hook cwd is -- is a distinct case from absent and must
+   * fail the measurement closed rather than falling back to the hook cwd -- silently falling back
+   * would resurrect exactly the bug this field exists to close. See `resolveMeasurementCwd` in
+   * `lib/measurement-cwd.ts` for the authoritative resolution rules, including the one case where a
+   * non-repo anchor is still returned rather than failing closed.
    */
   baselineCwd?: string;
   /**

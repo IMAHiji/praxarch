@@ -18,6 +18,7 @@ const execFileAsync = promisify(execFile);
 
 // Lowercase "explore" — the template/installed file is explore.md (the agent's *name* is
 // "Explore", from frontmatter). Checking "Explore.md" only passed on case-insensitive filesystems.
+// Keep in sync with ROLE_FILES in src/hooks/session-init.ts.
 const ROLE_FILES = ["scout", "explore", "mech-executor", "executor", "verifier", "checker", "security-executor", "planner", "implementer", "plan-reviewer"];
 const SKILL_NAMES = ["praxarch-report", "fan-out", "orchestrate"];
 
