@@ -5,8 +5,8 @@ import { readJsonl } from "../hooks/lib/jsonl.js";
 import { agentsDir, logDir } from "../hooks/lib/paths.js";
 
 /**
- * praxarch report: role distribution, verification pass rate, token spend, and role→model
- * bindings from the delegation JSONL logs plus the installed agent frontmatter.
+ * praxarch report: role distribution, verification pass rate, token spend, model provenance, and
+ * role→model bindings from the delegation JSONL logs plus the installed agent frontmatter.
  *
  * Deliberately does NOT claim a "delegation-vs-local ratio" or "escalation frequency" — praxarch's
  * hooks only observe Agent tool calls, not the main session's own direct work or the reasoning
@@ -32,6 +32,10 @@ interface DelegationLogRecord {
   batchId: string | null;
   verdict: "CONFIRMED" | "REFUTED" | null;
   criticalOrMajorCount: number | null;
+  // Present only on rows written by `praxarch record-verdict` (value "record-verdict"), absent on
+  // rows telemetry.ts writes off an observed Agent tool call. See renderModelProvenance below for
+  // why this distinction matters for that section.
+  via?: string;
 }
 
 // Event rows (currently just verify-gate fail-opens) share the same monthly JSONL but aren't
@@ -304,6 +308,59 @@ function renderRoleBindings(data: BindingsData, delegations: DelegationLogRecord
   return lines;
 }
 
+// Per role: dispatch count, explicit-vs-inherited split, and the distinct resolvedModel values
+// observed — the exact join issue #7 was filed off a hand-rolled, incorrect version of (540
+// "inherited" rows and 163 "general-purpose" rows read as if one were a subset of the other, when
+// the correct join required a fresh jq/python session both times it was needed). This makes that
+// join a permanent one-command answer instead of a repeatable data-analysis exercise: "do any
+// general-purpose rows inherit?" is answerable straight from this section's explicit/inherited
+// split and resolvedModel list for that role.
+function renderModelProvenance(delegations: DelegationLogRecord[]): string[] {
+  interface RoleProvenance {
+    role: string;
+    total: number;
+    explicit: number;
+    inherited: number;
+    resolvedModels: Set<string>;
+  }
+  // Two writers append to the same monthly JSONL: telemetry.ts logs a real dispatch off an
+  // observed Agent tool call (model is the actual bound/inherited value), while `praxarch
+  // record-verdict` (record-verdict.ts) logs a verdict-record row with model:"n/a" and
+  // via:"record-verdict" for a verdict that arrived outside the normal Stop-hook path — it never
+  // dispatched anything. Counting the latter here would inflate dispatch totals and misreport
+  // "n/a" delegations as "explicit", so this section excludes them entirely (they're not part of
+  // the dispatch/model-provenance question this section answers).
+  const byRole = new Map<string, RoleProvenance>();
+  for (const r of delegations) {
+    if (r.via === "record-verdict") continue;
+    let entry = byRole.get(r.role);
+    if (!entry) {
+      entry = { role: r.role, total: 0, explicit: 0, inherited: 0, resolvedModels: new Set() };
+      byRole.set(r.role, entry);
+    }
+    entry.total += 1;
+    // `model` is never absent on a real row — telemetry.ts always writes `model ?? "inherited"` —
+    // so "explicit" here means anything other than the literal sentinel string "inherited", not a
+    // presence check.
+    if (r.model === "inherited") entry.inherited += 1;
+    else entry.explicit += 1;
+    if (typeof r.resolvedModel === "string" && r.resolvedModel.length > 0) entry.resolvedModels.add(r.resolvedModel);
+  }
+
+  const lines: string[] = [];
+  lines.push("Model provenance (per role: dispatch count, explicit-vs-inherited split, distinct resolvedModel values):");
+  if (byRole.size === 0) {
+    lines.push("  no delegations in this window");
+    return lines;
+  }
+  const sorted = [...byRole.values()].sort((a, b) => b.total - a.total);
+  for (const p of sorted) {
+    const models = p.resolvedModels.size > 0 ? [...p.resolvedModels].sort().join(", ") : "none observed";
+    lines.push(`  ${p.role}: ${p.total} dispatch(es), ${p.explicit} explicit / ${p.inherited} inherited, resolvedModel: ${models}`);
+  }
+  return lines;
+}
+
 function render(records: LogRecord[]): string {
   const delegations = records.filter((r): r is DelegationLogRecord => !isEventRecord(r));
   const failOpens = records.filter(isEventRecord).filter((r) => r.event === "verifyGateFailOpen");
@@ -360,6 +417,9 @@ function render(records: LogRecord[]): string {
 
   lines.push("");
   lines.push(...renderTokenSpend(delegations));
+
+  lines.push("");
+  lines.push(...renderModelProvenance(delegations));
 
   return lines.join("\n");
 }

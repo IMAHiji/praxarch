@@ -203,9 +203,24 @@ hooks that check the two rules most worth enforcing mechanically:
     `"loop-guard-cycle"` for the per-cycle ceiling) — a stuck session (same diff, repeatedly
     unverified) and a churning one (diff keeps moving, never gets verified either) are different
     failure modes worth telling apart when reading the log. Every fail-open — either loop-guard
-    reason, or a crash — is logged to the monthly JSONL (`event: "verifyGateFailOpen"`) and
-    surfaced via `systemMessage`, and `praxarch report` totals them separately from delegation
-    stats so a gate that's gone quiet doesn't look identical to one that's passing.
+    reason, or a crash — is logged to the monthly JSONL (`event: "verifyGateFailOpen"`, `reason:
+    "error"` for the crash case) and surfaced via `systemMessage`, and `praxarch report` totals
+    them separately from delegation stats so a gate that's gone quiet doesn't look identical to
+    one that's passing.
+
+    **`route-guard`'s crash logging uses a distinct event name (issue #24), deliberately.**
+    route-guard also fails open on its own internal errors, and also appends a JSONL row for it —
+    but as `event: "guard-crash"`, not `verifyGateFailOpen`. The two hooks are not sharing one
+    "hook crashed" event: `verifyGateFailOpen` is verify-gate's schema (loop-guard,
+    loop-guard-cycle, and its own crash case all share it, distinguished by `reason`), and
+    `guard-crash` is route-guard's own event for the same "crashed and failed open" shape.
+    Unifying them under one event name would mean either route-guard's non-crash reasons don't
+    exist (there are none, so this would work today) or verify-gate's `reason` field gets bolted
+    onto an event it doesn't otherwise use — and either way, it would rewrite the meaning of
+    `verifyGateFailOpen` rows already on disk, which issue #24's guardrail (no schema changes to
+    existing rows) forbids. An auditor wants two separate queries, not one: verify-gate's crashes
+    are `event=="verifyGateFailOpen" && reason=="error"`; route-guard's crashes are
+    `event=="guard-crash"`.
   - **The measurement is anchored to the session's own checkout, not the hook's cwd (issue #23).**
     Observed live: a session shell that `cd`'d into `.claude/worktrees/agent-*` had every Stop
     measure that worktree's diff (1202 lines across 7 files) against a baseline pinned in the

@@ -356,6 +356,16 @@ main().catch(async (err: unknown) => {
   // A verify-gate crash must never trap the session in an unstoppable loop — fail open. Nothing
   // in this handler may throw: stderr isn't shown to the user, so the systemMessage is what
   // actually surfaces this, and the log line is best-effort on top of that.
+  //
+  // Deliberately keeps event:"verifyGateFailOpen" here rather than adopting route-guard's separate
+  // "guard-crash" event name (route-guard.ts:212) — renaming would break the existing event schema
+  // and report's fail-open counter, and issue #24's guardrail forbids schema changes to existing
+  // rows. So the two hooks now use different event names for the same "hook crashed and failed
+  // open" shape: "guard-crash" is route-guard-only, "verifyGateFailOpen" (reason:"error" on this
+  // path) is verify-gate's crash case specifically (loop-guard/loop-guard-cycle are its other,
+  // non-crash reasons — see logFailOpen above). An auditor wanting verify-gate's crash-only rows
+  // should query `event=="verifyGateFailOpen" && reason=="error"`; route-guard's crashes are a
+  // separate `event=="guard-crash"` query. See docs/design.md's JSONL schema section for both.
   const detail = String(err);
   process.stderr.write(`praxarch verify-gate error (failing open): ${detail}\n`);
   try {

@@ -13,6 +13,8 @@ import {
   TEMPLATES_DIR,
 } from "./lib/paths.js";
 import { exists, isJsonObject, readJsonIfExists, readTextIfExists } from "./lib/fsops.js";
+import { readJsonl } from "../hooks/lib/jsonl.js";
+import { logDir } from "../hooks/lib/paths.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -262,6 +264,191 @@ async function checkBuildRef(): Promise<Check> {
   };
 }
 
+// --- Inherited-model audit (issue #24) ----------------------------------------------------------
+// #7's postmortem: route-guard enforces the "known role must not pass an explicit model" rule only
+// at PreToolUse, before a model is resolved. Whether a given `model:"inherited"` dispatch actually
+// landed on its role's bound tier is a question only telemetry (which records resolvedModel) and
+// the installed agent frontmatter (which records the binding) can answer together, after the fact.
+// Nothing compared the two before this check existed.
+
+// A week is long enough to catch a stale/mid-window binding change (the issue explicitly says
+// that's fine to report as-is, not something to suppress) without doctor re-reading a whole
+// history's worth of monthly JSONL files on every run — doctor is meant to be a quick health
+// check, not a report.
+const INHERITED_MODEL_AUDIT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+interface DelegationLogRow {
+  at: string;
+  role?: string;
+  model?: string;
+  resolvedModel?: string | null;
+  event?: string;
+}
+
+interface DoctorAgentFrontmatter {
+  name?: string;
+  model?: string;
+}
+
+// Deliberately duplicated from report.ts's parseFrontmatter rather than shared: both are a few
+// lines, and doctor/report read from different directory-resolution env vars (AGENTS_DIR here is
+// CLAUDE_HOME-based/PRAXARCH_TARGET_CLAUDE_HOME, report's agentsDir() is PRAXARCH_AGENTS_DIR-based)
+// — collapsing them into one shared helper would either force one on the other's env var or add an
+// indirection layer neither file needs for a parser this small.
+function parseDoctorFrontmatter(content: string): DoctorAgentFrontmatter | null {
+  const lines = content.split("\n");
+  if (lines[0]?.trim() !== "---") return null;
+  let end = -1;
+  for (let i = 1; i < lines.length; i += 1) {
+    if (lines[i]?.trim() === "---") {
+      end = i;
+      break;
+    }
+  }
+  if (end === -1) return null;
+
+  const result: DoctorAgentFrontmatter = {};
+  for (const line of lines.slice(1, end)) {
+    const match = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(line);
+    if (!match) continue;
+    const [, key, rawValue] = match;
+    const value = (rawValue ?? "").trim().replace(/^["']|["']$/g, "");
+    if (key === "name") result.name = value;
+    else if (key === "model") result.model = value;
+  }
+  return result;
+}
+
+// `undefined` in the returned map (via `.has()` returning false) means "no agent file names this
+// role, or its frontmatter didn't parse" — deliberately distinct from a present key whose value is
+// `null` ("this role's frontmatter has no model: key, i.e. it's designed to inherit"). The audit
+// below warns on the former (nothing to check the binding against) and treats the latter as
+// nothing-to-disagree-with (there's no bound tier for an observed model to diverge from).
+async function loadDoctorAgentBindings(): Promise<Map<string, string | null>> {
+  const bindings = new Map<string, string | null>();
+  let files: string[];
+  try {
+    files = (await readdir(AGENTS_DIR)).filter((f) => f.endsWith(".md"));
+  } catch {
+    return bindings;
+  }
+  for (const file of files) {
+    let content: string;
+    try {
+      content = await readFile(join(AGENTS_DIR, file), "utf8");
+    } catch {
+      continue;
+    }
+    const parsed = parseDoctorFrontmatter(content);
+    if (!parsed?.name) continue;
+    bindings.set(parsed.name, parsed.model ?? null);
+  }
+  return bindings;
+}
+
+// Same substring-containment reasoning as report.ts's modelAgrees: a bound tier name ("opus") is
+// never string-equal to an observed API model id ("claude-opus-4-8"), so agreement means the bound
+// tier name appears in the observed id.
+function doctorModelAgrees(bound: string, observed: string): boolean {
+  return observed.toLowerCase().includes(bound.toLowerCase());
+}
+
+async function checkInheritedModelAudit(): Promise<Check[]> {
+  let files: string[];
+  try {
+    files = (await readdir(logDir())).filter((f) => f.endsWith(".jsonl"));
+  } catch {
+    // No logs yet (fresh install, or PRAXARCH_HOME not yet used) — nothing to audit, and that's
+    // not itself a health problem.
+    return [{ ok: true, message: "inherited-model audit: no telemetry logs to audit yet" }];
+  }
+
+  const cutoff = Date.now() - INHERITED_MODEL_AUDIT_WINDOW_MS;
+  // Log filenames are YYYY-MM.jsonl (one file per calendar month, see hooks/lib/paths.ts). A
+  // 7-day window can straddle a month boundary but never spans more than two calendar months, so
+  // any file whose YYYY-MM prefix is older than the cutoff's month cannot contain an in-window
+  // row — skip parsing it rather than reading (and discarding) a whole history's worth of JSONL.
+  const cutoffMonthPrefix = new Date(cutoff).toISOString().slice(0, 7);
+  const candidateFiles = files.filter((f) => f.slice(0, 7) >= cutoffMonthPrefix);
+  const rows: DelegationLogRow[] = [];
+  for (const file of candidateFiles.sort()) {
+    rows.push(...(await readJsonl<DelegationLogRow>(join(logDir(), file))));
+  }
+
+  // Event rows (verifyGateFailOpen, guard-crash) carry `event` instead of `role`/`model` — must
+  // not be misread as a delegation with role "undefined". Only `model:"inherited"` rows with a
+  // real resolvedModel are auditable at all: a null/absent resolvedModel means the dispatch never
+  // resolved (crashed, or predates token/model capture), so there's nothing to compare.
+  const recent = rows.filter(
+    (r): r is DelegationLogRow & { role: string; resolvedModel: string } =>
+      r.event === undefined &&
+      r.model === "inherited" &&
+      typeof r.role === "string" &&
+      typeof r.resolvedModel === "string" &&
+      r.resolvedModel.length > 0 &&
+      !Number.isNaN(Date.parse(r.at)) &&
+      Date.parse(r.at) >= cutoff,
+  );
+
+  if (recent.length === 0) {
+    return [{ ok: true, message: "inherited-model audit: no recent inherited-model dispatches to audit" }];
+  }
+
+  // observedByRole tracks the *distinct* resolvedModel values per role (for the divergence check
+  // below); rowCountByRole tracks how many dispatch rows were actually observed per role. These
+  // are not interchangeable — a role can have 6 rows that all resolved to the same model (1
+  // distinct value) or 6 rows split across 2 models (2 distinct values). Messages that report "how
+  // many dispatches" must use rowCountByRole, not observed.size, or they undercount whenever
+  // multiple rows share a resolvedModel.
+  const observedByRole = new Map<string, Set<string>>();
+  const rowCountByRole = new Map<string, number>();
+  for (const r of recent) {
+    if (!observedByRole.has(r.role)) observedByRole.set(r.role, new Set());
+    observedByRole.get(r.role)?.add(r.resolvedModel);
+    rowCountByRole.set(r.role, (rowCountByRole.get(r.role) ?? 0) + 1);
+  }
+
+  const bindings = await loadDoctorAgentBindings();
+  const checks: Check[] = [];
+  for (const [role, observed] of [...observedByRole.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    if (!bindings.has(role)) {
+      checks.push({
+        ok: false,
+        message:
+          `inherited-model audit: role "${role}" has ${rowCountByRole.get(role) ?? 0} recent inherited ` +
+          `dispatch(es) but no installed agent file names it (or its frontmatter is unparsable) — its ` +
+          "binding can't be verified.",
+      });
+      continue;
+    }
+    // `.has()` above guarantees a real Map entry, but TS's control-flow analysis doesn't carry
+    // that guarantee through a separate `.get()` call, so `.get()` still types as
+    // `string | null | undefined` — the `?? null` here is narrowing for the type checker, not a
+    // real fallback (the `undefined` branch is unreachable given the `.has()` guard above).
+    const bound = bindings.get(role) ?? null;
+    // No model: key means this role is designed to inherit — nothing bound to disagree with.
+    if (bound === null) continue;
+    const diverging = [...observed].filter((m) => !doctorModelAgrees(bound, m)).sort();
+    if (diverging.length > 0) {
+      checks.push({
+        ok: false,
+        message:
+          `inherited-model audit: role "${role}" is bound to "${bound}" but recent dispatches ` +
+          `resolved to ${diverging.join(", ")} — binding may have changed mid-window, or route-guard ` +
+          "was bypassed.",
+      });
+    }
+  }
+
+  if (checks.length === 0) {
+    checks.push({
+      ok: true,
+      message: `inherited-model audit: ${recent.length} recent inherited dispatch(es) across ${observedByRole.size} role(s) all match their bindings`,
+    });
+  }
+  return checks;
+}
+
 function checkEnv(): Check {
   return {
     ok: !process.env["CLAUDE_CODE_SUBAGENT_MODEL"],
@@ -278,6 +465,7 @@ export async function doctor(): Promise<void> {
     ...(await checkDistTree()),
     await checkVersion(),
     await checkBuildRef(),
+    ...(await checkInheritedModelAudit()),
     checkEnv(),
   ];
 

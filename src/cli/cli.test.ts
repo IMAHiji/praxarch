@@ -1007,3 +1007,149 @@ test("uninstall removes agents, skills, and the praxarch dir", async () => {
     await teardownFixture(fixture);
   }
 });
+
+// --- Inherited-model audit (issue #24) -----------------------------------------------------------
+
+function monthlyLogPath(fixture: Fixture): string {
+  const now = new Date();
+  return join(
+    fixture.claudeHome,
+    "praxarch",
+    "logs",
+    `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}.jsonl`,
+  );
+}
+
+async function writeAgentFile(fixture: Fixture, filename: string, name: string, model?: string): Promise<void> {
+  await mkdir(join(fixture.claudeHome, "agents"), { recursive: true });
+  const frontmatter = model ? `---\nname: ${name}\nmodel: ${model}\n---\n\nbody\n` : `---\nname: ${name}\n---\n\nbody\n`;
+  await writeFile(join(fixture.claudeHome, "agents", filename), frontmatter);
+}
+
+async function writeLogRows(fixture: Fixture, rows: Record<string, unknown>[]): Promise<void> {
+  const path = monthlyLogPath(fixture);
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
+}
+
+test("inherited-model audit: a matching fixture (resolvedModel agrees with the role binding) stays quiet", async () => {
+  const fixture = await setupFixture();
+  try {
+    runCli(fixture, ["install", "--yes"]);
+    await writeAgentFile(fixture, "verifier.md", "verifier", "opus");
+    await writeLogRows(fixture, [
+      { at: new Date().toISOString(), sessionId: "s1", role: "verifier", model: "inherited", resolvedModel: "claude-opus-4-8", batchId: null, verdict: "CONFIRMED", criticalOrMajorCount: 0 },
+    ]);
+
+    const { stdout, status } = runCli(fixture, ["doctor"]);
+    assert.equal(status, 0, stdout);
+    assert.match(stdout, /inherited-model audit: 1 recent inherited dispatch\(es\) across 1 role\(s\) all match their bindings/);
+    assert.doesNotMatch(stdout, /bound to "opus" but recent dispatches resolved/);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("inherited-model audit: a mismatched resolvedModel warns naming the role, the binding, and the observed model", async () => {
+  const fixture = await setupFixture();
+  try {
+    runCli(fixture, ["install", "--yes"]);
+    await writeAgentFile(fixture, "verifier.md", "verifier", "opus");
+    await writeLogRows(fixture, [
+      { at: new Date().toISOString(), sessionId: "s1", role: "verifier", model: "inherited", resolvedModel: "claude-sonnet-5", batchId: null, verdict: "CONFIRMED", criticalOrMajorCount: 0 },
+    ]);
+
+    const { stdout, status } = runCli(fixture, ["doctor"]);
+    assert.notEqual(status, 0);
+    assert.match(
+      stdout,
+      /inherited-model audit: role "verifier" is bound to "opus" but recent dispatches resolved to claude-sonnet-5/,
+    );
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("inherited-model audit: a role with no installed agent file warns as missing/unparsable, not silently skipped", async () => {
+  const fixture = await setupFixture();
+  try {
+    runCli(fixture, ["install", "--yes"]);
+    await writeLogRows(fixture, [
+      { at: new Date().toISOString(), sessionId: "s1", role: "ghost-role", model: "inherited", resolvedModel: "claude-opus-4-8", batchId: null, verdict: null, criticalOrMajorCount: null },
+    ]);
+
+    const { stdout, status } = runCli(fixture, ["doctor"]);
+    assert.notEqual(status, 0);
+    assert.match(
+      stdout,
+      /inherited-model audit: role "ghost-role" has 1 recent inherited dispatch\(es\) but no installed agent file names it/,
+    );
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("inherited-model audit: an unknown role's dispatch count reflects rows, not distinct resolvedModel values", async () => {
+  const fixture = await setupFixture();
+  try {
+    runCli(fixture, ["install", "--yes"]);
+    // 6 rows for an unknown role, split across only 2 distinct resolvedModel values — the
+    // distinct-model Set has size 2, but the message must report the actual row count (6), not
+    // the Set size. A single-row fixture can't distinguish these (both are 1).
+    await writeLogRows(fixture, [
+      { at: new Date().toISOString(), sessionId: "s1", role: "ghost-role", model: "inherited", resolvedModel: "claude-opus-4-8", batchId: null, verdict: null, criticalOrMajorCount: null },
+      { at: new Date().toISOString(), sessionId: "s2", role: "ghost-role", model: "inherited", resolvedModel: "claude-opus-4-8", batchId: null, verdict: null, criticalOrMajorCount: null },
+      { at: new Date().toISOString(), sessionId: "s3", role: "ghost-role", model: "inherited", resolvedModel: "claude-opus-4-8", batchId: null, verdict: null, criticalOrMajorCount: null },
+      { at: new Date().toISOString(), sessionId: "s4", role: "ghost-role", model: "inherited", resolvedModel: "claude-sonnet-5", batchId: null, verdict: null, criticalOrMajorCount: null },
+      { at: new Date().toISOString(), sessionId: "s5", role: "ghost-role", model: "inherited", resolvedModel: "claude-sonnet-5", batchId: null, verdict: null, criticalOrMajorCount: null },
+      { at: new Date().toISOString(), sessionId: "s6", role: "ghost-role", model: "inherited", resolvedModel: "claude-sonnet-5", batchId: null, verdict: null, criticalOrMajorCount: null },
+    ]);
+
+    const { stdout, status } = runCli(fixture, ["doctor"]);
+    assert.notEqual(status, 0);
+    assert.match(
+      stdout,
+      /inherited-model audit: role "ghost-role" has 6 recent inherited dispatch\(es\) but no installed agent file names it/,
+    );
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("inherited-model audit: rows outside the recent window are ignored", async () => {
+  const fixture = await setupFixture();
+  try {
+    runCli(fixture, ["install", "--yes"]);
+    await writeAgentFile(fixture, "verifier.md", "verifier", "opus");
+    const stale = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    await writeLogRows(fixture, [
+      { at: stale, sessionId: "s1", role: "verifier", model: "inherited", resolvedModel: "claude-sonnet-5", batchId: null, verdict: null, criticalOrMajorCount: null },
+    ]);
+
+    const { stdout, status } = runCli(fixture, ["doctor"]);
+    assert.equal(status, 0, stdout);
+    assert.match(stdout, /inherited-model audit: no recent inherited-model dispatches to audit/);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("inherited-model audit: a role designed to inherit (no model: key) has nothing to disagree with", async () => {
+  const fixture = await setupFixture();
+  try {
+    runCli(fixture, ["install", "--yes"]);
+    // "no-binding-role" is a synthetic fixture role, not a real installed agent — real Explore
+    // (templates/agents/explore.md) declares model: haiku, so using "Explore" here would
+    // misleadingly imply a real agent has no binding.
+    await writeAgentFile(fixture, "no-binding-role.md", "no-binding-role");
+    await writeLogRows(fixture, [
+      { at: new Date().toISOString(), sessionId: "s1", role: "no-binding-role", model: "inherited", resolvedModel: "claude-opus-4-8", batchId: null, verdict: null, criticalOrMajorCount: null },
+    ]);
+
+    const { stdout, status } = runCli(fixture, ["doctor"]);
+    assert.equal(status, 0, stdout);
+    assert.doesNotMatch(stdout, /role "no-binding-role"/);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});

@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import { loadConfig } from "./lib/config.js";
+import { appendJsonl } from "./lib/jsonl.js";
+import { logFileForDate } from "./lib/paths.js";
 import { emit, readHookInput, type PreToolUseInput, type PreToolUseOutput } from "./lib/hook-io.js";
 
 /**
@@ -82,8 +84,16 @@ function decide(strict: boolean, reason: string, configWarnings: string[] = []):
   };
 }
 
+// Set as soon as the hook input is parsed, so the crash handler at the bottom of this file can
+// still attribute its guard-crash log row to a session even though the exception it's handling
+// may have happened well past main()'s own scope (e.g. inside loadConfig). Stays null when the
+// crash happens before input parses at all (malformed stdin JSON) — better an unattributed row
+// than none.
+let sessionIdForCrashLog: string | null = null;
+
 async function main(): Promise<void> {
   const input = await readHookInput<PreToolUseInput>();
+  sessionIdForCrashLog = input.session_id;
 
   if (input.tool_name !== "Agent") {
     emit(allow());
@@ -186,8 +196,25 @@ async function main(): Promise<void> {
   emit(allow(warnings));
 }
 
-main().catch((err: unknown) => {
-  // A route-guard crash must never block the session — fail open with a visible warning.
-  process.stderr.write(`praxarch route-guard error (failing open): ${String(err)}\n`);
+main().catch(async (err: unknown) => {
+  // A route-guard crash must never block the session — fail open with a visible warning. Before
+  // #24, this crash was permanently unfalsifiable after the fact: the catch allowed and wrote
+  // only a stderr line no one sees (postmortem for issue #7's unresolved "did the guard crash and
+  // fail open?" hypothesis). The guard-crash row below closes that gap. It is itself try-wrapped —
+  // a logging failure must not turn fail-open into fail-closed, and must not mask the original
+  // error, so failure here is swallowed and the fail-open allow still ships.
+  const detail = String(err);
+  process.stderr.write(`praxarch route-guard error (failing open): ${detail}\n`);
+  try {
+    await appendJsonl(logFileForDate(), {
+      at: new Date().toISOString(),
+      sessionId: sessionIdForCrashLog,
+      event: "guard-crash",
+      hook: "route-guard",
+      error: detail,
+    });
+  } catch {
+    // Best-effort — a logging failure must not compound the original crash or block the session.
+  }
   emit(allow());
 });
