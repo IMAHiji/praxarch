@@ -9,6 +9,13 @@ export function praxarchHome(): string {
   return process.env["PRAXARCH_HOME"] ?? join(homedir(), ".claude", "praxarch");
 }
 
+// Sibling of praxarchHome(), not nested under it — agent definitions live at ~/.claude/agents,
+// outside praxarch's own ~/.claude/praxarch tree. PRAXARCH_AGENTS_DIR mirrors the PRAXARCH_HOME
+// override mechanism above so tests can point this at a fixture directory.
+export function agentsDir(): string {
+  return process.env["PRAXARCH_AGENTS_DIR"] ?? join(homedir(), ".claude", "agents");
+}
+
 export function logDir(): string {
   return join(praxarchHome(), "logs");
 }

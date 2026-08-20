@@ -1,15 +1,22 @@
 #!/usr/bin/env node
-import { readdir } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { readJsonl } from "../hooks/lib/jsonl.js";
-import { logDir } from "../hooks/lib/paths.js";
+import { agentsDir, logDir } from "../hooks/lib/paths.js";
 
 /**
- * praxarch report: role distribution and verification pass rate from the delegation JSONL logs.
+ * praxarch report: role distribution, verification pass rate, token spend, and role→model
+ * bindings from the delegation JSONL logs plus the installed agent frontmatter.
  *
  * Deliberately does NOT claim a "delegation-vs-local ratio" or "escalation frequency" — praxarch's
  * hooks only observe Agent tool calls, not the main session's own direct work or the reasoning
  * behind a role choice, so those numbers can't be computed honestly from what's logged. If that
  * instrumentation gets added later, extend the schema rather than estimating here.
+ *
+ * Token spend and pricing: this reports raw token counts only, straight from what telemetry.ts
+ * already logs (tool_response's resolvedModel/totalTokens/totalDurationMs). No dollar conversion,
+ * no extrapolation for legacy rows that predate token capture — those are counted separately as
+ * "unmeasured" rather than estimated.
  */
 
 interface DelegationLogRecord {
@@ -17,6 +24,11 @@ interface DelegationLogRecord {
   sessionId: string;
   role: string;
   model: string;
+  // Optional: absent on rows logged before token capture existed. A present-but-invalid value
+  // (wrong type, negative, NaN) is treated the same as absent — see isMeasuredTokens below.
+  resolvedModel?: string | null;
+  totalTokens?: number | null;
+  durationMs?: number | null;
   batchId: string | null;
   verdict: "CONFIRMED" | "REFUTED" | null;
   criticalOrMajorCount: number | null;
@@ -37,6 +49,29 @@ type LogRecord = DelegationLogRecord | EventLogRecord;
 
 function isEventRecord(record: LogRecord): record is EventLogRecord {
   return "event" in record && typeof (record as EventLogRecord).event === "string";
+}
+
+// A row counts as "measured" only when both totalTokens is a real non-negative finite number and
+// resolvedModel is a non-empty string — the token section groups by (role, resolvedModel), so a
+// row missing either can't be placed in a group honestly. Everything else (legacy rows that
+// predate token capture, and malformed rows — wrong type, negative, NaN) folds into the same
+// unmeasured bucket; decision was not to invent a second bucket for "malformed" vs "legacy".
+// Note: a raw `NaN` literal in a JSONL row is invalid JSON, so readJsonl (see jsonl.ts) drops that
+// line before it ever reaches this check — the Number.isFinite guard here is unreachable for that
+// exact case from real JSONL input. Left in place anyway: it's still correct defense for numeric
+// values that parse fine as JSON but are non-finite for other reasons, and acceptance criterion 5
+// is satisfied at the JSON-parse layer rather than here.
+function isMeasuredTokens(record: DelegationLogRecord): record is DelegationLogRecord & {
+  resolvedModel: string;
+  totalTokens: number;
+} {
+  return (
+    typeof record.totalTokens === "number" &&
+    Number.isFinite(record.totalTokens) &&
+    record.totalTokens >= 0 &&
+    typeof record.resolvedModel === "string" &&
+    record.resolvedModel.length > 0
+  );
 }
 
 interface Args {
@@ -68,6 +103,207 @@ async function loadRecords(since: string | null): Promise<LogRecord[]> {
   return all;
 }
 
+function renderTokenSpend(delegations: DelegationLogRecord[]): string[] {
+  interface Group {
+    role: string;
+    resolvedModel: string;
+    tokens: number;
+    count: number;
+  }
+  const groups = new Map<string, Group>();
+  let measuredTotal = 0;
+  let unmeasuredCount = 0;
+
+  for (const r of delegations) {
+    if (!isMeasuredTokens(r)) {
+      unmeasuredCount += 1;
+      continue;
+    }
+    // "|" as the group-key delimiter: role names (alphanumeric/hyphen/colon, e.g.
+    // "pr-review-toolkit:code-reviewer") and resolvedModel ids (alphanumeric/hyphen/brackets, e.g.
+    // "claude-opus-4-8[1m]") never contain it -- confirmed against every role/resolvedModel string
+    // in ~/.claude/praxarch/logs/*.jsonl. Kept as a plain, grep-able ASCII character rather than a
+    // control byte so this file stays reviewable as normal text (a literal NUL byte here previously
+    // made the whole file register as binary to git, breaking diff review and diff-based measurement).
+    const key = `${r.role}|${r.resolvedModel}`;
+    const existing = groups.get(key);
+    if (existing) {
+      existing.tokens += r.totalTokens;
+      existing.count += 1;
+    } else {
+      groups.set(key, { role: r.role, resolvedModel: r.resolvedModel, tokens: r.totalTokens, count: 1 });
+    }
+    measuredTotal += r.totalTokens;
+  }
+
+  const lines: string[] = [];
+  lines.push("Token spend:");
+  if (groups.size === 0) {
+    lines.push("  nothing measured in this window");
+  } else {
+    const sorted = [...groups.values()].sort((a, b) => b.tokens - a.tokens);
+    for (const g of sorted) {
+      const share = measuredTotal > 0 ? ((g.tokens / measuredTotal) * 100).toFixed(0) : "0";
+      lines.push(`  ${g.role} (${g.resolvedModel}): ${g.tokens} tokens, ${g.count} delegations, ${share}% of measured`);
+    }
+  }
+  lines.push(`${unmeasuredCount} delegations unmeasured (pre-token-capture)`);
+  return lines;
+}
+
+// A binding's `model:` value in agent frontmatter is a short tier name ("opus", "sonnet",
+// "haiku"); an observed `resolvedModel` from the logs is the full API model id ("claude-opus-4-8",
+// "claude-sonnet-5[1m]"). Exact string equality between the two is never true even when they agree
+// on tier, so "agreement" here means the bound tier name appears in the observed id — this is a
+// substring check for tier identification, not a renaming/normalization of either value.
+function modelAgrees(bound: string, observed: string): boolean {
+  return observed.toLowerCase().includes(bound.toLowerCase());
+}
+
+function tierRank(model: string | null): number {
+  // A `model:` key present but empty (e.g. `model: ""`) is the same "no binding" state as the key
+  // being absent entirely — both render as "inherited (no binding)" below, so both must sort at 99.
+  if (model === null || model === "") return 99;
+  const order: Record<string, number> = { haiku: 0, sonnet: 1, opus: 2 };
+  return order[model] ?? 50;
+}
+
+interface AgentFrontmatter {
+  name?: string;
+  model?: string;
+}
+
+// Parses ONLY the leading `---`-delimited frontmatter block, extracting `name:`/`model:` — no YAML
+// library, every other frontmatter key and all body content is ignored. Returns null when no
+// closing `---` delimiter is found (the file is treated as malformed by the caller).
+function parseFrontmatter(content: string): AgentFrontmatter | null {
+  const lines = content.split("\n");
+  if (lines[0]?.trim() !== "---") return null;
+  let end = -1;
+  for (let i = 1; i < lines.length; i += 1) {
+    if (lines[i]?.trim() === "---") {
+      end = i;
+      break;
+    }
+  }
+  if (end === -1) return null;
+
+  const result: AgentFrontmatter = {};
+  for (const line of lines.slice(1, end)) {
+    const match = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(line);
+    if (!match) continue;
+    const [, key, rawValue] = match;
+    const value = (rawValue ?? "").trim().replace(/^["']|["']$/g, "");
+    if (key === "name") result.name = value;
+    else if (key === "model") result.model = value;
+  }
+  return result;
+}
+
+interface RoleBinding {
+  role: string;
+  model: string | null;
+}
+
+interface BindingsData {
+  bindings: RoleBinding[];
+  skipped: string[];
+  dirMissing: boolean;
+}
+
+async function loadRoleBindings(): Promise<BindingsData> {
+  const dir = agentsDir();
+  let files: string[];
+  try {
+    files = (await readdir(dir)).filter((f) => f.endsWith(".md"));
+  } catch {
+    return { bindings: [], skipped: [], dirMissing: true };
+  }
+
+  const bindings: RoleBinding[] = [];
+  const skipped: string[] = [];
+  for (const file of files.sort()) {
+    let content: string;
+    try {
+      content = await readFile(join(dir, file), "utf8");
+    } catch {
+      // Unreadable file (dangling symlink, permissions, etc.) — skip it and name it, same as a
+      // malformed-frontmatter file below. One bad agent file must never fail the whole report.
+      skipped.push(file);
+      continue;
+    }
+    const parsed = parseFrontmatter(content);
+    if (!parsed || !parsed.name) {
+      skipped.push(file);
+      continue;
+    }
+    bindings.push({ role: parsed.name, model: parsed.model ?? null });
+  }
+  return { bindings, skipped, dirMissing: false };
+}
+
+// Sorted by model tier (haiku < sonnet < opus < other/unrecognized < inherited/no-binding), then
+// role name within a tier.
+function renderRoleBindings(data: BindingsData, delegations: DelegationLogRecord[]): string[] {
+  const lines: string[] = [];
+  if (data.dirMissing) {
+    lines.push(`Role bindings unavailable (no agents directory at ${agentsDir()})`);
+    return lines;
+  }
+
+  lines.push(
+    "Role bindings (current intent from agent frontmatter — resolvedModel in the token spend " +
+      "section above is historical truth, what actually ran, and may differ from the current binding):",
+  );
+
+  const observedModelsByRole = new Map<string, Set<string>>();
+  const allObservedRoles = new Set<string>();
+  for (const r of delegations) {
+    allObservedRoles.add(r.role);
+    if (typeof r.resolvedModel === "string" && r.resolvedModel.length > 0) {
+      if (!observedModelsByRole.has(r.role)) observedModelsByRole.set(r.role, new Set());
+      observedModelsByRole.get(r.role)?.add(r.resolvedModel);
+    }
+  }
+
+  const sorted = [...data.bindings].sort((a, b) => {
+    const tierDiff = tierRank(a.model) - tierRank(b.model);
+    if (tierDiff !== 0) return tierDiff;
+    return a.role.localeCompare(b.role);
+  });
+
+  for (const b of sorted) {
+    let line = `  ${b.role}: ${b.model ? `bound ${b.model}` : "inherited (no binding)"}`;
+    const observed = observedModelsByRole.get(b.role);
+    if (!allObservedRoles.has(b.role)) {
+      line += " (unused in this window)";
+    } else if (b.model && observed) {
+      // Fires on ANY observed resolvedModel that diverges from the binding, not only when every
+      // observation disagrees — a role that ran under both its bound model and a stray one in the
+      // same window is exactly the divergence a reader needs to see. Names only the diverging
+      // model(s), not the full observed set, so an observation that agrees with the binding doesn't
+      // get lumped in and read as evidence of drift.
+      const diverging = [...observed].filter((m) => !modelAgrees(b.model as string, m)).sort();
+      if (diverging.length > 0) {
+        line += `; observed ${diverging.join(", ")} in this window`;
+      }
+    }
+    lines.push(line);
+  }
+
+  if (data.skipped.length > 0) {
+    lines.push(`Skipped malformed agent file(s): ${data.skipped.sort().join(", ")}`);
+  }
+
+  const boundRoleNames = new Set(data.bindings.map((b) => b.role));
+  const unbound = [...allObservedRoles].filter((role) => !boundRoleNames.has(role)).sort();
+  if (unbound.length > 0) {
+    lines.push(`Unbound/removed roles observed in logs: ${unbound.join(", ")}`);
+  }
+
+  return lines;
+}
+
 function render(records: LogRecord[]): string {
   const delegations = records.filter((r): r is DelegationLogRecord => !isEventRecord(r));
   const failOpens = records.filter(isEventRecord).filter((r) => r.event === "verifyGateFailOpen");
@@ -77,13 +313,22 @@ function render(records: LogRecord[]): string {
   }
 
   const byRole = new Map<string, number>();
-  const byBatch = new Set<string>();
+  const batchAllCounts = new Map<string, number>();
+  const batchMeasured = new Map<string, { tokens: number; count: number }>();
   let confirmedCount = 0;
   let refutedCount = 0;
 
   for (const r of delegations) {
     byRole.set(r.role, (byRole.get(r.role) ?? 0) + 1);
-    if (r.batchId) byBatch.add(r.batchId);
+    if (r.batchId) {
+      batchAllCounts.set(r.batchId, (batchAllCounts.get(r.batchId) ?? 0) + 1);
+      if (isMeasuredTokens(r)) {
+        const existing = batchMeasured.get(r.batchId) ?? { tokens: 0, count: 0 };
+        existing.tokens += r.totalTokens;
+        existing.count += 1;
+        batchMeasured.set(r.batchId, existing);
+      }
+    }
     if (r.verdict === "CONFIRMED") confirmedCount += 1;
     else if (r.verdict === "REFUTED") refutedCount += 1;
   }
@@ -103,11 +348,18 @@ function render(records: LogRecord[]): string {
     lines.push("Verifier pass rate: no verifier runs recorded");
   }
 
-  lines.push(`Fan-out batches: ${byBatch.size}`);
+  lines.push(`Fan-out batches: ${batchAllCounts.size}`);
+  for (const [batchId, totalCount] of [...batchAllCounts.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const measured = batchMeasured.get(batchId) ?? { tokens: 0, count: 0 };
+    lines.push(`  ${batchId}: ${measured.tokens} tokens (${measured.count}/${totalCount} delegations measured)`);
+  }
   // Surfaces what would otherwise be invisible: a fail-open leaves no trace to the user beyond
   // stderr/a systemMessage at the time, so this is the only durable record of the gate having
   // gone quiet (issue #1, defect 3).
   lines.push(`Verify-gate fail-opens: ${failOpens.length}`);
+
+  lines.push("");
+  lines.push(...renderTokenSpend(delegations));
 
   return lines.join("\n");
 }
@@ -123,7 +375,11 @@ async function main(): Promise<void> {
     }
   }
 
-  process.stdout.write(`${render(records)}\n`);
+  const delegations = records.filter((r): r is DelegationLogRecord => !isEventRecord(r));
+  const bindingsData = await loadRoleBindings();
+
+  const output = [render(records), "", ...renderRoleBindings(bindingsData, delegations)].join("\n");
+  process.stdout.write(`${output}\n`);
 }
 
 main().catch((err: unknown) => {
