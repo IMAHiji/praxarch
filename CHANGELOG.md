@@ -92,6 +92,14 @@
 
 ### Fixed
 
+- **verify-gate: a hook killed at the harness timeout no longer fails open silently.** Claude Code
+  treats a Stop hook killed at its configured `timeout` as a non-blocking allow with no JSONL row
+  and no `systemMessage` — indistinguishable on disk from a clean pass. verify-gate now installs
+  its own watchdog before reading hook input and fires at 80% of the budget
+  (`PRAXARCH_VERIFY_GATE_TIMEOUT_MS`, default 60 000ms), emitting an allow and logging
+  `event: "verifyGateFailOpen", reason: "timeout"` before the harness would otherwise kill it.
+  `templates/settings.fragment.json` now pins `timeout: 60` explicitly on the `Stop` hook entry so
+  the watchdog's default budget matches what Claude Code actually enforces.
 - **subagent-stop: automatic verdicts are no longer invisible to `praxarch report`.** The hook
   now appends its own `event: "subagentVerdict"` JSONL row (before touching session state,
   same ordering contract as telemetry.ts) in addition to writing `lastVerifier`; `praxarch report`

@@ -20,7 +20,8 @@ import { formatBuildRef, readBuildInfo } from "./lib/build-info.js";
  * message with PRAXARCH_VERIFY_WAIVED: <reason> for changes that genuinely don't warrant a
  * verifier pass (docs-only, config tweaks the diff-size heuristic can't distinguish). The waiver
  * must begin a line — an unanchored match let the gate's own instruction text, quoted back, waive
- * it.
+ * it. A hook that exceeds its own watchdog budget fails open with reason "timeout", rather than
+ * being killed silently by the harness.
  */
 
 // Anchored to the start of a line (multiline), not matched anywhere in the message: the gate's own
@@ -41,6 +42,37 @@ const MAX_CONSECUTIVE_BLOCKS = 2;
 // Deliberately generous — big enough that genuine remediation work spanning several rounds is
 // never cut off mid-flight, small enough that a churning, unsatisfiable gate still ends.
 const MAX_CYCLE_BLOCKS = 5;
+
+// Hook-timeout self-watchdog. Claude Code kills a Stop hook at its configured `timeout` (seconds —
+// see templates/settings.fragment.json) and treats the killed hook as non-blocking: no JSONL row,
+// no systemMessage, nothing on disk to tell that fail-open apart from a clean allow. Firing our own
+// allow at 80% of the budget converts a silent kill into the same logged, surfaced fail-open every
+// other non-blocking path here already produces. diffFingerprint streams every dirty/untracked
+// file's full contents (git-diff.ts), so a big tree can genuinely reach this.
+const DEFAULT_HOOK_TIMEOUT_MS = 60_000;
+const WATCHDOG_FRACTION = 0.8;
+
+// PRAXARCH_VERIFY_GATE_TIMEOUT_MS is the FULL hook timeout in milliseconds; the watchdog fires at
+// WATCHDOG_FRACTION of it. Anything non-numeric, non-finite, zero, or negative falls back to the
+// default rather than producing a nonsensical budget. Capped so WATCHDOG_FRACTION of it stays
+// under Node's 2^31-1 setTimeout ceiling — an overflowing delay is clamped to 1ms by Node, which
+// would make the watchdog fire immediately and fail the gate open on every Stop.
+const MAX_TIMEOUT_MS = Math.floor((2 ** 31 - 1) / WATCHDOG_FRACTION);
+function effectiveTimeoutMs(): number {
+  const raw = process.env["PRAXARCH_VERIFY_GATE_TIMEOUT_MS"];
+  const parsed = raw === undefined ? Number.NaN : Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_HOOK_TIMEOUT_MS;
+  return Math.min(parsed, MAX_TIMEOUT_MS);
+}
+
+// First writer to stdout wins. The watchdog and a late-finishing main() must never both emit — two
+// JSON objects on stdout is unparseable output, strictly worse than either decision alone.
+let hookOutputEmitted = false;
+function emitOnce(output: StopOutput): void {
+  if (hookOutputEmitted) return;
+  hookOutputEmitted = true;
+  emit(output);
+}
 
 function allow(warnings: string[] = []): StopOutput {
   return warnings.length > 0 ? { systemMessage: warnings.join(" ") } : {};
@@ -77,7 +109,7 @@ async function clearBlockCounters(state: Awaited<ReturnType<typeof readSessionSt
 // happened well past main()'s own scope.
 let sessionIdForCrashLog: string | null = null;
 
-async function logFailOpen(sessionId: string | null, reason: "loop-guard" | "loop-guard-cycle" | "error", detail: string): Promise<void> {
+async function logFailOpen(sessionId: string | null, reason: "loop-guard" | "loop-guard-cycle" | "error" | "timeout", detail: string): Promise<void> {
   await appendJsonl(logFileForDate(), {
     at: new Date().toISOString(),
     sessionId,
@@ -87,7 +119,7 @@ async function logFailOpen(sessionId: string | null, reason: "loop-guard" | "loo
   });
 }
 
-async function main(): Promise<void> {
+async function runGate(): Promise<void> {
   const input = await readHookInput<StopInput>();
   sessionIdForCrashLog = input.session_id;
 
@@ -101,7 +133,7 @@ async function main(): Promise<void> {
 
   if (process.env["PRAXARCH_SKIP_VERIFY"] === "1") {
     await clearBlockCounters(state);
-    emit(allow());
+    emitOnce(allow());
     return;
   }
 
@@ -129,7 +161,7 @@ async function main(): Promise<void> {
     state.verifyGateBlockHash = null;
     state.verifyGateCycleBlocks = 0;
     await writeSessionState(state);
-    emit(allow());
+    emitOnce(allow());
     return;
   }
 
@@ -167,7 +199,7 @@ async function main(): Promise<void> {
     changedFiles >= config.verifyGate.minChangedFiles;
   if (!isNonTrivial) {
     await clearBlockCounters(state);
-    emit(allow(warnings));
+    emitOnce(allow(warnings));
     return;
   }
 
@@ -186,7 +218,7 @@ async function main(): Promise<void> {
   // stale waiver.
   if (currentHash !== null && state.verifyGateWaivedHash === currentHash) {
     await clearBlockCounters(state);
-    emit(allow(warnings));
+    emitOnce(allow(warnings));
     return;
   }
 
@@ -224,7 +256,7 @@ async function main(): Promise<void> {
   const passed = verifier !== null && verifier.verdict === "CONFIRMED" && verifier.criticalOrMajorCount === 0 && !stale;
   if (passed) {
     await clearBlockCounters(state);
-    emit(allow(warnings));
+    emitOnce(allow(warnings));
     return;
   }
 
@@ -255,7 +287,7 @@ async function main(): Promise<void> {
         "loop-guard-cycle",
         `${MAX_CYCLE_BLOCKS} total blocks in one stop cycle (cycle ceiling)`,
       );
-      emit(
+      emitOnce(
         withConfigWarnings(
           {
             systemMessage:
@@ -272,7 +304,7 @@ async function main(): Promise<void> {
         "loop-guard",
         `${MAX_CONSECUTIVE_BLOCKS} consecutive blocks in one stop cycle`,
       );
-      emit(
+      emitOnce(
         withConfigWarnings(
           {
             systemMessage:
@@ -357,7 +389,41 @@ async function main(): Promise<void> {
     },
     warnings,
   );
-  emit(output);
+  emitOnce(output);
+}
+
+async function fireWatchdog(budgetMs: number): Promise<void> {
+  // Emit before awaiting anything: stdout is what the harness reads, and the log row is
+  // best-effort on top of it.
+  emitOnce({
+    systemMessage:
+      `praxarch verify-gate: hit its ${Math.round(budgetMs)}ms self-watchdog budget before reaching a ` +
+      "decision — failing open rather than being killed silently at the harness hook timeout.",
+  });
+  try {
+    await logFailOpen(
+      sessionIdForCrashLog,
+      "timeout",
+      `watchdog fired after ${Math.round(budgetMs)}ms without a decision`,
+    );
+  } catch {
+    // Best-effort — a logging failure must not stop the process exiting cleanly.
+  }
+  process.exit(0);
+}
+
+async function main(): Promise<void> {
+  const budgetMs = effectiveTimeoutMs() * WATCHDOG_FRACTION;
+  const watchdog = setTimeout(() => {
+    void fireWatchdog(budgetMs);
+  }, budgetMs);
+  try {
+    await runGate();
+  } finally {
+    // Must be cleared, not unref'd: an unref'd timer never fires, and a live timer keeps the
+    // process alive until the budget elapses even after a decision was emitted.
+    clearTimeout(watchdog);
+  }
 }
 
 main().catch(async (err: unknown) => {
@@ -370,7 +436,7 @@ main().catch(async (err: unknown) => {
   // and report's fail-open counter, and issue #24's guardrail forbids schema changes to existing
   // rows. So the two hooks now use different event names for the same "hook crashed and failed
   // open" shape: "guard-crash" is route-guard-only, "verifyGateFailOpen" (reason:"error" on this
-  // path) is verify-gate's crash case specifically (loop-guard/loop-guard-cycle are its other,
+  // path) is verify-gate's crash case specifically (loop-guard/loop-guard-cycle/timeout are its other,
   // non-crash reasons — see logFailOpen above). An auditor wanting verify-gate's crash-only rows
   // should query `event=="verifyGateFailOpen" && reason=="error"`; route-guard's crashes are a
   // separate `event=="guard-crash"` query. See docs/design.md's JSONL schema section for both.
@@ -381,7 +447,7 @@ main().catch(async (err: unknown) => {
   } catch {
     // Best-effort — a logging failure must not compound the original crash.
   }
-  emit({
+  emitOnce({
     systemMessage: `praxarch verify-gate: crashed and is failing open rather than blocking the session (${detail}).`,
   });
 });
