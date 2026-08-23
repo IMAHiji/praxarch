@@ -4,6 +4,14 @@
 
 ### Added
 
+- **`praxarch doctor --prune` — retention sweep for session state and debug payloads.** Deletes
+  files under `~/.claude/praxarch/state/` older than 30 days and `~/.claude/praxarch/debug/` older
+  than 7 days (overridable via `PRAXARCH_STATE_RETENTION_DAYS` / `PRAXARCH_DEBUG_RETENTION_DAYS`).
+  Nothing was ever removing these before, and the state directory grows without bound (1,029 files
+  / 4.1 MB measured on one machine). Deletion is gated on mtime plus an explicit skip of the
+  current session's own files, and touches nothing outside those two directories. Plain
+  `praxarch doctor` gains an informational (always-`ok`) check reporting how many files are
+  prunable.
 - **verify-gate's two escape hatches now leave an audit trail.** `PRAXARCH_SKIP_VERIFY=1` and an
   accepted `PRAXARCH_VERIFY_WAIVED:` waiver each append a JSONL row (`verifyGateSkipped` /
   `verifyGateWaived`) to the monthly log instead of writing nothing, and `praxarch report` now
