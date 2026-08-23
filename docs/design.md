@@ -302,8 +302,11 @@ record-verdict's, and verify-gate's own loop-guard/waiver writes — is serializ
 per-session lockfile (`<state file>.lock`, `open(path, "wx")`), so N parallel `SubagentStop` hooks
 from a fan-out can't interleave and lose one another's update; a lock still held after 10s is
 treated as belonging to a dead process and broken rather than waited out. The status line
-surfaces the current session's counts live, and `praxarch report` aggregates role distribution and
-verifier pass rate across history.
+surfaces the current session's counts live, plus verify-gate state (no verdict on record, a
+verified/unverified verdict, a standing waiver, blocks already spent this stop cycle) — reading
+persisted session state only, never measuring the tree itself, so any diff numbers it shows are the
+ones a verdict was recorded against, stamped `@<lines>L/<files>f`, never the current diff. `praxarch
+report` aggregates role distribution and verifier pass rate across history.
 
 **What this deliberately does not claim**: a "delegation-vs-local ratio" or "escalation
 frequency." Both would require observing the main session's own direct work and linking repeated

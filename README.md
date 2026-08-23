@@ -33,9 +33,10 @@ for the full rationale and the delta from pilotfish.
   - `session-init` warns on config drift and `CLAUDE_CODE_SUBAGENT_MODEL` conflicts.
 - **Structured verification**: the verifier role must emit a JSON verdict block
   (`CONFIRMED`/`REFUTED` + findings), not free-form prose, so the gate can check it mechanically.
-- **Telemetry surfaces**: a status line showing live role-spend for the current session, and a
-  `praxarch report` CLI / `/praxarch-report` skill for historical role distribution and verifier
-  pass rate.
+- **Telemetry surfaces**: a status line showing live role-spend for the current session and
+  verify-gate state (no verdict on record, verified/unverified, a standing waiver, blocks already
+  spent this stop cycle), and a `praxarch report` CLI / `/praxarch-report` skill for historical role
+  distribution and verifier pass rate.
 - **Per-project overrides**: `.claude/praxarch.json` in any repo can retune verify-gate
   thresholds and route-guard strictness for that project. Role→model bindings are retuned the
   native way instead: shadow the agent file in `<project>/.claude/agents/`.

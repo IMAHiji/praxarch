@@ -4,6 +4,11 @@
 
 ### Added
 
+- **Status line surfaces verify-gate state.** Shows "no verdict on record", a verified/unverified
+  verdict (with the verdict-time diff size, e.g. `✓verified@120L/4f`), a standing waiver, and blocks
+  already spent this stop cycle — from persisted session state only, no subprocess spawned. A
+  Stop-hook block costs a full extra turn (block → read reason → dispatch a verifier → stop again);
+  this lets the orchestrator see the gate before it blocks, not after.
 - **`praxarch doctor --prune` — retention sweep for session state and debug payloads.** Deletes
   files under `~/.claude/praxarch/state/` older than 30 days and `~/.claude/praxarch/debug/` older
   than 7 days (overridable via `PRAXARCH_STATE_RETENTION_DAYS` / `PRAXARCH_DEBUG_RETENTION_DAYS`).
