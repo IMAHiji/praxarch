@@ -346,6 +346,34 @@ for telemetry (`[fanout:<batch-id>]` in each call's description), and the rule t
 `/fan-out` skill rather than a hook, because "is this actually independent work" is a judgment call
 a hook can't safely make.
 
+### Verifier precision (design sketch — not implemented)
+
+praxarch measures verifier *throughput* (pass rate, fail-opens, escape-hatch exits) but not verifier
+*precision*: of the findings a verifier reports, how many the orchestrator actually accepted. The
+practice research this is grounded in (work-brain R004, 2026-08-22) records that the intervention
+class praxarch runs — an adversarial verification pass over completed work — has **no independently
+reproduced effect size anywhere in the published literature**; every measured number is one paper's
+result on one benchmark. Our own telemetry is the only place it could be measured, and the missing
+half is the denominator.
+
+Sketch, deliberately unimplemented until the shape is proven useful:
+
+- **Capture.** A `praxarch record-disposition --session <id> --agent <agentId> --finding <index>
+  --accepted|--dismissed [--note <text>]` CLI appends an `event: "findingDisposition"` row to the
+  monthly JSONL, keyed by `(sessionId, agentId, findingIndex)` — the same append-only,
+  new-event-type discipline `subagentVerdict` follows.
+- **Report.** `praxarch report` computes `precision = accepted / (accepted + dismissed)` per role
+  and per model, alongside the existing pass rate.
+- **Open problem 1 — findings have no stable identity.** The verdict block's `findings[]` index is
+  positional, and a re-verify renumbers everything. Either the verdict schema grows a per-finding
+  id (a change to an agent-facing contract), or dispositions are keyed on a content hash of the
+  finding's `file`/`line`/`summary` (fragile under a moving diff).
+- **Open problem 2 — dispositions are orchestrator-asserted.** This measures orchestrator agreement,
+  not ground truth. A precision number computed this way is an honest measure of "how often the
+  orchestrator acted on a finding" and must be labelled as that, not as defect-detection precision.
+- **Open problem 3 — capture discipline.** Nothing forces the orchestrator to record a disposition,
+  so the denominator is opt-in and self-selecting in an unknown direction.
+
 ## Known limitations
 
 - **Report metrics are intentionally narrower than pilotfish's claims** — role distribution and
@@ -386,6 +414,11 @@ a hook can't safely make.
   already had whenever the shell happened to sit at the session's root before this change — a
   worktree session is charged for its own work exactly as it always was, since it launches with
   the worktree as its own `baselineCwd`.
+- **Verifier precision is unmeasured** — the report counts verdicts and fail-opens, not whether the
+  findings inside a REFUTED verdict were accepted or dismissed. See "Verifier precision (design
+  sketch)" above for why the mechanism is written down rather than built: findings have no stable
+  identity across re-verifies, and a disposition is an orchestrator assertion rather than ground
+  truth.
 
 ### Fail-opens mutation testing found, not review (issue #16)
 
