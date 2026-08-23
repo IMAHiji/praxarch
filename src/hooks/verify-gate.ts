@@ -16,12 +16,18 @@ import { formatBuildRef, readBuildInfo } from "./lib/build-info.js";
  * session. This is the hard enforcement of the policy's "verify before claiming done" rule, which
  * pilotfish leaves as unenforced policy text.
  *
- * Escape hatches: PRAXARCH_SKIP_VERIFY=1 env var, or the orchestrator stating
- * "PRAXARCH_VERIFY_WAIVED: <reason>" in its final message for changes that genuinely don't
- * warrant a verifier pass (docs-only, config tweaks the diff-size heuristic can't distinguish).
+ * Escape hatches: PRAXARCH_SKIP_VERIFY=1 env var, or the orchestrator starting a line of its final
+ * message with PRAXARCH_VERIFY_WAIVED: <reason> for changes that genuinely don't warrant a
+ * verifier pass (docs-only, config tweaks the diff-size heuristic can't distinguish). The waiver
+ * must begin a line — an unanchored match let the gate's own instruction text, quoted back, waive
+ * it.
  */
 
-const WAIVER_PATTERN = /PRAXARCH_VERIFY_WAIVED:\s*(.+)/;
+// Anchored to the start of a line (multiline), not matched anywhere in the message: the gate's own
+// block message tells the assistant how to waive, and an unanchored pattern meant an assistant
+// quoting that instruction back mid-sentence accidentally waived the gate. `[ \t]` rather than
+// `\s` so the reason can't start on the following line.
+const WAIVER_PATTERN = /^PRAXARCH_VERIFY_WAIVED:[ \t]*(.+)$/m;
 
 // After this many consecutive blocks in one stop cycle, fail open instead of re-blocking —
 // per the hooks docs' stop_hook_active guidance, a Stop hook that blocks unconditionally can
@@ -323,25 +329,27 @@ async function main(): Promise<void> {
   const measurementFailedReason = anchorDead
     ? `praxarch verify-gate: the session's baseline directory (${state.baselineCwd ?? "unknown"}) is missing ` +
       'or unusable for measurement — treating the diff as unmeasurable and non-trivial. Run a verifier pass ' +
-      'before reporting completion, or state "PRAXARCH_VERIFY_WAIVED: <reason>" if verification genuinely ' +
-      "doesn't apply here."
+      "before reporting completion, or start a line of your final message with PRAXARCH_VERIFY_WAIVED: " +
+      "<reason> if verification genuinely doesn't apply here."
     : "praxarch verify-gate: the session's diff could not be measured (git diff failed) — treating as " +
-      'non-trivial. Run a verifier pass before reporting completion, or state "PRAXARCH_VERIFY_WAIVED: ' +
-      '<reason>" if verification genuinely doesn\'t apply here.';
+      "non-trivial. Run a verifier pass before reporting completion, or start a line of your final message " +
+      "with PRAXARCH_VERIFY_WAIVED: <reason> if verification genuinely doesn't apply here.";
   const output: StopOutput = withConfigWarnings(
     {
       decision: "block",
       reason: (measurementFailed
         ? measurementFailedReason
         : `praxarch verify-gate: this session changed ${changedLines} lines across ${changedFiles} files ` +
-          `(non-trivial) but ${reasonDetail}. Run a verifier pass before reporting completion, or state ` +
-          `"PRAXARCH_VERIFY_WAIVED: <reason>" if verification genuinely doesn't apply here.`) + buildRefSuffix,
+          `(non-trivial) but ${reasonDetail}. Run a verifier pass before reporting completion, or start a ` +
+          `line of your final message with PRAXARCH_VERIFY_WAIVED: <reason> if verification genuinely ` +
+          `doesn't apply here.`) + buildRefSuffix,
       hookSpecificOutput: {
         hookEventName: "Stop",
         additionalContext:
           "Delegate to the verifier role for a fresh-context review of the changes, then re-check " +
           "completion. If this diff is something like docs/config that doesn't warrant verification, " +
-          'say "PRAXARCH_VERIFY_WAIVED: <reason>" explicitly instead of just stopping. If the verdict ' +
+          "put PRAXARCH_VERIFY_WAIVED: <reason> at the start of a line in your final message instead of " +
+          "just stopping — a waiver quoted mid-sentence does not count. If the verdict " +
           "came from a resumed agent (e.g. via SendMessage), no hook observes that reply — run " +
           `\`praxarch record-verdict --session ${input.session_id} --role <role>\` with the agent's output instead of ` +
           "waiving.",
