@@ -40,7 +40,11 @@
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "node ~/.claude/praxarch/hooks/verify-gate.js" }
+          {
+            "type": "command",
+            "command": "node ~/.claude/praxarch/hooks/verify-gate.js",
+            "timeout": 60
+          }
         ]
       }
     ]

@@ -201,19 +201,23 @@ hooks that check the two rules most worth enforcing mechanically:
     counter either, for the same reason: treating "unknown" as "changed" here would hand back an
     infinite-loop vector. The two fail-open reasons are distinguishable in both the
     `systemMessage` and the JSONL row (`reason: "loop-guard"` for the per-diff limit,
-    `"loop-guard-cycle"` for the per-cycle ceiling) — a stuck session (same diff, repeatedly
+    `"loop-guard-cycle"` for the per-cycle ceiling). A third reason, `"timeout"`, is written by
+    verify-gate's own watchdog when it exceeds 80% of its configured hook timeout (`timeout: 60`
+    on the Stop entry in `templates/settings.fragment.json`, overridable per-invocation with
+    `PRAXARCH_VERIFY_GATE_TIMEOUT_MS`) — without it, a hook the harness kills at the timeout is a
+    fail-open with no row and no `systemMessage` at all. A stuck session (same diff, repeatedly
     unverified) and a churning one (diff keeps moving, never gets verified either) are different
-    failure modes worth telling apart when reading the log. Every fail-open — either loop-guard
-    reason, or a crash — is logged to the monthly JSONL (`event: "verifyGateFailOpen"`, `reason:
-    "error"` for the crash case) and surfaced via `systemMessage`, and `praxarch report` totals
-    them separately from delegation stats so a gate that's gone quiet doesn't look identical to
-    one that's passing.
+    failure modes worth telling apart when reading the log. Every fail-open — loop-guard,
+    loop-guard-cycle, timeout, or a crash — is logged to the monthly JSONL
+    (`event: "verifyGateFailOpen"`, `reason: "error"` for the crash case) and surfaced via
+    `systemMessage`, and `praxarch report` totals them separately from delegation stats so a gate
+    that's gone quiet doesn't look identical to one that's passing.
 
     **`route-guard`'s crash logging uses a distinct event name (issue #24), deliberately.**
     route-guard also fails open on its own internal errors, and also appends a JSONL row for it —
     but as `event: "guard-crash"`, not `verifyGateFailOpen`. The two hooks are not sharing one
     "hook crashed" event: `verifyGateFailOpen` is verify-gate's schema (loop-guard,
-    loop-guard-cycle, and its own crash case all share it, distinguished by `reason`), and
+    loop-guard-cycle, timeout, and its own crash case all share it, distinguished by `reason`), and
     `guard-crash` is route-guard's own event for the same "crashed and failed open" shape.
     Unifying them under one event name would mean either route-guard's non-crash reasons don't
     exist (there are none, so this would work today) or verify-gate's `reason` field gets bolted

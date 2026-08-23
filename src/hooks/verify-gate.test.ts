@@ -3,10 +3,13 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { DiffCounts } from "./lib/git-diff.js";
 import type { getMkfifoProbe as GetMkfifoProbe } from "./lib/fixtures/mkfifo-probe.js";
 import { TEST_DIST_DIR } from "../test-support/dist-dir.js";
+
+const here = dirname(fileURLToPath(import.meta.url));
 
 const script = join(TEST_DIST_DIR, "hooks", "verify-gate.js");
 const sessionInitScript = join(TEST_DIST_DIR, "hooks", "session-init.js");
@@ -56,6 +59,23 @@ async function makeFakeGitDir(): Promise<string> {
     "esac",
   ].join("\n");
   await writeFile(join(dir, "git"), `${script2}\n`, "utf8");
+  await chmod(join(dir, "git"), 0o755);
+  return dir;
+}
+
+// A `git` shim that sleeps before the --numstat probe verify-gate makes on the non-trivial path,
+// so the hook provably outruns a short watchdog budget. Everything else passes straight through.
+async function makeSlowGitDir(sleepSeconds: number): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "praxarch-verifygate-slowgit-"));
+  const realGit = execFileSync("which", ["git"]).toString("utf8").trim();
+  const shim = [
+    "#!/bin/sh",
+    'case "$*" in',
+    `  *--numstat*) sleep ${sleepSeconds}; exec "${realGit}" "$@" ;;`,
+    `  *) exec "${realGit}" "$@" ;;`,
+    "esac",
+  ].join("\n");
+  await writeFile(join(dir, "git"), `${shim}\n`, "utf8");
   await chmod(join(dir, "git"), 0o755);
   return dir;
 }
@@ -1910,4 +1930,56 @@ test("a CONFIRMED verdict with a capitalised critical finding still blocks", asy
   } finally {
     await teardownFixture(fixture);
   }
+});
+
+// --- Hook-timeout self-watchdog (verify-gate-timeout-watchdog) --------------------------------
+
+test("the watchdog emits an allow and logs reason:'timeout' when the gate outruns its budget", async () => {
+  const fixture = await setupFixture();
+  const slowDir = await makeSlowGitDir(3);
+  try {
+    await makeNonTrivialDiff(fixture.repo);
+    const result = run(
+      fixture,
+      { session_id: "sT", cwd: fixture.repo, hook_event_name: "Stop" },
+      { PATH: `${slowDir}:${process.env["PATH"] ?? ""}`, PRAXARCH_VERIFY_GATE_TIMEOUT_MS: "1000" },
+    ) as { decision?: string; systemMessage?: string };
+    assert.equal(result.decision, undefined);
+    assert.match(result.systemMessage ?? "", /self-watchdog budget/);
+
+    const log = await readMonthlyLog(fixture.home);
+    assert.equal(
+      log.filter((r) => r["event"] === "verifyGateFailOpen" && r["reason"] === "timeout").length,
+      1,
+    );
+  } finally {
+    await rm(slowDir, { recursive: true, force: true });
+    await teardownFixture(fixture);
+  }
+});
+
+test("the watchdog does not fire when the gate finishes inside its budget", async () => {
+  const fixture = await setupFixture();
+  const slowDir = await makeSlowGitDir(3);
+  try {
+    await makeNonTrivialDiff(fixture.repo);
+    const result = run(
+      fixture,
+      { session_id: "sT2", cwd: fixture.repo, hook_event_name: "Stop" },
+      { PATH: `${slowDir}:${process.env["PATH"] ?? ""}`, PRAXARCH_VERIFY_GATE_TIMEOUT_MS: "60000" },
+    ) as { decision?: string };
+    assert.equal(result.decision, "block");
+
+    const log = await readMonthlyLog(fixture.home).catch(() => []);
+    assert.equal(log.filter((r) => r["reason"] === "timeout").length, 0);
+  } finally {
+    await rm(slowDir, { recursive: true, force: true });
+    await teardownFixture(fixture);
+  }
+});
+
+test("the shipped settings fragment pins an explicit Stop hook timeout", async () => {
+  const raw = await readFile(join(here, "..", "..", "templates", "settings.fragment.json"), "utf8");
+  const fragment = JSON.parse(raw) as { hooks: { Stop: { hooks: { timeout?: number }[] }[] } };
+  assert.equal(fragment.hooks.Stop[0]?.hooks[0]?.timeout, 60);
 });
