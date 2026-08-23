@@ -38,15 +38,23 @@ interface DelegationLogRecord {
   via?: string;
 }
 
-// Event rows (currently just verify-gate fail-opens) share the same monthly JSONL but aren't
-// delegations — they carry `event` instead of `role`. Kept as a separate shape so they can't
-// silently pass the DelegationLogRecord checks below and pollute role/verdict stats.
+// Event rows share the same monthly JSONL but aren't delegations — they carry `event` instead of
+// `role` as their discriminator. Kept as a separate shape so they can't silently pass the
+// DelegationLogRecord checks below and pollute role/verdict stats.
 interface EventLogRecord {
   at: string;
   sessionId: string;
   event: string;
   reason?: string;
   detail?: string;
+  // Present only on `event: "subagentVerdict"` rows (hooks/subagent-stop.ts). Deliberately on the
+  // EVENT shape, not the delegation shape: a verdict recording is not a dispatch, and must never
+  // enter role distribution, dispatch counts, or the model-provenance join.
+  role?: string;
+  agentId?: string | null;
+  verdict?: "CONFIRMED" | "REFUTED" | null;
+  findingsCount?: number | null;
+  criticalOrMajorCount?: number | null;
 }
 
 type LogRecord = DelegationLogRecord | EventLogRecord;
@@ -364,8 +372,13 @@ function renderModelProvenance(delegations: DelegationLogRecord[]): string[] {
 function render(records: LogRecord[]): string {
   const delegations = records.filter((r): r is DelegationLogRecord => !isEventRecord(r));
   const failOpens = records.filter(isEventRecord).filter((r) => r.event === "verifyGateFailOpen");
+  // Automatic (SubagentStop) verdicts are counted on their OWN line, never folded into the pass
+  // rate above: under a synchronous dispatch telemetry.ts can parse the same verdict onto its
+  // delegation row, and the two rows share no key to dedupe on — a separate counter has zero
+  // double-count risk. Before this line existed, automatic verdicts were invisible here entirely.
+  const subagentVerdicts = records.filter(isEventRecord).filter((r) => r.event === "subagentVerdict");
 
-  if (delegations.length === 0 && failOpens.length === 0) {
+  if (delegations.length === 0 && failOpens.length === 0 && subagentVerdicts.length === 0) {
     return "No delegations recorded for the requested window.";
   }
 
@@ -403,6 +416,15 @@ function render(records: LogRecord[]): string {
     lines.push(`Verifier pass rate: ${confirmedCount}/${verifierRuns} (${rate}%) CONFIRMED on first log`);
   } else {
     lines.push("Verifier pass rate: no verifier runs recorded");
+  }
+
+  const autoConfirmed = subagentVerdicts.filter((r) => r.verdict === "CONFIRMED").length;
+  const autoTotal = subagentVerdicts.filter((r) => r.verdict === "CONFIRMED" || r.verdict === "REFUTED").length;
+  if (autoTotal > 0) {
+    const autoRate = ((autoConfirmed / autoTotal) * 100).toFixed(0);
+    lines.push(`Automatic verdicts (SubagentStop): ${autoConfirmed}/${autoTotal} (${autoRate}%) CONFIRMED`);
+  } else {
+    lines.push("Automatic verdicts (SubagentStop): none recorded");
   }
 
   lines.push(`Fan-out batches: ${batchAllCounts.size}`);

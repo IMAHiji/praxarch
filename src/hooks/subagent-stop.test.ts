@@ -41,6 +41,13 @@ async function readState(home: string, sessionId: string): Promise<Record<string
   return JSON.parse(await readFile(statePath, "utf8")) as Record<string, unknown>;
 }
 
+async function readMonthlyLog(home: string): Promise<Record<string, unknown>[]> {
+  const now = new Date();
+  const path = join(home, "logs", `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}.jsonl`);
+  const raw = await readFile(path, "utf8");
+  return raw.split("\n").filter((l) => l.trim().length > 0).map((l) => JSON.parse(l) as Record<string, unknown>);
+}
+
 /**
  * When no verdict is parsed, the hook never calls `updateSessionState` at all (nothing to write)
  * — so the state file may not exist yet. Treat "no file" the same as "lastVerifier: null" for
@@ -352,5 +359,64 @@ test("issue #23 / MAJOR 1: a dead anchor records diffHash/changedLines/changedFi
     } finally {
       await rm(repoB, { recursive: true, force: true });
     }
+  });
+});
+
+// --- Issue #25: subagent-stop appends its own `subagentVerdict` JSONL row ------------------------
+
+test("a recorded verdict appends exactly one subagentVerdict row", async () => {
+  await withPraxarchHome(async (home) => {
+    const result = run(home, {
+      session_id: "j1",
+      cwd: process.cwd(),
+      hook_event_name: "SubagentStop",
+      agent_id: "aaa111",
+      agent_type: "verifier",
+      last_assistant_message: verdictText("CONFIRMED"),
+    });
+    assert.equal(result.status, 0);
+
+    const rows = await readMonthlyLog(home);
+    assert.equal(rows.length, 1);
+    const row = rows[0] as Record<string, unknown>;
+    assert.equal(row["event"], "subagentVerdict");
+    assert.equal(row["sessionId"], "j1");
+    assert.equal(row["role"], "verifier");
+    assert.equal(row["agentId"], "aaa111");
+    assert.equal(row["verdict"], "CONFIRMED");
+    assert.equal(row["findingsCount"], 0);
+    assert.equal(row["criticalOrMajorCount"], 0);
+    assert.ok("diffHash" in row);
+  });
+});
+
+test("a role outside verdictRoles appends no row", async () => {
+  await withPraxarchHome(async (home) => {
+    const result = run(home, {
+      session_id: "j2",
+      cwd: process.cwd(),
+      hook_event_name: "SubagentStop",
+      agent_id: "aaa222",
+      agent_type: "mech-executor",
+      last_assistant_message: verdictText("CONFIRMED"),
+    });
+    assert.equal(result.status, 0);
+    await assert.rejects(readMonthlyLog(home), (err: unknown) => (err as NodeJS.ErrnoException).code === "ENOENT");
+  });
+});
+
+test("a malformed verdict appends no row", async () => {
+  await withPraxarchHome(async (home) => {
+    const badText = ["```json", JSON.stringify({ verdict: "MAYBE", findings: [] }), "```"].join("\n");
+    const result = run(home, {
+      session_id: "j3",
+      cwd: process.cwd(),
+      hook_event_name: "SubagentStop",
+      agent_id: "aaa333",
+      agent_type: "verifier",
+      last_assistant_message: badText,
+    });
+    assert.equal(result.status, 0);
+    await assert.rejects(readMonthlyLog(home), (err: unknown) => (err as NodeJS.ErrnoException).code === "ENOENT");
   });
 });

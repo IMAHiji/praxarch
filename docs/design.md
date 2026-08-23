@@ -269,9 +269,11 @@ required to end its response with a fenced JSON block:
 As of issue #15, `PostToolUse` only ever sees a dispatch-time launch receipt — Claude Code doesn't
 deliver a subagent's actual output there, so `telemetry` cannot parse a verdict out of it.
 Automatic verdict recording instead happens on the `SubagentStop` hook, which fires on real
-subagent completion and parses this JSON block out of the transcript, merging it into session state
-(for `verify-gate` to check immediately) and appending it to the JSONL log (for `praxarch report`
-to compute a pass rate across history). The verdict is derived, not asserted: `CONFIRMED` requires
+subagent completion and parses this JSON block out of the transcript. It writes the verdict into
+session state (for `verify-gate` to check immediately) and appends its own `event:
+"subagentVerdict"` row to the monthly JSONL (for `praxarch report` to count, on its own "Automatic
+verdicts (SubagentStop)" line). It never rewrites the dispatch-time delegation row — the log is
+append-only. The verdict is derived, not asserted: `CONFIRMED` requires
 zero `critical`/`major` findings, regardless of what the `verdict` field itself claims — a defense
 against a verifier that writes "CONFIRMED" out of habit while listing a critical finding.
 `praxarch record-verdict` is the manual fallback for any completion `subagent-stop` misses (e.g. a
@@ -284,8 +286,10 @@ case-insensitively — an unrecognized or missing severity counts rather than re
 Pilotfish cites benchmark numbers (e.g. "Sonnet workers at 96% of all-Fable performance for 46% of
 the cost") as the expected payoff of tiered delegation, but nothing in the tool itself measures
 *your* actual role distribution or savings. Praxarch's `telemetry` hook logs every delegation
-(role, model, timestamp) to a monthly JSONL file at dispatch time; `subagent-stop` merges the
-verifier verdict into that same row once the subagent actually completes. The status line
+(role, model, timestamp) to a monthly JSONL file at dispatch time; `subagent-stop` appends a
+separate `event: "subagentVerdict"` row once the subagent actually completes, and updates the
+matching in-session `delegations[]` entry in session state; the dispatch-time JSONL row is never
+rewritten. The status line
 surfaces the current session's counts live, and `praxarch report` aggregates role distribution and
 verifier pass rate across history.
 

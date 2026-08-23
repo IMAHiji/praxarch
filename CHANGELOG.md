@@ -92,6 +92,12 @@
 
 ### Fixed
 
+- **subagent-stop: automatic verdicts are no longer invisible to `praxarch report`.** The hook
+  now appends its own `event: "subagentVerdict"` JSONL row (before touching session state,
+  same ordering contract as telemetry.ts) in addition to writing `lastVerifier`; `praxarch report`
+  gains a new `Automatic verdicts (SubagentStop): N/M (X%) CONFIRMED` line. `docs/design.md`,
+  which claimed `subagent-stop` merges its verdict into the dispatch-time delegation row, is
+  corrected to describe the new dedicated, append-only row.
 - **session-state: a kill mid-write no longer permanently disables verify-gate for the rest of
   the session.** `writeSessionState` wrote in place, so a process killed mid-write left truncated
   JSON on disk; `readSessionState` threw a `SyntaxError` on that, which escaped verify-gate's

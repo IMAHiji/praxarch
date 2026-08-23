@@ -431,3 +431,43 @@ test("role bindings: a dangling symlink agent file is skipped and named, not a r
     });
   });
 });
+
+test("counts subagentVerdict rows on their own line and never as delegations", async () => {
+  await withPraxarchHome(async (home) => {
+    await withAgentsDir(async (agentsDir) => {
+      const logDir = join(home, "logs");
+      await mkdir(logDir, { recursive: true });
+      const file = logFilePath(home);
+      const lines = [
+        { at: "t1", sessionId: "s1", role: "mech-executor", model: "sonnet", batchId: null, verdict: null, criticalOrMajorCount: null },
+        { at: "t2", sessionId: "s1", event: "subagentVerdict", role: "verifier", agentId: "a1", verdict: "CONFIRMED", findingsCount: 0, criticalOrMajorCount: 0 },
+        { at: "t3", sessionId: "s1", event: "subagentVerdict", role: "verifier", agentId: "a2", verdict: "REFUTED", findingsCount: 2, criticalOrMajorCount: 1 },
+      ];
+      await writeFile(file, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+
+      const out = run(home, agentsDir);
+      assert.match(out, /Delegations: 1/);
+      assert.match(out, /Automatic verdicts \(SubagentStop\): 1\/2 \(50%\) CONFIRMED/);
+      assert.doesNotMatch(out, /^ {2}verifier: /m);
+    });
+  });
+});
+
+test("a log of only subagentVerdict rows still renders a report", async () => {
+  await withPraxarchHome(async (home) => {
+    await withAgentsDir(async (agentsDir) => {
+      const logDir = join(home, "logs");
+      await mkdir(logDir, { recursive: true });
+      const file = logFilePath(home);
+      const lines = [
+        { at: "t2", sessionId: "s1", event: "subagentVerdict", role: "verifier", agentId: "a1", verdict: "CONFIRMED", findingsCount: 0, criticalOrMajorCount: 0 },
+        { at: "t3", sessionId: "s1", event: "subagentVerdict", role: "verifier", agentId: "a2", verdict: "REFUTED", findingsCount: 2, criticalOrMajorCount: 1 },
+      ];
+      await writeFile(file, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+
+      const out = run(home, agentsDir);
+      assert.doesNotMatch(out, /No delegations recorded/);
+      assert.match(out, /Automatic verdicts \(SubagentStop\): 1\/2/);
+    });
+  });
+});
