@@ -211,7 +211,11 @@ hooks that check the two rules most worth enforcing mechanically:
     loop-guard-cycle, timeout, or a crash — is logged to the monthly JSONL
     (`event: "verifyGateFailOpen"`, `reason: "error"` for the crash case) and surfaced via
     `systemMessage`, and `praxarch report` totals them separately from delegation stats so a gate
-    that's gone quiet doesn't look identical to one that's passing.
+    that's gone quiet doesn't look identical to one that's passing. The gate's other two
+    non-enforcement exits are logged the same way — `event: "verifyGateSkipped"` for
+    `PRAXARCH_SKIP_VERIFY=1` and `event: "verifyGateWaived"` for an accepted
+    `PRAXARCH_VERIFY_WAIVED:` waiver — and both feed the `Escape-hatch exits:` line in
+    `praxarch report`.
 
     **`route-guard`'s crash logging uses a distinct event name (issue #24), deliberately.**
     route-guard also fails open on its own internal errors, and also appends a JSONL row for it —

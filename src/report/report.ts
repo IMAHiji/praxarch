@@ -377,8 +377,19 @@ function render(records: LogRecord[]): string {
   // delegation row, and the two rows share no key to dedupe on — a separate counter has zero
   // double-count risk. Before this line existed, automatic verdicts were invisible here entirely.
   const subagentVerdicts = records.filter(isEventRecord).filter((r) => r.event === "subagentVerdict");
+  // The gate's other two non-enforcement exits (hooks/verify-gate.ts). Hoisted above the early
+  // return below so a session with only escape-hatch exits (no delegations, no fail-opens) still
+  // renders a report instead of being swallowed by the "nothing recorded" short-circuit.
+  const skippedCount = records.filter(isEventRecord).filter((r) => r.event === "verifyGateSkipped").length;
+  const waivedCount = records.filter(isEventRecord).filter((r) => r.event === "verifyGateWaived").length;
 
-  if (delegations.length === 0 && failOpens.length === 0 && subagentVerdicts.length === 0) {
+  if (
+    delegations.length === 0 &&
+    failOpens.length === 0 &&
+    subagentVerdicts.length === 0 &&
+    skippedCount === 0 &&
+    waivedCount === 0
+  ) {
     return "No delegations recorded for the requested window.";
   }
 
@@ -436,6 +447,12 @@ function render(records: LogRecord[]): string {
   // stderr/a systemMessage at the time, so this is the only durable record of the gate having
   // gone quiet (issue #1, defect 3).
   lines.push(`Verify-gate fail-opens: ${failOpens.length}`);
+  // The gate's other two non-enforcement exits (hooks/verify-gate.ts). Same reasoning as the
+  // fail-open counter above: an escape hatch leaves no trace to the user at the time, so this is
+  // the only durable record that the gate was bypassed rather than satisfied.
+  lines.push(
+    `Escape-hatch exits: ${skippedCount} skipped (PRAXARCH_SKIP_VERIFY), ${waivedCount} waived (PRAXARCH_VERIFY_WAIVED)`,
+  );
 
   lines.push("");
   lines.push(...renderTokenSpend(delegations));

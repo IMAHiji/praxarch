@@ -1983,3 +1983,64 @@ test("the shipped settings fragment pins an explicit Stop hook timeout", async (
   const fragment = JSON.parse(raw) as { hooks: { Stop: { hooks: { timeout?: number }[] }[] } };
   assert.equal(fragment.hooks.Stop[0]?.hooks[0]?.timeout, 60);
 });
+
+test("PRAXARCH_SKIP_VERIFY=1 logs a verifyGateSkipped audit row", async () => {
+  const fixture = await setupFixture();
+  try {
+    await makeNonTrivialDiff(fixture.repo);
+    const result = run(
+      fixture,
+      { session_id: "sk1", cwd: fixture.repo, hook_event_name: "Stop" },
+      { PRAXARCH_SKIP_VERIFY: "1" },
+    ) as { decision?: string };
+    assert.equal(result.decision, undefined);
+
+    const log = await readMonthlyLog(fixture.home);
+    const rows = log.filter((r) => r["event"] === "verifyGateSkipped");
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.["sessionId"], "sk1");
+    assert.equal(rows[0]?.["reason"], "PRAXARCH_SKIP_VERIFY");
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("an accepted waiver logs a verifyGateWaived audit row carrying the reason text", async () => {
+  const fixture = await setupFixture();
+  try {
+    await makeNonTrivialDiff(fixture.repo);
+    const result = run(fixture, {
+      session_id: "s1",
+      cwd: fixture.repo,
+      hook_event_name: "Stop",
+      last_assistant_message: "PRAXARCH_VERIFY_WAIVED: docs only",
+    }) as { decision?: string };
+    assert.equal(result.decision, undefined);
+
+    const log = await readMonthlyLog(fixture.home);
+    const rows = log.filter((r) => r["event"] === "verifyGateWaived");
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.["reason"], "docs only");
+    assert.ok(rows[0] && "diffHash" in rows[0]);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("a normal block logs neither escape-hatch event", async () => {
+  const fixture = await setupFixture();
+  try {
+    await makeNonTrivialDiff(fixture.repo);
+    const result = run(fixture, {
+      session_id: "s1",
+      cwd: fixture.repo,
+      hook_event_name: "Stop",
+    }) as { decision?: string };
+    assert.equal(result.decision, "block");
+
+    const log = await readMonthlyLog(fixture.home).catch(() => []);
+    assert.equal(log.filter((r) => r["event"] === "verifyGateSkipped" || r["event"] === "verifyGateWaived").length, 0);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});

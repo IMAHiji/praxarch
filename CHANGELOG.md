@@ -4,6 +4,10 @@
 
 ### Added
 
+- **verify-gate's two escape hatches now leave an audit trail.** `PRAXARCH_SKIP_VERIFY=1` and an
+  accepted `PRAXARCH_VERIFY_WAIVED:` waiver each append a JSONL row (`verifyGateSkipped` /
+  `verifyGateWaived`) to the monthly log instead of writing nothing, and `praxarch report` now
+  totals both on an `Escape-hatch exits:` line alongside the existing fail-open counter.
 - **`/issues` skill for planner-drafted, approval-gated issue creation.** Dispatches `planner`
   (no `model` override) to draft tracker-grade issues from a task or roadmap using an
   eight-section template (Goal, Context you must read first, Decisions already made,
