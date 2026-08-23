@@ -97,7 +97,16 @@ paste it into a Claude Code session and it walks through the same changes by han
 praxarch doctor
 ```
 
-Reports which pieces are wired up and whether the installed version matches the repo.
+Reports which pieces are wired up and whether the installed version matches the repo, including
+how many session-state and debug-payload files are past their retention window.
+
+```sh
+praxarch doctor --prune
+```
+
+Deletes session state under `~/.claude/praxarch/state/` older than `PRAXARCH_STATE_RETENTION_DAYS`
+(default 30) and debug payloads under `~/.claude/praxarch/debug/` older than
+`PRAXARCH_DEBUG_RETENTION_DAYS` (default 7). The current session's own files are never touched.
 
 ### Uninstall
 

@@ -15,6 +15,7 @@ import {
 import { exists, isJsonObject, readJsonIfExists, readTextIfExists } from "./lib/fsops.js";
 import { readJsonl } from "../hooks/lib/jsonl.js";
 import { logDir } from "../hooks/lib/paths.js";
+import { pruneRetention } from "./prune.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -450,6 +451,27 @@ async function checkInheritedModelAudit(): Promise<Check[]> {
   return checks;
 }
 
+// Informational only — always ok. A full state directory is untidy, not unhealthy, and must never
+// make `praxarch doctor` exit non-zero.
+async function checkRetention(): Promise<Check> {
+  const result = await pruneRetention({ dryRun: true });
+  const stateTotal = result.state.removed + result.state.kept;
+  const debugTotal = result.debug.removed + result.debug.kept;
+  if (result.state.removed === 0 && result.debug.removed === 0) {
+    return {
+      ok: true,
+      message: `state retention: nothing older than the retention window (${result.stateDays}d state / ${result.debugDays}d debug)`,
+    };
+  }
+  return {
+    ok: true,
+    message:
+      `state retention: ${result.state.removed} of ${stateTotal} state file(s) and ` +
+      `${result.debug.removed} of ${debugTotal} debug payload(s) are older than the retention window — ` +
+      "run `praxarch doctor --prune`",
+  };
+}
+
 function checkEnv(): Check {
   return {
     ok: !process.env["CLAUDE_CODE_SUBAGENT_MODEL"],
@@ -467,6 +489,7 @@ export async function doctor(): Promise<void> {
     await checkVersion(),
     await checkBuildRef(),
     ...(await checkInheritedModelAudit()),
+    await checkRetention(),
     checkEnv(),
   ];
 

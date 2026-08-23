@@ -4,6 +4,7 @@ import { doctor } from "./doctor.js";
 import { uninstall } from "./uninstall.js";
 import { recordVerdict } from "./record-verdict.js";
 import { verifyBundle } from "./verify-bundle.js";
+import { prune } from "./prune.js";
 
 function printUsage(): void {
   process.stdout.write(
@@ -14,6 +15,8 @@ function printUsage(): void {
       "  install [--yes]     Merge praxarch config into ~/.claude (shows a plan, asks to confirm)",
       "  uninstall [--yes]   Remove praxarch config from ~/.claude",
       "  doctor              Check installation health, report drift",
+      "  doctor --prune      Delete session state older than PRAXARCH_STATE_RETENTION_DAYS (30)",
+      "                      and debug payloads older than PRAXARCH_DEBUG_RETENTION_DAYS (7)",
       "  record-verdict --session <id> --role <role> [--file <path>]",
       "                      Record a verdict (verifier output on stdin or --file) into session",
       "                      state so verify-gate sees it — for verdicts delivered by a resumed",
@@ -42,6 +45,10 @@ async function main(): Promise<void> {
       await uninstall({ yes });
       return;
     case "doctor":
+      if (rest.includes("--prune")) {
+        process.exitCode = await prune();
+        return;
+      }
       await doctor();
       return;
     case "record-verdict":

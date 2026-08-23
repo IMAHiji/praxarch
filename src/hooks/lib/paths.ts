@@ -6,7 +6,10 @@ import { join } from "node:path";
 // re-read it on every call rather than freezing a value at import time.
 
 export function praxarchHome(): string {
-  return process.env["PRAXARCH_HOME"] ?? join(homedir(), ".claude", "praxarch");
+  // `||` rather than `??`: an empty PRAXARCH_HOME (e.g. `export PRAXARCH_HOME=$UNSET_VAR`) must
+  // mean "unset", not "the current directory" — stateDir() would otherwise resolve to the relative
+  // path "state", which the retention sweep (cli/prune.ts) would then delete files from.
+  return process.env["PRAXARCH_HOME"] || join(homedir(), ".claude", "praxarch");
 }
 
 // Sibling of praxarchHome(), not nested under it — agent definitions live at ~/.claude/agents,
