@@ -273,6 +273,17 @@
   an assistant quoting the instruction back could accidentally waive. The pattern is now
   line-start-anchored (`^PRAXARCH_VERIFY_WAIVED:[ \t]*(.+)$`, multiline), and every instruction the
   gate emits was reworded to say "start a line" instead of quoting the waiver string.
+- **session-state: `updateSessionState` is now locked, closing issue #4's residual race.** The
+  merge-write it added narrowed the window but didn't close it — two callers racing the function
+  itself could still interleave read/write pairs, and a fan-out's N parallel `SubagentStop` hooks
+  could lose one another's `lastVerifier` update, a silent verify-gate bypass. Every
+  read-modify-write now serializes through a per-session lockfile (`open(path, "wx")`,
+  `<state file>.lock`); a lock held past 10s is treated as belonging to a dead process and broken
+  rather than waited out, and lock acquisition itself never throws — a hook that failed here would
+  be worse than the race it closes. verify-gate's three whole-object `writeSessionState` calls
+  (loop-guard clear, waiver, block) are converted to `updateSessionState` merge-writes touching
+  only the four fields verify-gate owns, so a concurrent writer's `lastVerifier` update always
+  survives a verify-gate write.
 
 ## v0.1.1 — 2026-07-13
 

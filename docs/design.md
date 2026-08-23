@@ -297,7 +297,11 @@ the cost") as the expected payoff of tiered delegation, but nothing in the tool 
 (role, model, timestamp) to a monthly JSONL file at dispatch time; `subagent-stop` appends a
 separate `event: "subagentVerdict"` row once the subagent actually completes, and updates the
 matching in-session `delegations[]` entry in session state; the dispatch-time JSONL row is never
-rewritten. The status line
+rewritten. Every one of these read-modify-write updates — telemetry's, subagent-stop's,
+record-verdict's, and verify-gate's own loop-guard/waiver writes — is serialized through a
+per-session lockfile (`<state file>.lock`, `open(path, "wx")`), so N parallel `SubagentStop` hooks
+from a fan-out can't interleave and lose one another's update; a lock still held after 10s is
+treated as belonging to a dead process and broken rather than waited out. The status line
 surfaces the current session's counts live, and `praxarch report` aggregates role distribution and
 verifier pass rate across history.
 

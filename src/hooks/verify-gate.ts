@@ -4,7 +4,7 @@ import { diffFingerprint, diffStat } from "./lib/git-diff.js";
 import { appendJsonl } from "./lib/jsonl.js";
 import { resolveMeasurementCwd } from "./lib/measurement-cwd.js";
 import { logFileForDate } from "./lib/paths.js";
-import { readSessionState, writeSessionState } from "./lib/session-state.js";
+import { readSessionState, updateSessionState, type SessionState } from "./lib/session-state.js";
 import { readUntrackedBaseline } from "./lib/untracked-baseline-store.js";
 import { emit, readHookInput, type StopInput, type StopOutput } from "./lib/hook-io.js";
 import { formatBuildRef, readBuildInfo } from "./lib/build-info.js";
@@ -90,9 +90,13 @@ function withConfigWarnings(output: StopOutput, warnings: string[]): StopOutput 
 }
 
 // Clears both loop-guard counters (the per-diff one, and its paired block-hash — see
-// `verifyGateBlockHash` on SessionState — plus the per-cycle total) and persists it, but only
-// when something actually changes — a quiet stop shouldn't rewrite the state file every time.
-async function clearBlockCounters(state: Awaited<ReturnType<typeof readSessionState>>): Promise<void> {
+// `verifyGateBlockHash` on SessionState — plus the per-cycle total), but only when something
+// actually changes: a quiet stop shouldn't rewrite the state file every time. The in-memory
+// `state` is mutated as well as persisted, so later reads in main() (e.g. `priorBlocks`) see the
+// same values they always did. Persisted via `updateSessionState`, not `writeSessionState`: a
+// whole-object write built from the read at the top of main() can clobber a `lastVerifier` a
+// concurrent SubagentStop wrote in between — the exact field this gate reads.
+async function clearBlockCounters(sessionId: string, state: SessionState): Promise<void> {
   const hasCounter = (state.verifyGateConsecutiveBlocks ?? 0) !== 0;
   const hasBlockHash = state.verifyGateBlockHash !== undefined && state.verifyGateBlockHash !== null;
   const hasCycleCounter = (state.verifyGateCycleBlocks ?? 0) !== 0;
@@ -100,7 +104,11 @@ async function clearBlockCounters(state: Awaited<ReturnType<typeof readSessionSt
     state.verifyGateConsecutiveBlocks = 0;
     state.verifyGateBlockHash = null;
     state.verifyGateCycleBlocks = 0;
-    await writeSessionState(state);
+    await updateSessionState(sessionId, (fresh) => {
+      fresh.verifyGateConsecutiveBlocks = 0;
+      fresh.verifyGateBlockHash = null;
+      fresh.verifyGateCycleBlocks = 0;
+    });
   }
 }
 
@@ -151,10 +159,10 @@ async function runGate(): Promise<void> {
   const state = await readSessionState(input.session_id);
   // A new stop cycle always starts from zero, regardless of what this invocation ends up doing —
   // Claude Code guarantees stop_hook_active is false on the first round of any new stop attempt.
-  if (!input.stop_hook_active) await clearBlockCounters(state);
+  if (!input.stop_hook_active) await clearBlockCounters(input.session_id, state);
 
   if (process.env["PRAXARCH_SKIP_VERIFY"] === "1") {
-    await clearBlockCounters(state);
+    await clearBlockCounters(input.session_id, state);
     await logEscapeHatch(input.session_id, "verifyGateSkipped", { reason: "PRAXARCH_SKIP_VERIFY" });
     emitOnce(allow());
     return;
@@ -178,12 +186,18 @@ async function runGate(): Promise<void> {
     // against the wrong (hook) cwd.
     const waivedHash = measurementCwd === null ? null : await diffFingerprint(measurementCwd);
     if (waivedHash !== null) state.verifyGateWaivedHash = waivedHash;
-    // Written unconditionally rather than via clearBlockCounters, which skips the write when no
-    // counter was set — that would drop the waiver on a first-round stop, the common case.
     state.verifyGateConsecutiveBlocks = 0;
     state.verifyGateBlockHash = null;
     state.verifyGateCycleBlocks = 0;
-    await writeSessionState(state);
+    // Written unconditionally rather than via clearBlockCounters, which skips the write when no
+    // counter was set — that would drop the waiver on a first-round stop, the common case. Only
+    // the fields this gate owns are touched, so a concurrent SubagentStop's `lastVerifier` survives.
+    await updateSessionState(input.session_id, (fresh) => {
+      if (waivedHash !== null) fresh.verifyGateWaivedHash = waivedHash;
+      fresh.verifyGateConsecutiveBlocks = 0;
+      fresh.verifyGateBlockHash = null;
+      fresh.verifyGateCycleBlocks = 0;
+    });
     await logEscapeHatch(input.session_id, "verifyGateWaived", {
       // Model-produced text of unbounded length — bounded here so one waiver can't dominate the
       // log file. `?? ""` covers a pattern match with no captured group, which cannot happen with
@@ -228,7 +242,7 @@ async function runGate(): Promise<void> {
     changedLines >= config.verifyGate.minChangedLines ||
     changedFiles >= config.verifyGate.minChangedFiles;
   if (!isNonTrivial) {
-    await clearBlockCounters(state);
+    await clearBlockCounters(input.session_id, state);
     emitOnce(allow(warnings));
     return;
   }
@@ -247,7 +261,7 @@ async function runGate(): Promise<void> {
   // never null), so an unhashable diff falls through to normal enforcement rather than riding a
   // stale waiver.
   if (currentHash !== null && state.verifyGateWaivedHash === currentHash) {
-    await clearBlockCounters(state);
+    await clearBlockCounters(input.session_id, state);
     emitOnce(allow(warnings));
     return;
   }
@@ -285,7 +299,7 @@ async function runGate(): Promise<void> {
 
   const passed = verifier !== null && verifier.verdict === "CONFIRMED" && verifier.criticalOrMajorCount === 0 && !stale;
   if (passed) {
-    await clearBlockCounters(state);
+    await clearBlockCounters(input.session_id, state);
     emitOnce(allow(warnings));
     return;
   }
@@ -350,7 +364,11 @@ async function runGate(): Promise<void> {
   state.verifyGateConsecutiveBlocks = priorBlocks + 1;
   state.verifyGateBlockHash = currentHash;
   state.verifyGateCycleBlocks = priorCycleBlocks + 1;
-  await writeSessionState(state);
+  await updateSessionState(input.session_id, (fresh) => {
+    fresh.verifyGateConsecutiveBlocks = priorBlocks + 1;
+    fresh.verifyGateBlockHash = currentHash;
+    fresh.verifyGateCycleBlocks = priorCycleBlocks + 1;
+  });
 
   // Only one of lineDelta/fileDelta needs to clear its threshold for `stale` to trip (see the
   // clause above) — the other can independently be negative (e.g. files reverted while an

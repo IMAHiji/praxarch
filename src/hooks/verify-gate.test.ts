@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -459,6 +459,73 @@ test("blocks a non-trivial diff with a REFUTED checker record (end-to-end via te
     assert.equal(result.decision, "block");
     assert.match(result.reason ?? "", /REFUTED with 1 critical\/major/);
   } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+// Issue #33: the block path used to persist a whole-object write built from the state it read at
+// the top of main() — clobbering a lastVerifier a concurrent SubagentStop/telemetry write landed
+// in between. A verdict written strictly *before* the gate starts can't exercise this: the gate's
+// own initial readSessionState already picks it up, so even the old whole-object write carries it
+// through untouched. The race only exists in the window between that initial read and the block
+// path's own write, which — for a non-trivial diff — is however long diffStat/diffFingerprint take
+// to shell out to git. A slow git shim (see makeSlowGitDir, used elsewhere in this file for the
+// watchdog tests) widens that window enough to land a genuinely concurrent telemetry write inside
+// it, deterministically, without a sleep-and-hope race.
+function runGateAsync(
+  fixture: Fixture,
+  input: unknown,
+  extraEnv: Record<string, string> = {},
+): Promise<{ decision?: string; reason?: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("node", [script], {
+      cwd: fixture.repo,
+      env: { ...process.env, PRAXARCH_HOME: fixture.home, ...extraEnv },
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      try {
+        resolve(JSON.parse(stdout) as { decision?: string; reason?: string });
+      } catch (err) {
+        reject(new Error(`verify-gate exited ${String(code)} with unparseable stdout: ${stdout} / stderr: ${stderr} (${String(err)})`));
+      }
+    });
+    child.stdin.write(JSON.stringify(input));
+    child.stdin.end();
+  });
+}
+
+test("a block does not clobber a lastVerifier written concurrently with the gate's own measurement", async () => {
+  const fixture = await setupFixture();
+  const slowGitDir = await makeSlowGitDir(2);
+  try {
+    await makeNonTrivialDiff(fixture.repo);
+    const gatePromise = runGateAsync(
+      fixture,
+      { session_id: "sL", cwd: fixture.repo, hook_event_name: "Stop" },
+      { PATH: `${slowGitDir}:${process.env["PATH"] ?? ""}` },
+    );
+    // The gate's own initial state read happens near-instantly; the slow git shim holds it inside
+    // diffStat for ~2s afterward. This write is timed to land in that window — after the gate's
+    // read, before its own block-path write — which is exactly the race this issue closes.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    runTelemetryVerdict(fixture, "sL", "verifier", "REFUTED", [
+      { severity: "critical", file: "f.ts", line: 1, summary: "s", failure_scenario: "x" },
+    ]);
+    const result = await gatePromise;
+    assert.equal(result.decision, "block");
+    const state = await readState(fixture.home, "sL");
+    assert.equal((state["lastVerifier"] as { verdict?: string } | null)?.verdict, "REFUTED");
+  } finally {
+    await rm(slowGitDir, { recursive: true, force: true });
     await teardownFixture(fixture);
   }
 });
