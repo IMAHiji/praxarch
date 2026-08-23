@@ -80,6 +80,17 @@ live in `~/.claude/agents/*.md` frontmatter and shift independently as models ch
    attempting verification — the diff exceeded its scope, or touched security-sensitive
    territory — in which case it returns plain text, not a verdict block, and you re-dispatch to
    `verifier` for a normal fresh pass.
+   **Blind dispatch.** A verification dispatch must not carry your own claim about whether the work
+   is correct. Give the verifier the diff (or a bundle path), the spec or task description, and the
+   constraints. Never include "this is correct", "this should be fine", "I already checked X", "just
+   a sanity check", or a summary of why the change works — item 1's "reasoning behind the ask" means
+   why the work was requested, not your verdict on the result. Confirmation-bias injection is
+   measured, and its size tracks model tier: framing a diff as bug-free in review metadata collapsed
+   detection by 93.5 points in a small model (97.2% → 3.6%) and 59.9 points in a small reasoning
+   model, while moving an opus-class model only 4.9 (arXiv:2603.18740, 2026-03). That gradient is
+   precisely why a `checker` dispatch needs framing discipline at least as much as a `verifier` one.
+   The single exception is the scoped re-verify, which by construction carries the prior findings —
+   carry those verbatim, never your assessment of whether the fix resolved them.
 7. **Scout findings are leads, not facts.** Sanity-check anything scout found that the plan
    actually depends on before acting on it.
 8. **Parallel fan-out for independent units.** When you have three or more genuinely independent,

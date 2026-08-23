@@ -16,6 +16,12 @@
   accepted `PRAXARCH_VERIFY_WAIVED:` waiver each append a JSONL row (`verifyGateSkipped` /
   `verifyGateWaived`) to the monthly log instead of writing nothing, and `praxarch report` now
   totals both on an `Escape-hatch exits:` line alongside the existing fail-open counter.
+- **Blind-dispatch wording for `verifier`/`checker` and the orchestration policy, plus a
+  verifier-precision design sketch.** A verification dispatch must never carry the orchestrator's
+  own claim that the work is correct — only the diff/bundle, spec, and constraints — per measured
+  confirmation-bias injection effects (arXiv:2603.18740, 2026-03: -93.5 points on a small model,
+  -59.9 on a small reasoning model, -4.9 on an opus-class model). `docs/design.md` also sketches,
+  without implementing, a `record-disposition` mechanism for a future verifier-precision metric.
 - **`/issues` skill for planner-drafted, approval-gated issue creation.** Dispatches `planner`
   (no `model` override) to draft tracker-grade issues from a task or roadmap using an
   eight-section template (Goal, Context you must read first, Decisions already made,
