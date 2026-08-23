@@ -88,10 +88,13 @@ async function main(): Promise<void> {
   }
 
   const agentsDir = join(homedir(), ".claude", "agents");
-  const missing: string[] = [];
-  for (const role of ROLE_FILES) {
-    if (!(await fileExists(join(agentsDir, `${role}.md`)))) missing.push(role);
-  }
+  // Ten independent `access` calls — run together rather than serially. `Promise.all` over a `map`
+  // preserves ROLE_FILES order, so the warning below still names missing roles in the declared
+  // order.
+  const roleChecks = await Promise.all(
+    ROLE_FILES.map(async (role) => ({ role, present: await fileExists(join(agentsDir, `${role}.md`)) })),
+  );
+  const missing = roleChecks.filter((check) => !check.present).map((check) => check.role);
   if (missing.length > 0) {
     warnings.push(
       `praxarch role file(s) missing from ~/.claude/agents: ${missing.join(", ")}. Run ` +

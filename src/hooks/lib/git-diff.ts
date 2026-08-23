@@ -199,8 +199,13 @@ export async function diffStat(
   // existed. Optional and defaulted to "count everything" so every pre-Task-5 caller keeps
   // compiling and keeps today's behaviour unchanged.
   untrackedBaseline?: Record<string, string> | null,
+  // Set `knownGitRepo: true` only when the caller has ALREADY positively proved `cwd` is a working
+  // tree in this same measurement (see resolveMeasurementContext's `provenGitRepo`). Absent or
+  // false keeps today's behaviour exactly: this function runs its own `isGitRepo` probe. The Stop
+  // path used to pay for that probe twice on the same directory.
+  options?: { knownGitRepo?: boolean },
 ): Promise<DiffCounts | null> {
-  if (!(await isGitRepo(cwd))) {
+  if (options?.knownGitRepo !== true && !(await isGitRepo(cwd))) {
     return { changedLines: 0, changedFiles: 0 };
   }
 
@@ -215,14 +220,44 @@ export async function diffStat(
   // since the last commit -- an under-count that lets unverified session work through. See
   // git-diff.test.ts's "effective-baseline coupling" test, which pins this against exactly that
   // regression (mutation-tested by forcing resolveEffectiveBaseline to return null).
-  const effective = await resolveEffectiveBaseline(cwd, baseline);
-  const target = effective ?? "HEAD";
+  // The baseline chain, the numstat, the root resolution and the untracked listing are mutually
+  // independent git probes — launched together rather than serially. Each keeps its exact previous
+  // failure semantics: the numstat's failure is still classified by isBadObjectError, a null root
+  // and a null listing each still take the whole measurement down, and the null checks below still
+  // run in the same order. These are read-only probes, so running all three even when the numstat
+  // fails has no observable effect beyond latency.
+  //
+  // resolveEffectiveBaseline's own five git calls are genuinely data-dependent on one another (see
+  // upstream-baseline.ts) and stay serial; hoisting the chain in here just overlaps it with the
+  // root/listing probes. `?? "HEAD"` is safe only because that function never returns null for a
+  // real, non-empty `baseline` -- see git-diff.test.ts's "effective-baseline coupling" test, which
+  // pins this against exactly that regression.
+  const trackedPromise = (async (): Promise<string> => {
+    const effective = await resolveEffectiveBaseline(cwd, baseline);
+    return trackedDiff(cwd, effective ?? "HEAD", ["--numstat"]);
+  })();
+
+  const [trackedResult, root, untracked] = await Promise.all([
+    trackedPromise.then(
+      (stdout) => ({ ok: true as const, stdout }),
+      (err: unknown) => ({ ok: false as const, err }),
+    ),
+    repoRoot(cwd),
+    listUntrackedPaths(cwd),
+  ]);
 
   let tracked: DiffCounts;
-  try {
-    const numstatOut = await trackedDiff(cwd, target, ["--numstat"]);
-    tracked = parseNumstat(numstatOut, ignorePatterns);
-  } catch (err) {
+  if (trackedResult.ok) {
+    // Kept inside a handler deliberately: before the Promise.all refactor this call sat inside
+    // diffStat's try/catch, where a throw degraded to `return null` (fail-closed — verify-gate
+    // blocks on a failed measurement). parseNumstat is total today, but an escape here would
+    // instead reach verify-gate's crash handler and fail OPEN, inverting the failure direction.
+    try {
+      tracked = parseNumstat(trackedResult.stdout, ignorePatterns);
+    } catch {
+      return null;
+    }
+  } else if (isBadObjectError(trackedResult.err)) {
     // Unborn HEAD (no commits yet) is the one bad-object-shaped failure that isn't unknown — a
     // real repo genuinely has nothing committed to diff against, matching diffFingerprint's
     // "NOHEAD" treatment of the same state. `target === "HEAD"` above already keeps this from
@@ -230,11 +265,9 @@ export async function diffStat(
     // already HEAD), so this only ever catches the unborn-HEAD case. Anything else — the FIFO
     // repro's "unsupported file type," a maxBuffer overflow, a genuine numstat failure — is
     // unknown and must propagate as `null`, not degrade to a silently-zero tracked count.
-    if (isBadObjectError(err)) {
-      tracked = { changedLines: 0, changedFiles: 0 };
-    } else {
-      return null;
-    }
+    tracked = { changedLines: 0, changedFiles: 0 };
+  } else {
+    return null;
   }
 
   // Resolved before listing, and before any untracked path is read — every entry `readUntrackedEntry`
@@ -244,7 +277,6 @@ export async function diffStat(
   // (no template literal, no `String(root)`) so this call site stays correct regardless of
   // whether `repoRoot` returns a `string` or a raw-byte `Buffer` — the exact representation is
   // untracked.ts's decision, not this function's.
-  const root = await repoRoot(cwd);
   if (root === null) return null;
 
   // `listUntrackedPaths` takes any cwd inside the repo, not specifically the root — that's the
@@ -252,7 +284,6 @@ export async function diffStat(
   // whole-repo and root-relative regardless of which directory it's invoked from. Passing the
   // original `cwd` here, rather than `root`, means this call never depends on `root`'s
   // representation either.
-  const untracked = await listUntrackedPaths(cwd);
   // A failed listing means a hidden batch of new files could be sitting uncounted — exactly the
   // under-count this null contract exists to prevent, so it takes the whole measurement down
   // rather than degrading to "contributes nothing" the way an individual unreadable entry does.
@@ -461,27 +492,39 @@ export async function diffFingerprint(cwd: string): Promise<string | null> {
   // comment for why a decode here silently corrupts any tracked path with invalid-UTF-8 bytes,
   // and untracked.ts's `listUntrackedPaths` for the identical fix already applied on the
   // untracked-file half of the tree.
-  let statusOut: Buffer;
-  try {
-    const { stdout } = await execFileAsync(
-      "git",
-      ["status", "--porcelain", "-z", "--no-renames", "--untracked-files=all"],
-      { cwd, maxBuffer: MAX_GIT_BUFFER, encoding: "buffer" },
-    );
-    statusOut = stdout;
-  } catch {
-    return null;
-  }
+  // All three probes launched together; interpreted afterwards in exactly the previous order and
+  // by exactly the previous rules. `status` failing is still checked FIRST, which is what keeps the
+  // doc comment's invariant intact: `rev-parse --verify HEAD` failing while `git status` succeeded
+  // is a genuinely unborn HEAD ("NOHEAD"), not an unknown.
+  const [statusResult, headResult, rootResult] = await Promise.all([
+    execFileAsync("git", ["status", "--porcelain", "-z", "--no-renames", "--untracked-files=all"], {
+      cwd,
+      maxBuffer: MAX_GIT_BUFFER,
+      encoding: "buffer",
+    }).then(
+      (r) => ({ ok: true as const, stdout: r.stdout }),
+      () => ({ ok: false as const }),
+    ),
+    execFileAsync("git", ["rev-parse", "--verify", "HEAD"], { cwd }).then(
+      (r) => ({ ok: true as const, stdout: r.stdout }),
+      () => ({ ok: false as const }),
+    ),
+    execFileAsync("git", ["rev-parse", "--show-toplevel"], {
+      cwd,
+      maxBuffer: MAX_GIT_BUFFER,
+      encoding: "buffer",
+    }).then(
+      (r) => ({ ok: true as const, stdout: r.stdout }),
+      () => ({ ok: false as const }),
+    ),
+  ]);
+
+  if (!statusResult.ok) return null;
+  const statusOut = statusResult.stdout;
 
   // Consulted only after `status` has already proven this is a working repo — see the doc
   // comment above for why a rev-parse failure at this point means "unborn HEAD," not "unknown."
-  let head: string;
-  try {
-    const { stdout } = await execFileAsync("git", ["rev-parse", "--verify", "HEAD"], { cwd });
-    head = stdout.trim();
-  } catch {
-    head = "NOHEAD";
-  }
+  const head = headResult.ok ? headResult.stdout.trim() : "NOHEAD";
 
   // Porcelain paths are repo-root-relative, not cwd-relative — resolved once here rather than
   // joined against `cwd` below. See the doc comment above for why a failure here is `null`, not a
@@ -490,30 +533,22 @@ export async function diffFingerprint(cwd: string): Promise<string | null> {
   // same reasoning as untracked.ts's `repoRoot`: a repo root whose own on-disk name contains
   // invalid-UTF-8 bytes must not be corrupted to U+FFFD before every status entry is joined
   // against it, which would ENOENT every single entry regardless of its real content.
-  let root: Buffer;
-  try {
-    const { stdout } = await execFileAsync("git", ["rev-parse", "--show-toplevel"], {
-      cwd,
-      maxBuffer: MAX_GIT_BUFFER,
-      encoding: "buffer",
-    });
-    // Strips only git's single terminating 0x0A byte, not `.trim()`'s arbitrary trailing
-    // whitespace and not a `\r?` variant — same fix, and same reasoning, as untracked.ts's
-    // repoRoot: a repo whose own directory name ends in whitespace would otherwise come back
-    // truncated to a path that doesn't exist, and every status entry below would then `lstat`
-    // ENOENT against that wrong root regardless of its real on-disk content. Strictly the single
-    // trailing byte, not `\r?\n`: git writes LF through a pipe, never CRLF, so an optional `\r`
-    // here protects nothing real and instead eats a LEGAL trailing carriage return that's part of
-    // the directory name itself, reintroducing the exact truncation bug this line exists to fix
-    // (verified: a repo directory named "dircr\r" collapses to a nonexistent "dircr" root under
-    // `\r?\n$`, and the fingerprint stops moving on edits entirely). Working on the raw bytes
-    // (rather than `.replace()` on a decoded string) is what makes stripping only the exact
-    // trailing byte possible at all.
-    const last = stdout.length - 1;
-    root = last >= 0 && stdout[last] === 0x0a ? stdout.subarray(0, last) : stdout;
-  } catch {
-    return null;
-  }
+  if (!rootResult.ok) return null;
+  // Strips only git's single terminating 0x0A byte, not `.trim()`'s arbitrary trailing
+  // whitespace and not a `\r?` variant — same fix, and same reasoning, as untracked.ts's
+  // repoRoot: a repo whose own directory name ends in whitespace would otherwise come back
+  // truncated to a path that doesn't exist, and every status entry below would then `lstat`
+  // ENOENT against that wrong root regardless of its real on-disk content. Strictly the single
+  // trailing byte, not `\r?\n`: git writes LF through a pipe, never CRLF, so an optional `\r`
+  // here protects nothing real and instead eats a LEGAL trailing carriage return that's part of
+  // the directory name itself, reintroducing the exact truncation bug this line exists to fix
+  // (verified: a repo directory named "dircr\r" collapses to a nonexistent "dircr" root under
+  // `\r?\n$`, and the fingerprint stops moving on edits entirely). Working on the raw bytes
+  // (rather than `.replace()` on a decoded string) is what makes stripping only the exact
+  // trailing byte possible at all.
+  const rootRaw = rootResult.stdout;
+  const lastByte = rootRaw.length - 1;
+  const root = lastByte >= 0 && rootRaw[lastByte] === 0x0a ? rootRaw.subarray(0, lastByte) : rootRaw;
 
   const entries = parseStatusZ(statusOut).sort((a, b) => Buffer.compare(a.path, b.path));
 

@@ -2,7 +2,7 @@
 import { loadConfig } from "./lib/config.js";
 import { diffFingerprint, diffStat } from "./lib/git-diff.js";
 import { appendJsonl } from "./lib/jsonl.js";
-import { resolveMeasurementCwd } from "./lib/measurement-cwd.js";
+import { resolveMeasurementContext } from "./lib/measurement-cwd.js";
 import { logFileForDate } from "./lib/paths.js";
 import { readSessionState, updateSessionState, type SessionState } from "./lib/session-state.js";
 import { readUntrackedBaseline } from "./lib/untracked-baseline-store.js";
@@ -173,7 +173,8 @@ async function runGate(): Promise<void> {
   // measurement-cwd.ts's doc comment for why a dead anchor becomes `null` rather than a fallback
   // to `input.cwd`. `loadConfig` below deliberately keeps using `input.cwd`: which project's
   // config applies is a property of the hook invocation, not of which tree is being measured.
-  const measurementCwd = await resolveMeasurementCwd(state.baselineCwd, input.cwd);
+  const measurement = await resolveMeasurementContext(state.baselineCwd, input.cwd);
+  const measurementCwd = measurement.cwd;
 
   const waiverMatch = input.last_assistant_message ? WAIVER_PATTERN.exec(input.last_assistant_message) : null;
   if (waiverMatch) {
@@ -223,7 +224,11 @@ async function runGate(): Promise<void> {
   const currentCounts =
     measurementCwd === null
       ? null
-      : await diffStat(measurementCwd, config.verifyGate.ignorePatterns, state.baselineHead, untrackedBaseline);
+      : await diffStat(measurementCwd, config.verifyGate.ignorePatterns, state.baselineHead, untrackedBaseline, {
+          // Already proved by resolveMeasurementContext above — this probe used to run twice on
+          // the same directory, once there and once inside diffStat.
+          knownGitRepo: measurement.provenGitRepo,
+        });
 
   // `null` means the diff couldn't be measured at all (see diffStat's doc comment, and the dead-
   // anchor short-circuit above). Reading that as trivial is exactly the bypass this fix exists to

@@ -299,6 +299,17 @@
   only the four fields verify-gate owns, so a concurrent writer's `lastVerifier` update always
   survives a verify-gate write.
 
+### Changed
+
+- **verify-gate: the blocking Stop path spawns fewer git subprocesses — no behaviour change.**
+  Removed a duplicate `git rev-parse --is-inside-work-tree` probe (`diffStat` now trusts an
+  `isGitRepo` result already proven by `resolveMeasurementContext`), and parallelized `diffStat`'s
+  three independent probes (baseline chain + numstat, repo root, untracked listing),
+  `diffFingerprint`'s three independent probes (status, HEAD, show-toplevel), and
+  `session-init`'s ten role-file existence checks. Every failure/classification rule and every
+  return value stays exactly as it was; only the number and ordering of git subprocess spawns
+  changed.
+
 ## v0.1.1 — 2026-07-13
 
 Fixes driven by the first week of live telemetry (includes the previously uncommitted
