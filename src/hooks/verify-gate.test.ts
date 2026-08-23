@@ -1340,11 +1340,12 @@ test("the loop-guard fail-open is logged to the monthly JSONL", async () => {
 test("a verify-gate crash is logged to the monthly JSONL and surfaced via systemMessage", async () => {
   const fixture = await setupFixture();
   try {
-    // Corrupt the session state file so readSessionState throws a real (non-ENOENT) error,
-    // simulating a crash after the input has already been parsed (so sessionId is known).
+    // The session state *path* is a directory, so readSessionState's readFile hits EISDIR -- a
+    // genuine (non-ENOENT) environment failure that still throws per issue #atomic-state-writes:
+    // that fix quarantines corrupt *content* (unparseable/wrong-shaped JSON) instead of throwing,
+    // so a truncated/malformed file can no longer stand in for "readSessionState throws" here.
     const stateDir = join(fixture.home, "state");
-    await mkdir(stateDir, { recursive: true });
-    await writeFile(join(stateDir, "s1.json"), "{ not valid json");
+    await mkdir(join(stateDir, "s1.json"), { recursive: true });
 
     const result = run(fixture, {
       session_id: "s1",
@@ -1848,5 +1849,32 @@ test("issue #23 / MAJOR 2: anchor is a non-repo directory, hook cwd is ALSO not 
     await rm(home, { recursive: true, force: true });
     await rm(nonRepoAnchor, { recursive: true, force: true });
     await rm(nonRepoHookCwd, { recursive: true, force: true });
+  }
+});
+
+// Regression pin: a corrupt state file used to throw out of main() into the crash handler, which
+// emits an allow — a permanent, silent gate disable for the rest of that session.
+test("a corrupt session-state file blocks (fails closed) instead of crash-failing open", async () => {
+  const fixture = await setupFixture();
+  try {
+    await makeNonTrivialDiff(fixture.repo);
+    await mkdir(join(fixture.home, "state"), { recursive: true });
+    await writeFile(join(fixture.home, "state", "sCorrupt.json"), '{"sessionId":"sCorrupt","delegations":[');
+
+    const result = run(fixture, {
+      session_id: "sCorrupt",
+      cwd: fixture.repo,
+      hook_event_name: "Stop",
+    }) as { decision?: string };
+    assert.equal(result.decision, "block");
+
+    const log = await readMonthlyLog(fixture.home).catch(() => []);
+    assert.equal(
+      log.filter((r) => r["event"] === "verifyGateFailOpen" && r["reason"] === "error").length,
+      0,
+      "a corrupt state file must not produce a crash fail-open row",
+    );
+  } finally {
+    await teardownFixture(fixture);
   }
 });

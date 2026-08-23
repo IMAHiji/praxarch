@@ -34,6 +34,10 @@ export default tseslint.config(
     },
   },
   {
-    ignores: ["dist/**", ".verify-out/**", "node_modules/**", "eslint.config.js"],
+    // .claude/worktrees/** holds separate git worktree checkouts (their own tsconfig/file lists)
+    // left behind by /orchestrate and /fan-out runs — not part of this project's own source tree,
+    // and `tsconfig.json`'s file list doesn't cover them, so linting them here only ever produces
+    // a parserOptions.project "file not found" error, never a real finding.
+    ignores: ["dist/**", ".verify-out/**", "node_modules/**", "eslint.config.js", ".claude/worktrees/**"],
   },
 );
