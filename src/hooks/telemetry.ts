@@ -47,8 +47,9 @@ async function main(): Promise<void> {
   }
 
   // Parse the verdict (if any) and log the delegation row *before* touching session state — a
-  // corrupt state file (readSessionState throws on anything but ENOENT) must not cost the JSONL
-  // log its only record of this delegation having happened at all.
+  // failing state read (readSessionState throws on non-ENOENT environment errors like EACCES/EISDIR;
+  // corrupt content no longer throws, it quarantines to empty state) must not cost the JSONL log
+  // its only record of this delegation having happened at all.
   let parsedVerdict: { verdict: "CONFIRMED" | "REFUTED"; findingsCount: number; criticalOrMajorCount: number } | null =
     null;
   // Issue #15: an async dispatch's `tool_response` here is the dispatch-time launch receipt, not

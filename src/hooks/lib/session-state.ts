@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { sessionStatePath } from "./paths.js";
 
@@ -127,21 +127,74 @@ function emptyState(sessionId: string): SessionState {
   };
 }
 
-export async function readSessionState(sessionId: string): Promise<SessionState> {
-  const path = sessionStatePath(sessionId);
+/**
+ * Moves an unparseable state file aside and returns empty state. Empty state is the fail-CLOSED
+ * outcome: it has no `lastVerifier`, so verify-gate demands a verifier pass rather than allowing.
+ * The alternative — throwing — escapes verify-gate's `main()` into its crash handler, which emits
+ * an allow, permanently disabling the gate for that session.
+ */
+async function quarantineCorruptState(path: string, sessionId: string): Promise<SessionState> {
   try {
-    const raw = await readFile(path, "utf8");
-    return JSON.parse(raw) as SessionState;
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return emptyState(sessionId);
-    throw err;
+    await rename(path, `${path}.corrupt-${Date.now()}`);
+  } catch {
+    // Best-effort: if the rename fails the caller still gets empty state (the fail-closed
+    // outcome), and the next write replaces the corrupt file anyway.
   }
+  process.stderr.write(
+    `praxarch: session state for ${sessionId} was corrupt — quarantined to ${path}.corrupt-* and reset to empty state\n`,
+  );
+  return emptyState(sessionId);
 }
 
+export async function readSessionState(sessionId: string): Promise<SessionState> {
+  const path = sessionStatePath(sessionId);
+  let raw: string;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return emptyState(sessionId);
+    // A non-ENOENT read failure (permissions, the path being a directory) is an environment
+    // problem, not corruption — quarantining it would fail too. Propagate, unchanged.
+    throw err;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return await quarantineCorruptState(path, sessionId);
+  }
+  // Well-formed JSON that isn't a plain object (`null`, `[]`, `42`) would null-dereference in
+  // every caller — same quarantine treatment as a parse failure.
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return await quarantineCorruptState(path, sessionId);
+  }
+  return parsed as SessionState;
+}
+
+/**
+ * Atomic write: a full temp file in the same directory, then `rename(2)` over the target. A plain
+ * in-place `writeFile` leaves truncated JSON behind when the process is killed mid-write, and
+ * `readSessionState` used to throw on that — which, from verify-gate's crash handler, is a
+ * permanent silent fail-open for the rest of that session. `rename` is atomic within a filesystem,
+ * so a reader sees either the whole old file or the whole new one, never a partial.
+ */
 export async function writeSessionState(state: SessionState): Promise<void> {
   const path = sessionStatePath(state.sessionId);
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, JSON.stringify(state, null, 2), "utf8");
+  const tmpPath = `${path}.${process.pid}.tmp`;
+  try {
+    await writeFile(tmpPath, JSON.stringify(state, null, 2), "utf8");
+    await rename(tmpPath, path);
+  } catch (err) {
+    // Best-effort cleanup so a failed write doesn't leave a stray temp file behind; the original
+    // failure is what the caller must see.
+    try {
+      await unlink(tmpPath);
+    } catch {
+      // Nothing useful to do — the temp file may never have been created.
+    }
+    throw err;
+  }
 }
 
 /**

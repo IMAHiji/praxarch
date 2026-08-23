@@ -92,6 +92,15 @@
 
 ### Fixed
 
+- **session-state: a kill mid-write no longer permanently disables verify-gate for the rest of
+  the session.** `writeSessionState` wrote in place, so a process killed mid-write left truncated
+  JSON on disk; `readSessionState` threw a `SyntaxError` on that, which escaped verify-gate's
+  `main()` into its crash handler — emitting an allow on every subsequent `Stop` for that session,
+  a silent, permanent enforcement bypass. Writes are now atomic (temp file in the same directory,
+  then `rename(2)`), and an unparseable or wrong-shaped (`null`/array/scalar) state file is
+  quarantined to a `.corrupt-<epoch>` sidecar and read back as empty state — the fail-**closed**
+  outcome, since empty state has no `lastVerifier` and the gate demands a fresh verifier pass
+  rather than allowing.
 - **verify-gate/telemetry/record-verdict: the diff measurement now anchors to the session's own
   checkout, not the hook/CLI's cwd (issue #23).** Reported live: a session shell that `cd`'d into
   `.claude/worktrees/agent-*` had every Stop charge a 6-line fix as "1202 lines across 7 files" —
