@@ -2,6 +2,8 @@
 import { loadConfig } from "./lib/config.js";
 import { readHookInput, type SubagentStopInput } from "./lib/hook-io.js";
 import { resolveMeasurementCwd } from "./lib/measurement-cwd.js";
+import { appendJsonl } from "./lib/jsonl.js";
+import { logFileForDate } from "./lib/paths.js";
 import { readSessionState, updateSessionState, type VerifierRecord } from "./lib/session-state.js";
 import { readUntrackedBaseline } from "./lib/untracked-baseline-store.js";
 import {
@@ -15,9 +17,12 @@ import {
 /**
  * SubagentStop — fires on real subagent completion (background subagents included), unlike
  * PostToolUse(Agent), which since 2026-08-13's move to async dispatch only ever sees the launch
- * receipt (issue #15). This hook is what restores automatic verdict recording; PostToolUse(Agent)
- * still owns the unconditional dispatch-time JSONL row (see telemetry.ts) and that write is
- * untouched by anything here.
+ * receipt (issue #15). This hook is what restores automatic verdict recording: it writes
+ * `lastVerifier` into session state (what verify-gate reads) and appends its own
+ * `event: "subagentVerdict"` row to the monthly JSONL (what `praxarch report` counts).
+ * PostToolUse(Agent) still owns the unconditional dispatch-time delegation row (see telemetry.ts)
+ * and that write is untouched by anything here — the log stays append-only, no row is ever
+ * rewritten.
  *
  * Findings this depends on (task 1, `.claude/plans/2026-08-19-subagent-stop-verdicts.md`,
  * observed live on this installed harness version, 2026-08-19):
@@ -119,19 +124,42 @@ async function main(): Promise<void> {
     changedFiles,
   };
 
+  // Its own append-only event row, written BEFORE session state is touched — same ordering
+  // contract as telemetry.ts (telemetry.ts:49-51): a corrupt state file must not cost the log its
+  // only record that this verdict happened. This is a NEW event type, not a rewrite of the
+  // dispatch-time delegation row telemetry.ts already wrote: that log stays append-only, and
+  // issue #24's guardrail forbids schema changes to existing rows. Before this row existed,
+  // automatic verdicts were invisible to `praxarch report` entirely — since the 2026-08-13 async
+  // dispatch change, telemetry.ts's row always carries `verdict: null`.
+  try {
+    await appendJsonl(logFileForDate(), {
+      at,
+      sessionId: input.session_id,
+      event: "subagentVerdict",
+      role: agentType,
+      agentId,
+      verdict: summary.verdict,
+      findingsCount: summary.findingsCount,
+      criticalOrMajorCount: summary.criticalOrMajorCount,
+      diffHash,
+      changedLines,
+      changedFiles,
+    });
+  } catch (err) {
+    // Non-fatal: the session-state write below is what verify-gate actually reads, and it must
+    // still happen. Never blocks a subagent from stopping.
+    process.stderr.write(`praxarch subagent-stop: could not append the verdict log row: ${String(err)}\n`);
+  }
+
   // Merge-write, re-reading the freshest snapshot immediately before mutating — same contract as
   // telemetry.ts's write. Two things happen here:
   //  1. `lastVerifier` is set — this is the field verify-gate actually reads.
   //  2. The matching `delegations[]` entry (by `agentId`) is updated IN PLACE with the same
-  //     verdict fields, per the plan's decision: no second row, the dispatch-time delegation
-  //     record stays the single record of this delegation. If no entry matches (missing
-  //     `agent_id` on either side, or the dispatch row predates this field), `lastVerifier` still
-  //     gets set — that's what the gate needs — but no delegation row is touched; a verdict must
-  //     never be attributed to the wrong delegation by guessing.
-  //  The JSONL delegation log is deliberately NOT touched here — it stays append-only, written
-  //  once at dispatch by telemetry.ts. Rewriting a line inside it is a different and riskier
-  //  operation than this merge-write, and the plan opted for correctness in session state over
-  //  updating the log (see task 3).
+  //     verdict fields: no second row, the dispatch-time delegation record stays the single record
+  //     of this delegation. If no entry matches (missing `agent_id` on either side, or the
+  //     dispatch row predates this field), `lastVerifier` still gets set — that's what the gate
+  //     needs — but no delegation row is touched; a verdict must never be attributed to the wrong
+  //     delegation by guessing.
   await updateSessionState(input.session_id, (fresh) => {
     fresh.lastVerifier = verifierRecord;
     if (agentId) {
