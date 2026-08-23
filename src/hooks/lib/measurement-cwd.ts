@@ -41,21 +41,48 @@ import { isGitRepo } from "./git-diff.js";
  * telemetry/subagent-stop/record-verdict's `diffHash: null` / counts `null`), never as "nothing
  * changed."
  */
-export async function resolveMeasurementCwd(
+export interface MeasurementContext {
+  /** Exactly what `resolveMeasurementCwd` returns — see this module's doc comment. */
+  cwd: string | null;
+  /**
+   * True only when `cwd` is the anchor AND `isGitRepo` positively proved it is a working tree
+   * during this very resolution. Callers may use it to skip a redundant repo probe (see
+   * `diffStat`'s `knownGitRepo` option). Deliberately false for the legacy `hookCwd` fallback: that
+   * path never probes anything, so claiming it proven would silently disable `diffStat`'s
+   * non-repo `{0, 0}` branch for exactly the sessions that still rely on it.
+   */
+  provenGitRepo: boolean;
+}
+
+export async function resolveMeasurementContext(
   baselineCwd: string | undefined,
   hookCwd: string,
-): Promise<string | null> {
-  if (baselineCwd === undefined) return hookCwd;
+): Promise<MeasurementContext> {
+  if (baselineCwd === undefined) return { cwd: hookCwd, provenGitRepo: false };
 
   try {
     await access(baselineCwd);
   } catch {
-    return null;
+    return { cwd: null, provenGitRepo: false };
   }
 
-  if (await isGitRepo(baselineCwd)) return baselineCwd;
+  if (await isGitRepo(baselineCwd)) return { cwd: baselineCwd, provenGitRepo: true };
 
   // Anchor exists but isn't a repo -- only a hook cwd that IS a repo makes this the divergence
   // (laundering) case; see the doc comment above for why the two branches diverge.
-  return (await isGitRepo(hookCwd)) ? null : baselineCwd;
+  return (await isGitRepo(hookCwd))
+    ? { cwd: null, provenGitRepo: false }
+    : { cwd: baselineCwd, provenGitRepo: false };
+}
+
+/**
+ * Unchanged contract, now expressed over `resolveMeasurementContext` so there is exactly one
+ * implementation of the resolution rules. Every non-Stop-path caller (telemetry, subagent-stop,
+ * record-verdict) keeps using this.
+ */
+export async function resolveMeasurementCwd(
+  baselineCwd: string | undefined,
+  hookCwd: string,
+): Promise<string | null> {
+  return (await resolveMeasurementContext(baselineCwd, hookCwd)).cwd;
 }

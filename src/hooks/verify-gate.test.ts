@@ -107,6 +107,17 @@ async function makeFakeGitDirFailingNumstat(): Promise<string> {
   return dir;
 }
 
+// A `git` shim that records every invocation's argv to a file and then execs the real git, so a
+// test can assert on how many times a specific probe was spawned.
+async function makeCountingGitDir(logPath: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "praxarch-verifygate-countinggit-"));
+  const realGit = execFileSync("which", ["git"]).toString("utf8").trim();
+  const shim = ["#!/bin/sh", `echo "$*" >> "${logPath}"`, `exec "${realGit}" "$@"`].join("\n");
+  await writeFile(join(dir, "git"), `${shim}\n`, "utf8");
+  await chmod(join(dir, "git"), 0o755);
+  return dir;
+}
+
 async function withFakeGitOnPathFailingNumstat<T>(fn: (fakeGitDir: string) => Promise<T>): Promise<T> {
   const fakeGitDir = await makeFakeGitDirFailingNumstat();
   try {
@@ -303,6 +314,29 @@ test("blocks a non-trivial diff with no verifier record", async () => {
     assert.equal(result.decision, "block");
     assert.match(result.reason ?? "", /no verifier pass is on record/);
   } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("the Stop path probes 'is this a git repo' exactly once", async () => {
+  const fixture = await setupFixture();
+  runSessionInit(fixture, "sP");
+  await makeNonTrivialDiff(fixture.repo);
+  const logPath = join(fixture.home, "git-calls.log");
+  const countingDir = await makeCountingGitDir(logPath);
+  try {
+    const result = run(
+      fixture,
+      { session_id: "sP", cwd: fixture.repo, hook_event_name: "Stop" },
+      { PATH: `${countingDir}:${process.env["PATH"] ?? ""}` },
+    ) as { decision?: string };
+    assert.equal(result.decision, "block");
+
+    const calls = (await readFile(logPath, "utf8")).split("\n");
+    const probeCalls = calls.filter((line) => line.startsWith("rev-parse --is-inside-work-tree"));
+    assert.equal(probeCalls.length, 1);
+  } finally {
+    await rm(countingDir, { recursive: true, force: true });
     await teardownFixture(fixture);
   }
 });
