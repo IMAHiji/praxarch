@@ -38,6 +38,12 @@ export function sessionStatePath(sessionId: string): string {
   return join(stateDir(), `${sessionId}.json`);
 }
 
+// Sibling of the state file, so the lock lives on the same filesystem as its target and is swept
+// by the same retention rule. See session-state.ts's acquireSessionLock for the protocol.
+export function sessionLockPath(sessionId: string): string {
+  return `${sessionStatePath(sessionId)}.lock`;
+}
+
 // Separate from sessionStatePath deliberately: session state is re-read, re-parsed,
 // re-serialized, and re-written on every PostToolUse (telemetry.ts), while an untracked-file
 // snapshot is written exactly once (SessionStart) and read rarely (a Stop-time diff measurement).

@@ -1,6 +1,6 @@
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { sessionStatePath } from "./paths.js";
+import { sessionLockPath, sessionStatePath } from "./paths.js";
 
 export interface VerifierRecord {
   verdict: "CONFIRMED" | "REFUTED";
@@ -197,6 +197,96 @@ export async function writeSessionState(state: SessionState): Promise<void> {
   }
 }
 
+// A lock held longer than this is assumed to belong to a dead process (a hook killed at the
+// harness timeout, a crashed CLI) and is broken rather than waited out. Generous relative to a
+// real update, which is a read, a mutate and an atomic rename.
+const LOCK_STALE_MS = 10_000;
+// Poll interval while a live lock is held. Short enough that a normal handoff is imperceptible.
+const LOCK_RETRY_INTERVAL_MS = 25;
+// Total time spent waiting before giving up and proceeding UNLOCKED. Never throws: a hook that
+// fails here would be worse than the lost-update race this exists to close — telemetry and
+// subagent-stop would fail outright, and verify-gate would take its crash path, which fails OPEN.
+const LOCK_MAX_WAIT_MS = 5_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Per-session advisory lock. `open(path, "wx")` is O_CREAT|O_EXCL — the atomic "create only if
+ * absent" primitive this needs; nothing here relies on advisory locking support in the filesystem.
+ * Returns a release function that is always safe to call, including when the lock was never
+ * acquired.
+ */
+async function acquireSessionLock(sessionId: string): Promise<() => Promise<void>> {
+  const path = sessionLockPath(sessionId);
+  const deadline = Date.now() + LOCK_MAX_WAIT_MS;
+  let mkdirRetried = false;
+  for (;;) {
+    try {
+      const handle = await open(path, "wx");
+      try {
+        await handle.writeFile(`${process.pid}\n${new Date().toISOString()}\n`, "utf8");
+      } finally {
+        await handle.close();
+      }
+      return async () => {
+        try {
+          await unlink(path);
+        } catch {
+          // Already gone (broken as stale by another process) — nothing to do.
+        }
+      };
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" && !mkdirRetried) {
+        // State dir doesn't exist yet (fresh PRAXARCH_HOME) — create it and retry the open once.
+        // An EEXIST on the retry falls into the normal wait loop below.
+        mkdirRetried = true;
+        try {
+          await mkdir(dirname(path), { recursive: true });
+          continue;
+        } catch (mkdirErr) {
+          process.stderr.write(
+            `praxarch: session lock unavailable (${(mkdirErr as NodeJS.ErrnoException).code}), proceeding unlocked\n`,
+          );
+          return async () => undefined;
+        }
+      }
+      if (code !== "EEXIST") {
+        // The lock directory is unwritable, or something else is structurally wrong. Proceed
+        // unlocked rather than failing the caller.
+        process.stderr.write(`praxarch: session lock unavailable (${code}), proceeding unlocked\n`);
+        return async () => undefined;
+      }
+    }
+
+    // Held. Break it if it is stale, otherwise wait.
+    try {
+      const st = await stat(path);
+      if (Date.now() - st.mtimeMs > LOCK_STALE_MS) {
+        try {
+          await unlink(path);
+        } catch {
+          // Someone else broke it first — fall through and retry the create.
+        }
+        continue;
+      }
+    } catch {
+      // Vanished between the failed create and the stat — retry the create immediately.
+      continue;
+    }
+
+    if (Date.now() >= deadline) {
+      process.stderr.write(
+        `praxarch: session-state lock for ${sessionId} was held for more than ${LOCK_MAX_WAIT_MS}ms — proceeding without it\n`,
+      );
+      return async () => undefined;
+    }
+    await sleep(LOCK_RETRY_INTERVAL_MS);
+  }
+}
+
 /**
  * Merge-write for callers (telemetry) that own only a subset of state's fields and may run
  * concurrently with another writer (verify-gate) that owns the rest. Re-reads the freshest
@@ -204,15 +294,25 @@ export async function writeSessionState(state: SessionState): Promise<void> {
  * was read at the start of a possibly-long-running caller — so a concurrent writer's change that
  * lands anywhere before this call still survives, instead of being silently overwritten by a
  * stale whole-object write. `mutate` must touch only the fields the caller owns; anything it
- * doesn't touch passes through unchanged from the fresh read. Not a lock: two callers racing this
- * function against each other can still interleave read/write pairs, but that's out of scope here
- * — see the calling hook's own concurrency contract.
+ * doesn't touch passes through unchanged from the fresh read. Serialized by a per-session
+ * lockfile (see acquireSessionLock above), so two callers racing this function no longer
+ * interleave read/write pairs. `writeSessionState` itself deliberately does NOT take the lock —
+ * the lock is not reentrant, and a nested acquisition would self-deadlock; every concurrent
+ * writer must go through this function.
  */
 export async function updateSessionState(
   sessionId: string,
   mutate: (state: SessionState) => void,
 ): Promise<void> {
-  const state = await readSessionState(sessionId);
-  mutate(state);
-  await writeSessionState(state);
+  const release = await acquireSessionLock(sessionId);
+  try {
+    const state = await readSessionState(sessionId);
+    mutate(state);
+    await writeSessionState(state);
+  } finally {
+    // Released even when `mutate` or the write throws — a held lock outliving its process is what
+    // LOCK_STALE_MS exists to clean up, and leaking one on a routine error would make that the
+    // common case.
+    await release();
+  }
 }
