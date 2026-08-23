@@ -16,7 +16,11 @@ import { diffFingerprint, diffStat } from "./git-diff.js";
 
 export interface VerifierVerdictJson {
   verdict: "CONFIRMED" | "REFUTED";
-  findings?: { severity: "critical" | "major" | "minor" }[];
+  // `severity` is typed as an open string, not the `"critical" | "major" | "minor"` union it used
+  // to carry: this value comes straight out of JSON.parse on agent-produced text, so the union was
+  // a claim about untrusted input rather than a guarantee. `summarizeVerdict` below is what
+  // actually classifies it, fail-closed.
+  findings?: { severity?: string }[];
 }
 
 export interface ParsedVerdict {
@@ -98,6 +102,9 @@ export class MalformedVerdictError extends Error {}
  * Callers that must stay non-blocking on any failure (e.g. telemetry.ts) already wrap their entire
  * pipeline in a catch-all; callers that must refuse a malformed verdict outright
  * (record-verdict.ts) catch this specifically.
+ * Severity classification is fail-closed: a finding counts toward `criticalOrMajorCount` unless its
+ * `severity` trims and lowercases to exactly `"minor"` — so `"Critical"`, an unrecognized severity,
+ * and a missing severity all count, rather than silently reading as zero.
  */
 export function summarizeVerdict(parsed: VerifierVerdictJson): ParsedVerdict {
   if (parsed.verdict !== "CONFIRMED" && parsed.verdict !== "REFUTED") {
@@ -109,9 +116,17 @@ export function summarizeVerdict(parsed: VerifierVerdictJson): ParsedVerdict {
   ) {
     throw new MalformedVerdictError("findings must be an array of objects");
   }
-  const criticalOrMajor = (parsed.findings ?? []).filter(
-    (f) => f.severity === "critical" || f.severity === "major",
-  ).length;
+  // Fail closed on anything that isn't unambiguously minor. Three defects this closes at once,
+  // all of which used to let a CONFIRMED verdict with real critical findings pass verify-gate's
+  // `criticalOrMajorCount === 0` check (verify-gate.ts:224):
+  //  - case: "Critical"/"MAJOR" matched neither literal and counted as zero.
+  //  - unknown severities: "blocker", "high", "sev1" counted as zero.
+  //  - missing or non-string severity: counted as zero.
+  // A severity is only excluded from the count when it trims and lowercases to exactly "minor".
+  const criticalOrMajor = (parsed.findings ?? []).filter((f) => {
+    const severity = typeof f.severity === "string" ? f.severity.trim().toLowerCase() : "";
+    return severity !== "minor";
+  }).length;
   return {
     verdict: parsed.verdict,
     findingsCount: parsed.findings?.length ?? 0,

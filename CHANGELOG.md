@@ -245,6 +245,16 @@
     whitespace in a real path and freezes a fingerprint), and permission-dependent tests gated on a
     functional probe rather than `process.getuid()` (CI running as root makes a uid guard skip
     exactly where it matters).
+- **verify-gate/verdict: severity matching is now case-insensitive and fail-closed, and the waiver
+  string must start a line.** `summarizeVerdict` compared `severity` against exactly the literals
+  `"critical"`/`"major"`, so a `"Critical"` finding or an unrecognized severity like `"blocker"`
+  counted as zero and let a CONFIRMED verdict with real critical findings pass the gate; a finding
+  now counts toward `criticalOrMajorCount` unless it trims and lowercases to exactly `"minor"`.
+  Separately, `WAIVER_PATTERN` matched `PRAXARCH_VERIFY_WAIVED: <reason>` anywhere in the final
+  message, including mid-sentence — and the gate's own block message quoted that literal string, so
+  an assistant quoting the instruction back could accidentally waive. The pattern is now
+  line-start-anchored (`^PRAXARCH_VERIFY_WAIVED:[ \t]*(.+)$`, multiline), and every instruction the
+  gate emits was reworded to say "start a line" instead of quoting the waiver string.
 
 ## v0.1.1 — 2026-07-13
 

@@ -564,6 +564,7 @@ test("blocks a non-trivial change of only untracked files in a repo with no comm
   }
 });
 
+// The waiver must START a line (WAIVER_PATTERN is ^-anchored, multiline) — see the new mid-sentence case below.
 test("an explicit waiver in the final message bypasses the gate", async () => {
   const fixture = await setupFixture();
   try {
@@ -572,7 +573,7 @@ test("an explicit waiver in the final message bypasses the gate", async () => {
       session_id: "s1",
       cwd: fixture.repo,
       hook_event_name: "Stop",
-      last_assistant_message: "Docs-only change. PRAXARCH_VERIFY_WAIVED: no behavior change, docs only.",
+      last_assistant_message: "Docs-only change.\nPRAXARCH_VERIFY_WAIVED: no behavior change, docs only.",
     }) as { decision?: string };
     assert.equal(result.decision, undefined);
   } finally {
@@ -1874,6 +1875,38 @@ test("a corrupt session-state file blocks (fails closed) instead of crash-failin
       0,
       "a corrupt state file must not produce a crash fail-open row",
     );
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("a waiver quoted mid-sentence does not waive the gate", async () => {
+  const fixture = await setupFixture();
+  try {
+    await makeNonTrivialDiff(fixture.repo);
+    const result = run(fixture, {
+      session_id: "s1",
+      cwd: fixture.repo,
+      hook_event_name: "Stop",
+      last_assistant_message: 'I was told to state "PRAXARCH_VERIFY_WAIVED: <reason>" if verification doesn\'t apply.',
+    }) as { decision?: string };
+    assert.equal(result.decision, "block");
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("a CONFIRMED verdict with a capitalised critical finding still blocks", async () => {
+  const fixture = await setupFixture();
+  try {
+    await makeNonTrivialDiff(fixture.repo);
+    runTelemetryVerdict(fixture, "sSev", "verifier", "CONFIRMED", [
+      { severity: "Critical", file: "f.ts", line: 1, summary: "s", failure_scenario: "x" },
+    ]);
+    const result = run(fixture, { session_id: "sSev", cwd: fixture.repo, hook_event_name: "Stop" }) as {
+      decision?: string;
+    };
+    assert.equal(result.decision, "block");
   } finally {
     await teardownFixture(fixture);
   }

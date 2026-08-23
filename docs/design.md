@@ -41,9 +41,10 @@ hooks that check the two rules most worth enforcing mechanically:
   commit (falling back to HEAD, plus untracked new files) is large enough to count as non-trivial
   (configurable thresholds) and no `CONFIRMED` verifier record with zero
   critical/major findings is on file for the session. Two escape hatches exist on purpose —
-  `PRAXARCH_SKIP_VERIFY=1` and an explicit `PRAXARCH_VERIFY_WAIVED: <reason>` in the final
-  message — because a hard gate with no escape becomes something users route around by lying to
-  it, which is worse than no gate.
+  `PRAXARCH_SKIP_VERIFY=1` and an explicit `PRAXARCH_VERIFY_WAIVED: <reason>` starting a line of
+  the final message (the match is line-start-anchored, so the gate's own quoted instructions can't
+  accidentally waive) — because a hard gate with no escape becomes something users route around by
+  lying to it, which is worse than no gate.
   - **The diff measurement is session-scoped in both halves (issue #16).** Before this, `diffStat`
     charged the session with work it did not do, in two directions at once, and both were observed
     live: a 118-line pre-existing untracked file counted in full on every Stop, and a `git pull` of
@@ -274,7 +275,9 @@ to compute a pass rate across history). The verdict is derived, not asserted: `C
 zero `critical`/`major` findings, regardless of what the `verdict` field itself claims — a defense
 against a verifier that writes "CONFIRMED" out of habit while listing a critical finding.
 `praxarch record-verdict` is the manual fallback for any completion `subagent-stop` misses (e.g. a
-subagent that errors or is interrupted before stopping normally).
+subagent that errors or is interrupted before stopping normally). Severity classification is
+fail-closed: a finding counts as critical/major unless its severity is exactly `minor`,
+case-insensitively — an unrecognized or missing severity counts rather than reading as zero.
 
 ### Telemetry: measured, not claimed
 
