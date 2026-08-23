@@ -119,6 +119,28 @@ async function logFailOpen(sessionId: string | null, reason: "loop-guard" | "loo
   });
 }
 
+// The gate has three non-enforcement exits: a fail-open (logged above since issue #1), and the two
+// escape hatches below — neither of which left any trace on disk before this. `praxarch report`
+// totals all three separately, so a gate that is being routinely bypassed doesn't read as a gate
+// that is passing. Best-effort: a log failure here must never turn a clean allow into a crash-path
+// allow with a misleading `reason: "error"` row.
+async function logEscapeHatch(
+  sessionId: string,
+  event: "verifyGateSkipped" | "verifyGateWaived",
+  fields: Record<string, unknown>,
+): Promise<void> {
+  try {
+    await appendJsonl(logFileForDate(), {
+      at: new Date().toISOString(),
+      sessionId,
+      event,
+      ...fields,
+    });
+  } catch (err) {
+    process.stderr.write(`praxarch verify-gate: could not append the ${event} audit row: ${String(err)}\n`);
+  }
+}
+
 async function runGate(): Promise<void> {
   const input = await readHookInput<StopInput>();
   sessionIdForCrashLog = input.session_id;
@@ -133,6 +155,7 @@ async function runGate(): Promise<void> {
 
   if (process.env["PRAXARCH_SKIP_VERIFY"] === "1") {
     await clearBlockCounters(state);
+    await logEscapeHatch(input.session_id, "verifyGateSkipped", { reason: "PRAXARCH_SKIP_VERIFY" });
     emitOnce(allow());
     return;
   }
@@ -161,6 +184,13 @@ async function runGate(): Promise<void> {
     state.verifyGateBlockHash = null;
     state.verifyGateCycleBlocks = 0;
     await writeSessionState(state);
+    await logEscapeHatch(input.session_id, "verifyGateWaived", {
+      // Model-produced text of unbounded length — bounded here so one waiver can't dominate the
+      // log file. `?? ""` covers a pattern match with no captured group, which cannot happen with
+      // the current WAIVER_PATTERN but must not throw if it ever changes.
+      reason: (waiverMatch[1] ?? "").trim().slice(0, 500),
+      diffHash: waivedHash,
+    });
     emitOnce(allow());
     return;
   }

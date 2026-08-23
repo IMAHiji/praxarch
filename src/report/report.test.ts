@@ -471,3 +471,23 @@ test("a log of only subagentVerdict rows still renders a report", async () => {
     });
   });
 });
+
+test("renders escape-hatch counts", async () => {
+  await withPraxarchHome(async (home) => {
+    await withAgentsDir(async (agentsDir) => {
+      await mkdir(join(home, "logs"), { recursive: true });
+      const file = logFilePath(home);
+      const lines = [
+        { at: "t1", sessionId: "s1", role: "mech-executor", model: "sonnet", batchId: null, verdict: null, criticalOrMajorCount: null },
+        { at: "t2", sessionId: "s1", event: "verifyGateSkipped", reason: "PRAXARCH_SKIP_VERIFY" },
+        { at: "t3", sessionId: "s2", event: "verifyGateSkipped", reason: "PRAXARCH_SKIP_VERIFY" },
+        { at: "t4", sessionId: "s3", event: "verifyGateWaived", reason: "docs only", diffHash: "abc123" },
+      ];
+      await writeFile(file, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+
+      const out = run(home, agentsDir);
+      assert.match(out, /Escape-hatch exits: 2 skipped \(PRAXARCH_SKIP_VERIFY\), 1 waived \(PRAXARCH_VERIFY_WAIVED\)/);
+      assert.match(out, /Delegations: 1/);
+    });
+  });
+});
