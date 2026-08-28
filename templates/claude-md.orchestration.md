@@ -39,6 +39,11 @@ live in `~/.claude/agents/*.md` frontmatter and shift independently as models ch
   unchanged.
 - Scope: code/praxarch roles only for now. `adobe-practice-research` already has an equivalent
   split; other content-creation skills don't yet — treat as a separate, tracked follow-up.
+- **Advisor rides on top of role bindings.** `advisorModel` in settings pairs every dispatch with
+  a stronger consult-only model at decision points. It is not an exception to the no-explicit-
+  `model` rule, it never substitutes for a `verifier` pass, and advisor cost is invisible to
+  praxarch telemetry — treat frequent advisor use on cheap roles (`checker`, `Explore`) as a
+  smell, not a feature.
 
 ### Delegation protocol
 

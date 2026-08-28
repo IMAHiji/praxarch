@@ -17,6 +17,15 @@
 3. **Policy layer** (`~/.claude/CLAUDE.md`) — delegation rules written entirely in role names,
    never model IDs, so role→model bindings can change underneath the policy without touching it.
 
+The settings fragment also ships `advisorModel: "opus"`, Claude Code's advisor feature: a stronger
+model consulted mid-task at decision points, configured with that single key and no agent files or
+frontmatter changes. Subagents inherit the session's `advisorModel`, paired against their own bound
+model, so executor-tier roles get frontier consultation at decision moments without touching role
+bindings. Advisor calls are server-side and therefore invisible to route-guard and telemetry —
+praxarch doesn't attempt to observe or meter them. The statusline surfaces the armed state as
+`adv:<model>`, and `praxarch doctor` reports whether it's configured and whether the
+`CLAUDE_CODE_DISABLE_ADVISOR_TOOL` kill switch would silently disable it.
+
 Pilotfish's own design document is unusually honest about what it deliberately left out:
 per-project config, enforcement hooks, and pinned model IDs, on the grounds that "policy-only
 works first; machinery is the documented next step if discipline slips." That's the entry point
