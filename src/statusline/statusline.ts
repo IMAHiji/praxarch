@@ -1,6 +1,8 @@
 #!/usr/bin/env node
+import { readFile } from "node:fs/promises";
 import { readSessionState, type SessionState } from "../hooks/lib/session-state.js";
 import { readStdin } from "../hooks/lib/hook-io.js";
+import { claudeSettingsPath } from "../hooks/lib/paths.js";
 
 /**
  * Renders a one-line role-spend summary for the current session: delegations per role, total
@@ -87,6 +89,21 @@ function gateParts(state: SessionState): string[] {
   return parts;
 }
 
+// The armed advisor silently changes the effective capability of every dispatch (subagents
+// inherit advisorModel), so the statusline surfaces it. Any read/parse failure renders nothing —
+// an absent indicator must never be distinguishable from a broken settings file here.
+async function advisorPart(): Promise<string | null> {
+  try {
+    const raw = await readFile(claudeSettingsPath(), "utf8");
+    const settings = JSON.parse(raw) as { advisorModel?: unknown };
+    return typeof settings.advisorModel === "string" && settings.advisorModel.length > 0
+      ? `adv:${settings.advisorModel}`
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 async function main(): Promise<void> {
   let sessionId: string | undefined;
   try {
@@ -115,6 +132,9 @@ async function main(): Promise<void> {
   if (tokens > 0) parts.push(`${formatTokens(tokens)} tok`);
 
   parts.push(...gateParts(state));
+
+  const advisor = await advisorPart();
+  if (advisor !== null) parts.push(advisor);
 
   const summary = parts.length > 0 ? parts.join(" ") : "idle";
   process.stdout.write(`praxarch ▸ ${summary}`);

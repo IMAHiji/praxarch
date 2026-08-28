@@ -64,13 +64,13 @@ async function checkSettings(): Promise<Check[]> {
   const checks: Check[] = [];
   const result = await readJsonIfExists<Record<string, unknown>>(SETTINGS_PATH);
   if (result.status === "absent") {
-    return [{ ok: false, message: `${SETTINGS_PATH} does not exist — run \`praxarch install\`.` }];
+    return [{ ok: false, message: `${SETTINGS_PATH} does not exist — run \`praxarch install\`.` }, checkAdvisor(null)];
   }
   if (result.status === "malformed") {
     // Hooks/statusLine checks below need a parsed object to inspect — nothing to check against a
     // file that didn't parse, so report the one failure and stop here. doctor() itself still runs
     // every other top-level check; only this function's own remaining logic is skipped.
-    return [{ ok: false, message: `${SETTINGS_PATH} is not valid JSON: ${result.error.message}` }];
+    return [{ ok: false, message: `${SETTINGS_PATH} is not valid JSON: ${result.error.message}` }, checkAdvisor(null)];
   }
   if (!isJsonObject(result.value)) {
     // Well-formed JSON (e.g. `null`, `[]`, `42`) that isn't an object — same "nothing to check
@@ -81,6 +81,7 @@ async function checkSettings(): Promise<Check[]> {
         ok: false,
         message: `${SETTINGS_PATH} does not contain a JSON object (got ${JSON.stringify(result.value)}) — run \`praxarch install\` to fix it.`,
       },
+      checkAdvisor(null),
     ];
   }
   const settings = result.value;
@@ -101,6 +102,7 @@ async function checkSettings(): Promise<Check[]> {
     ok: Boolean(statusLine?.command?.includes("praxarch")),
     message: "settings.json statusLine points at praxarch",
   });
+  checks.push(checkAdvisor(settings));
   return checks;
 }
 
@@ -477,6 +479,25 @@ function checkEnv(): Check {
     ok: !process.env["CLAUDE_CODE_SUBAGENT_MODEL"],
     message: "CLAUDE_CODE_SUBAGENT_MODEL is not set (it would override all role model bindings)",
   };
+}
+
+// Advisor health (see docs/spec-advisor.md). Three states:
+// - not configured: informational pass — advisor is optional.
+// - configured and kill switch set: fail — the setting looks armed but is silently inert.
+// - configured, no kill switch: informational pass naming the model. Pairing validity against
+//   each role's bound model is decided server-side per dispatch and can't be checked statically.
+function checkAdvisor(settings: Record<string, unknown> | null): Check {
+  const advisorModel = settings?.["advisorModel"];
+  if (typeof advisorModel !== "string" || advisorModel.length === 0) {
+    return { ok: true, message: "advisorModel is not configured (advisor disabled — optional)" };
+  }
+  if (process.env["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"]) {
+    return {
+      ok: false,
+      message: `advisorModel is "${advisorModel}" but CLAUDE_CODE_DISABLE_ADVISOR_TOOL is set — the advisor is silently disabled`,
+    };
+  }
+  return { ok: true, message: `advisorModel is "${advisorModel}" — subagent dispatches inherit it` };
 }
 
 export async function doctor(): Promise<void> {

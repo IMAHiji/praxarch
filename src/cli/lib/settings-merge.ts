@@ -1,8 +1,8 @@
 /**
  * Merges praxarch's settings fragment into the user's existing ~/.claude/settings.json
  * additively and non-destructively:
- *   - model / fallbackModel / statusLine: only SET if the key is currently absent. Never
- *     overwrite a value the user already chose (e.g. via `/model`) — surfaced as a "left
+ *   - model / fallbackModel / statusLine / advisorModel: only SET if the key is currently absent.
+ *     Never overwrite a value the user already chose (e.g. via `/model`) — surfaced as a "left
  *     unchanged" note instead.
  *   - hooks: merged per event+matcher group, appending only hook commands that aren't already
  *     present. Safe to run repeatedly (idempotent) and safe alongside hooks the user configured
@@ -25,6 +25,7 @@ export interface SettingsFragment {
   model?: unknown;
   fallbackModel?: unknown;
   statusLine?: unknown;
+  advisorModel?: string;
   hooks?: HooksMap;
   [key: string]: unknown;
 }
@@ -73,7 +74,7 @@ export function mergeSettings(
   const merged = structuredClone(existing);
   const changes: string[] = [];
 
-  for (const key of ["model", "fallbackModel", "statusLine"] as const) {
+  for (const key of ["model", "fallbackModel", "statusLine", "advisorModel"] as const) {
     if (fragment[key] === undefined) continue;
     if (merged[key] === undefined) {
       merged[key] = fragment[key];

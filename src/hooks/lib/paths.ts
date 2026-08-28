@@ -19,6 +19,14 @@ export function agentsDir(): string {
   return process.env["PRAXARCH_AGENTS_DIR"] ?? join(homedir(), ".claude", "agents");
 }
 
+// Claude Code's own settings file — outside praxarch's tree, like agentsDir above.
+// PRAXARCH_TARGET_CLAUDE_HOME mirrors cli/lib/paths.ts's override so tests can point it at a
+// fixture directory.
+export function claudeSettingsPath(): string {
+  const home = process.env["PRAXARCH_TARGET_CLAUDE_HOME"] ?? join(homedir(), ".claude");
+  return join(home, "settings.json");
+}
+
 export function logDir(): string {
   return join(praxarchHome(), "logs");
 }

@@ -4,6 +4,8 @@
 
 ### Added
 
+- Ship `advisorModel: opus` in the settings fragment; surface it in the statusline
+  (`adv:<model>`) and `praxarch doctor`.
 - **Status line surfaces verify-gate state.** Shows "no verdict on record", a verified/unverified
   verdict (with the verdict-time diff size, e.g. `✓verified@120L/4f`), a standing waiver, and blocks
   already spent this stop cycle — from persisted session state only, no subprocess spawned. A

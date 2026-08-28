@@ -27,6 +27,7 @@ function runCli(
   fixture: Fixture,
   args: string[],
   cliPath = cli,
+  extraEnv: Record<string, string> = {},
 ): { stdout: string; stderr: string; status: number } {
   // The default `cli` is spawned straight out of TEST_DIST_DIR, so its own DIST_DIR must resolve
   // to that same tree (real dist/ under plain `pnpm test`, the scratch tree under `pnpm verify`)
@@ -42,11 +43,16 @@ function runCli(
     PRAXARCH_TARGET_CLAUDE_HOME: fixture.claudeHome,
     PRAXARCH_HOME: join(fixture.claudeHome, "praxarch"),
   };
+  // Scrubbed rather than inherited: an ambient CLAUDE_CODE_DISABLE_ADVISOR_TOOL (e.g. set in the
+  // developer's own shell) would flip checkAdvisor's verdict for every test here, not just the
+  // ones that deliberately set it — those tests pass it back in explicitly via extraEnv.
+  delete env["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"];
   if (cliPath === cli) {
     env["PRAXARCH_TEST_DIST_DIR"] = TEST_DIST_DIR;
   } else {
     delete env["PRAXARCH_TEST_DIST_DIR"];
   }
+  Object.assign(env, extraEnv);
   const result = spawnSync("node", [cliPath, ...args], { env });
   return {
     stdout: result.stdout?.toString("utf8") ?? "",
@@ -230,6 +236,51 @@ test("doctor fails before install", async () => {
   try {
     const { status } = runCli(fixture, ["doctor"]);
     assert.equal(status, 1);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+// Advisor health (docs/spec-advisor.md): three states checkAdvisor can report.
+test("doctor reports advisorModel configured cleanly, naming the model", async () => {
+  const fixture = await setupFixture();
+  try {
+    runCli(fixture, ["install", "--yes"]);
+    const { stdout, status } = runCli(fixture, ["doctor"]);
+    assert.equal(status, 0, stdout);
+    assert.match(stdout, /advisorModel is "opus" — subagent dispatches inherit it/);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("doctor reports advisorModel as not configured when absent from settings.json", async () => {
+  const fixture = await setupFixture();
+  try {
+    runCli(fixture, ["install", "--yes"]);
+    const settingsPath = join(fixture.claudeHome, "settings.json");
+    const settings = JSON.parse(await readFile(settingsPath, "utf8")) as Record<string, unknown>;
+    delete settings["advisorModel"];
+    await writeFile(settingsPath, JSON.stringify(settings));
+
+    const { stdout, status } = runCli(fixture, ["doctor"]);
+    assert.equal(status, 0, stdout);
+    assert.match(stdout, /advisorModel is not configured \(advisor disabled — optional\)/);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("doctor fails when advisorModel is configured but the kill switch is set", async () => {
+  const fixture = await setupFixture();
+  try {
+    runCli(fixture, ["install", "--yes"]);
+    const { stdout, status } = runCli(fixture, ["doctor"], cli, { CLAUDE_CODE_DISABLE_ADVISOR_TOOL: "1" });
+    assert.equal(status, 1, stdout);
+    assert.match(
+      stdout,
+      /✗ advisorModel is "opus" but CLAUDE_CODE_DISABLE_ADVISOR_TOOL is set — the advisor is silently disabled/,
+    );
   } finally {
     await teardownFixture(fixture);
   }
