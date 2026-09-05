@@ -20,8 +20,9 @@ mechanical migrations applied to N independent packages.
 
 1. **Write N complete specs**, one per unit — same bar as any delegation (goal, constraints, success
    criteria, paths, reasoning). Do this before launching anything.
-2. **Launch all N in one message**, each as an `Agent` call with `isolation: "worktree"` and an explicit
-   `model` per the role table in the orchestration policy. Do not launch them one at a time across
+2. **Launch all N in one message**, each as an `Agent` call with `isolation: "worktree"` to a defined role
+   (no `model` param — the role's frontmatter binding decides; pick the role from its description
+   in your tool list). Do not launch them one at a time across
    multiple turns — the point is concurrency. Prefix each call's `description` with
    `[fanout:<batch-id>]` (same id across all N, e.g. a short slug for the overall task) so telemetry
    can group them — see Reporting below.

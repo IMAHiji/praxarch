@@ -17,8 +17,9 @@
 3. **Policy layer** (`~/.claude/CLAUDE.md`) — delegation rules written entirely in role names,
    never model IDs, so role→model bindings can change underneath the policy without touching it.
 
-The settings fragment also ships `advisorModel: "opus"`, Claude Code's advisor feature: a stronger
-model consulted mid-task at decision points, configured with that single key and no agent files or
+The settings fragment also ships `advisorModel: "fable"`, Claude Code's advisor feature: a stronger
+model consulted mid-task at decision points (a Fable main model only accepts a Fable advisor, and
+Fable usage bills to usage credits on some plans), configured with that single key and no agent files or
 frontmatter changes. Subagents inherit the session's `advisorModel`, paired against their own bound
 model, so executor-tier roles get frontier consultation at decision moments without touching role
 bindings. Advisor calls are server-side and therefore invisible to route-guard and telemetry —

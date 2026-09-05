@@ -77,3 +77,32 @@ a high tier and high effort, implementation runs at a lower tier and
 medium effort. Do not duplicate the subagents' work in the main session —
 no re-reading every file they touched, no re-deriving the plan. Relay,
 route, report.
+
+## Verification ladder (applies to any praxarch verification, not just this pipeline)
+
+Within this pipeline, `plan-reviewer` is the first-pass reviewer and its verdict satisfies
+verify-gate; the ladder below picks up only after a REFUTE, or outside `/orchestrate` where
+`verifier` takes plan-reviewer's place.
+
+- `verifier` is mandatory for the first pass on any diff verify-gate would block on, and for
+  anything security-sensitive.
+- After `verifier` REFUTEs and the findings are fixed, dispatch the re-verify to `checker`, not a
+  fresh `verifier` sweep. Carry the prior findings verbatim plus `git diff <verdict-time-ref>`
+  (the diff since the REFUTED verdict), and instruct it to confirm each finding is resolved and
+  check the fix for regressions — not to redo the broad sweep.
+- `checker` is also the right choice for a first-pass verification on a diff below verify-gate's
+  non-trivial threshold.
+- If `checker`'s scoped re-verify itself REFUTEs, escalate the next pass back to `verifier`.
+- `checker` may decline a dispatch before verifying (diff exceeded its scope, or touched
+  security-sensitive territory). It returns plain text, not a verdict block; re-dispatch to
+  `verifier` for a normal fresh pass.
+- A verdict from a resumed agent (continued via `SendMessage`) never reaches verify-gate on its
+  own — no hook observes that reply. Run
+  `praxarch record-verdict --session <id> --role <role>` with the agent's output (stdin or
+  `--file`) instead of waiving.
+- Blind dispatch: never include "this is correct", "should be fine", "I already checked X", or
+  "just a sanity check" in a verification dispatch. Framing a diff as bug-free in review metadata
+  collapsed detection by 93.5 points in a small model and 59.9 in a small reasoning model, while
+  moving an opus-class model only 4.9 (arXiv:2603.18740, 2026-03). The scoped re-verify is the one
+  dispatch that legitimately carries prior conclusions — the prior findings verbatim, never your
+  assessment of whether the fix resolved them.
