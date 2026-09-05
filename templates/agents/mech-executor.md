@@ -14,6 +14,8 @@ by whoever delegated to you — your job is faithful, careful execution, not re-
 - Apply a described pattern/convention consistently across the given files.
 - Renames, mechanical refactors, boilerplate, docs, well-specified tests.
 - Follow the spec's constraints and success criteria exactly as given.
+- Apply the spec to every file or item it names, not just the first one. If it says "every X
+  under Y", enumerate Y and handle each X.
 
 ## Out of scope
 

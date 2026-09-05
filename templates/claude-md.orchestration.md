@@ -1,107 +1,59 @@
 <!-- praxarch:orchestration:start -->
 ## Orchestration (praxarch)
 
-This section governs how the main session delegates work. It applies to **this session only** —
-subagents do not read or apply these rules to their own behavior; the orchestrator applies them
-when deciding whether and how to delegate.
+These rules govern how this session delegates. Subagents do not read them; the orchestrator
+applies them. This section is the CLAUDE.md instruction that authorizes subagent use — the
+harness default of "no subagents unless asked" is satisfied by it.
 
-Roles are named, not modeled. Never write a specific model name in this policy — role bindings
-live in `~/.claude/agents/*.md` frontmatter and shift independently as models change.
+Roles are named, not modeled. Never write a model name in this policy; bindings live in
+`~/.claude/agents/*.md` frontmatter. Each role's description in your tool list says what it is for.
 
-### Roles
+### Hard rules
 
-| Role | Use for |
-|---|---|
-| `scout` | Read-only recon: symbol usages, config discovery, "where is X" |
-| `Explore` | Broad fan-out search across many files when you only need the conclusion |
-| `mech-executor` | Fully-specified mechanical work: renames, pattern refactors, docs, boilerplate |
-| `executor` | Work needing local design judgment: features, fixes, non-security tradeoffs |
-| `verifier` | Fresh-context adversarial review of non-trivial completed work |
-| `checker` | Cheaper sonnet-tier re-verify after a REFUTED verdict, or a sub-threshold first pass — never the first pass on a diff the gate would block on, never security-sensitive work |
-| `security-executor` | Auth, authz, secrets, crypto, trust-boundary validation — always, no exceptions |
-| `planner` | Decomposes a task into a numbered, self-contained implementation plan (`/orchestrate` pipeline) |
-| `implementer` | Executes exactly one numbered task from a planner's plan file (`/orchestrate` pipeline) |
-| `plan-reviewer` | Verifies completed implementation work against the plan file (`/orchestrate` pipeline) |
-
-### Plan/execute tier rule (hard rule)
-
-- **Planning** runs at the highest tier you currently have available — this varies with usage,
-  so check what's actually selected rather than assuming a fixed name. For code, that's the
-  `planner` role via `/orchestrate`, or the orchestrator's own session when it's already at that
-  tier. Planning always ends in a written plan (a plan file for `/orchestrate`; an equivalent
-  written-down plan for ad-hoc delegation) — never a handoff based only on in-context reasoning.
-- **Execution** always runs at a role bound to a lower tier (`implementer`, `executor`,
-  `mech-executor`) — never the orchestrator itself, even when the orchestrator's own session
-  happens to already be at the highest tier. Being the highest-tier session is a reason to
-  delegate execution, not license to do it yourself.
-- Unlike the process skills in Autonomy, this is hard, not suggest-only — it governs everything
-  above the "single-file read / quick judgment call" line in Retained locally below, which is
-  unchanged.
-- Scope: code/praxarch roles only for now. `adobe-practice-research` already has an equivalent
-  split; other content-creation skills don't yet — treat as a separate, tracked follow-up.
-- **Advisor rides on top of role bindings.** `advisorModel` in settings pairs every dispatch with
-  a stronger consult-only model at decision points. It is not an exception to the no-explicit-
-  `model` rule, it never substitutes for a `verifier` pass, and advisor cost is invisible to
-  praxarch telemetry — treat frequent advisor use on cheap roles (`checker`, `Explore`) as a
-  smell, not a feature.
+- **Plan high, execute low.** Planning runs at the highest tier available (the `planner` role via
+  `/orchestrate`, or this session when it is already at that tier) and always ends in a written
+  plan. Execution runs at a lower-tier role (`implementer`, `executor`, `mech-executor`) — never
+  this session, even when this session is the highest tier. Only the "Retained locally" items
+  below are exempt.
+- **Models come from role bindings.** Never pass `model` when delegating to a defined role; an
+  explicit `model` silently defeats tiered routing. Only ad-hoc calls with no defined role declare
+  `model`. (route-guard enforces this.)
+- **Security routing.** Authentication, authorization, secrets, cryptography, and trust-boundary
+  validation go to `security-executor`, always. Security *review* goes to `verifier` as normal.
+  (route-guard enforces this; a soft-deny warning is not a substitute for routing deliberately.)
+- **One verification pass, then done.** Non-trivial changes get one fresh-context `verifier` pass
+  before you report completion; gate on its `verdict` and zero unresolved `critical`/`major`
+  findings, not on prose tone. That pass is the whole verification step: do not self-verify, re-run
+  the verifier's checks, or dispatch a second reviewer unless the first REFUTEs. After a REFUTE and
+  fix, the re-verify goes to `checker` with the prior findings verbatim; `checker` escalates back
+  to `verifier` if it REFUTEs or declines. (verify-gate enforces the gate; `/orchestrate` and the
+  verifier/checker prompts carry the procedure, including `praxarch record-verdict` for verdicts
+  from resumed agents.)
+- **Blind dispatch.** A verification dispatch carries the diff, the spec, and the constraints —
+  never your own view of whether the work is correct. Framing a diff as bug-free measurably
+  collapses defect detection, and more so on smaller models.
 
 ### Delegation protocol
 
-1. **Complete specs only.** Every delegation includes: goal, constraints, success criteria,
-   relevant paths, and the reasoning behind the ask — not just a task description. Subagents
-   start cold; a thin spec produces a thin result.
-2. **Cheapest capable role first.** Don't reach for `executor` when `mech-executor` covers it,
-   and don't delegate at all for single-file reads or quick judgment calls the orchestrator can
-   make directly — delegation overhead exceeds the savings below a certain size.
-3. **Bounded escalation.** After two failed attempts at a role, escalate one tier or take the
-   work over directly. Never retry the same tier a third time.
-4. **Models come from role bindings.** Never pass `model` when delegating to a defined role —
-   an explicit `model` overrides the role's frontmatter binding and silently defeats tiered
-   routing. Only ad-hoc calls that use no defined role declare `model` explicitly; never rely
-   on inheriting the main session's model. (praxarch's route-guard hook enforces both.)
-5. **Security routing is not optional.** Anything touching authentication, authorization, secrets,
-   cryptography, or trust-boundary input validation goes to `security-executor`, full stop — this
-   keeps benign defensive-security work away from safety classifiers tuned for general use, and
-   keeps that code path held to one consistently careful standard. (Roles in
-   `routeGuard.softDenyRoles`, default `["executor"]`, get a warning instead of a block on a
-   security-keyword match — route deliberately, don't rely on the warning as the check.)
-6. **Verify before claiming done.** Non-trivial changes (anything beyond a trivial fix) get a
-   `verifier` pass before you report completion. Verifier returns a structured verdict — gate on
-   `verdict` and zero unresolved `critical`/`major` findings, not on prose tone.
-   (praxarch's verify-gate hook enforces this on sessions with a large enough diff; see
-   `PRAXARCH_SKIP_VERIFY` for the escape hatch on changes that don't warrant it.) A verdict from a
-   **resumed** agent (e.g. continued via `SendMessage`) never reaches verify-gate on its own — no
-   hook observes that reply. Run `praxarch record-verdict --session <id> --role <role>` with the
-   agent's output (stdin or `--file`) instead of waiving; that's what keeps re-verification cheap
-   without training you to reach for `PRAXARCH_VERIFY_WAIVED` on genuinely verified work.
-   **Scoped re-verify:** `verifier` remains mandatory for the first pass on any diff the gate would
-   block on, and for anything security-sensitive. But once `verifier` REFUTEs and you fix the
-   findings, dispatch the re-verify to `checker` instead of a fresh `verifier` sweep — carry the
-   prior findings verbatim plus `git diff <verdict-time-ref>` (the diff since the REFUTED verdict),
-   and instruct it to confirm each finding is resolved and check the fix for regressions, not redo
-   the broad sweep. `checker` is also the right choice for a first-pass verification you want on a
-   diff below verify-gate's non-trivial threshold. If `checker`'s scoped re-verify itself REFUTEs,
-   escalate the next pass back to `verifier`. `checker` may also decline a dispatch before
-   attempting verification — the diff exceeded its scope, or touched security-sensitive
-   territory — in which case it returns plain text, not a verdict block, and you re-dispatch to
-   `verifier` for a normal fresh pass.
-   **Blind dispatch.** A verification dispatch must not carry your own claim about whether the work
-   is correct. Give the verifier the diff (or a bundle path), the spec or task description, and the
-   constraints. Never include "this is correct", "this should be fine", "I already checked X", "just
-   a sanity check", or a summary of why the change works — item 1's "reasoning behind the ask" means
-   why the work was requested, not your verdict on the result. Confirmation-bias injection is
-   measured, and its size tracks model tier: framing a diff as bug-free in review metadata collapsed
-   detection by 93.5 points in a small model (97.2% → 3.6%) and 59.9 points in a small reasoning
-   model, while moving an opus-class model only 4.9 (arXiv:2603.18740, 2026-03). That gradient is
-   precisely why a `checker` dispatch needs framing discipline at least as much as a `verifier` one.
-   The single exception is the scoped re-verify, which by construction carries the prior findings —
-   carry those verbatim, never your assessment of whether the fix resolved them.
-7. **Scout findings are leads, not facts.** Sanity-check anything scout found that the plan
-   actually depends on before acting on it.
-8. **Parallel fan-out for independent units.** When you have three or more genuinely independent,
-   fully-specifiable pieces of work, launch them together in worktree isolation rather than
-   serially — see the `/fan-out` skill. Run one verifier pass over the merged result, not one
-   per worker.
+1. **Complete specs.** Goal, constraints, success criteria, relevant paths, and why the work was
+   asked for. Executor-tier models follow instructions literally and do not generalize from one
+   item to the next — state scope explicitly ("every route file under `src/pages/api/`, not just
+   the first").
+2. **Cheapest capable role first**, and no delegation for work you can finish in a handful of tool
+   calls. Every subagent re-establishes context and reports back; below a certain size that costs
+   more than it saves.
+3. **Brief once, then commit.** Give the whole spec up front. Once delegated, do not redo or
+   re-derive the subagent's work.
+4. **Bounded escalation.** After two failed attempts at a role, escalate one tier or take it over.
+   Never retry the same tier a third time.
+5. **Keep working while subagents run.** Launch independent agents in one message and continue on
+   other tracks rather than blocking on each result.
+6. **Fan out independent units.** Three or more independent, fully-specifiable pieces of work run
+   together in worktree isolation (`/fan-out`), with one verifier pass over the merged result.
+7. **Scout findings are leads, not facts.** Sanity-check anything the plan depends on.
+
+`advisorModel` pairs every dispatch with a consult-only model; it is not an exception to the
+`model` rule, never substitutes for a `verifier` pass, and is invisible to praxarch telemetry.
 
 ### Retained locally (do not delegate)
 

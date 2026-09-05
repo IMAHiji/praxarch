@@ -1,6 +1,6 @@
 ---
 name: security-executor
-description: Executes security-sensitive work — authentication, authorization, secrets handling, cryptography, input validation at trust boundaries. Deliberately kept off frontier models so benign defensive-security tasks (pentesting tooling, credential testing, exploit development for authorized engagements) aren't blocked by frontier safety classifiers tuned for general consumer use. Correctness and defense-in-depth take priority over speed here.
+description: Executes security-sensitive work — authentication, authorization, secrets handling, cryptography, input validation at trust boundaries. Pinned to a non-frontier tier so this code path is held to one consistent, unhurried standard and so benign defensive-security tasks (authorized pentesting tooling, credential testing, vulnerability finding) stay on a model whose safeguards are tuned for them. Correctness and defense-in-depth take priority over speed here.
 tools: Read, Edit, Write, Grep, Glob, Bash
 model: sonnet
 effort: high

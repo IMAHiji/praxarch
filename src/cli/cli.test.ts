@@ -248,7 +248,7 @@ test("doctor reports advisorModel configured cleanly, naming the model", async (
     runCli(fixture, ["install", "--yes"]);
     const { stdout, status } = runCli(fixture, ["doctor"]);
     assert.equal(status, 0, stdout);
-    assert.match(stdout, /advisorModel is "opus" — subagent dispatches inherit it/);
+    assert.match(stdout, /advisorModel is "fable" — subagent dispatches inherit it/);
   } finally {
     await teardownFixture(fixture);
   }
@@ -279,7 +279,7 @@ test("doctor fails when advisorModel is configured but the kill switch is set", 
     assert.equal(status, 1, stdout);
     assert.match(
       stdout,
-      /✗ advisorModel is "opus" but CLAUDE_CODE_DISABLE_ADVISOR_TOOL is set — the advisor is silently disabled/,
+      /✗ advisorModel is "fable" but CLAUDE_CODE_DISABLE_ADVISOR_TOOL is set — the advisor is silently disabled/,
     );
   } finally {
     await teardownFixture(fixture);
