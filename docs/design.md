@@ -12,8 +12,8 @@
    tier via frontmatter: `scout` (recon), `Explore` (override of the built-in agent, which
    otherwise silently inherits the main session's model), `mech-executor` (fully-specified
    mechanical work), `executor` (judgment-requiring work), `verifier` (fresh-context adversarial
-   review), `security-executor` (auth/secrets/crypto, deliberately kept off the frontier model so
-   its safety classifiers don't refuse benign defensive-security work).
+   review), `security-executor` (auth/secrets/crypto, on opus because correctness outweighs speed there;
+   a single refused offensive-security brief is re-pinned to sonnet per dispatch, not per role).
 3. **Policy layer** (`~/.claude/CLAUDE.md`) — delegation rules written entirely in role names,
    never model IDs, so role→model bindings can change underneath the policy without touching it.
 
