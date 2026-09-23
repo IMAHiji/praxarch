@@ -49,9 +49,10 @@ test("logs a delegation record and updates session state", async () => {
     });
 
     const logContent = await readFile(monthlyLogPath(home), "utf8");
-    const record = JSON.parse(logContent.trim()) as { role: string; model: string };
+    const record = JSON.parse(logContent.trim()) as { role: string; model: string; scope: unknown };
     assert.equal(record.role, "mech-executor");
     assert.equal(record.model, "sonnet");
+    assert.equal(record.scope, null);
 
     const statePath = join(home, "state", "s1.json");
     const state = JSON.parse(await readFile(statePath, "utf8")) as { delegations: unknown[] };
@@ -107,6 +108,11 @@ test("parses a verifier's trailing JSON verdict into session state", async () =>
     };
     assert.equal(state.lastVerifier?.verdict, "CONFIRMED");
     assert.equal(state.lastVerifier?.criticalOrMajorCount, 0);
+    // issue #3: `scope` describes the verdict, not the tree — it must never land in `lastVerifier`.
+    assert.ok(state.lastVerifier !== null && !("scope" in state.lastVerifier), JSON.stringify(state.lastVerifier));
+
+    const row = JSON.parse((await readFile(monthlyLogPath(home), "utf8")).trim()) as { scope: unknown };
+    assert.equal(row.scope, "session");
   });
 });
 
@@ -1091,5 +1097,76 @@ test("issue #23 / MINOR 5: a dead anchor records diffHash null and counts null o
     } finally {
       await rm(repoB, { recursive: true, force: true });
     }
+  });
+});
+
+// --- Issue #3: verdict scope. Only a session-scoped verdict may become `lastVerifier` -------------
+
+test("issue #3: a branch-scoped verdict is logged with its scope but never becomes lastVerifier", async () => {
+  await withPraxarchHome(async (home) => {
+    const verifierText = [
+      "```json",
+      JSON.stringify({ verdict: "REFUTED", findings: [{ severity: "critical" }], scope: "branch:feat/worker-272" }),
+      "```",
+    ].join("\n");
+
+    run(home, {
+      session_id: "s1",
+      cwd: process.cwd(),
+      hook_event_name: "PostToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: "verifier", model: "opus" },
+      tool_response: { status: "completed", content: [{ type: "text", text: verifierText }] },
+    });
+
+    const row = JSON.parse((await readFile(monthlyLogPath(home), "utf8")).trim()) as {
+      scope: unknown;
+      verdict: unknown;
+      criticalOrMajorCount: unknown;
+    };
+    assert.equal(row.scope, "branch:feat/worker-272");
+    assert.equal(row.verdict, "REFUTED");
+    assert.equal(row.criticalOrMajorCount, 1);
+
+    const state = JSON.parse(await readFile(join(home, "state", "s1.json"), "utf8")) as {
+      lastVerifier: unknown;
+      delegations: unknown[];
+    };
+    assert.equal(state.lastVerifier, null);
+    assert.equal(state.delegations.length, 1);
+  });
+});
+
+// Mirrors "still records the delegation row and state when the verdict value is out of range".
+test("issue #3: an unknown scope is treated like any malformed verdict", async () => {
+  await withPraxarchHome(async (home) => {
+    const verifierText = [
+      "```json",
+      JSON.stringify({ verdict: "CONFIRMED", findings: [], scope: "worktree" }),
+      "```",
+    ].join("\n");
+
+    run(home, {
+      session_id: "s1",
+      cwd: process.cwd(),
+      hook_event_name: "PostToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: "verifier", model: "opus" },
+      tool_response: { status: "completed", content: [{ type: "text", text: verifierText }] },
+    });
+
+    const row = JSON.parse((await readFile(monthlyLogPath(home), "utf8")).trim()) as {
+      verdict: unknown;
+      scope: unknown;
+    };
+    assert.equal(row.verdict, null);
+    assert.equal(row.scope, null);
+
+    const state = JSON.parse(await readFile(join(home, "state", "s1.json"), "utf8")) as {
+      lastVerifier: unknown;
+      delegations: unknown[];
+    };
+    assert.equal(state.lastVerifier, null);
+    assert.equal(state.delegations.length, 1);
   });
 });

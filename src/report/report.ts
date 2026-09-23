@@ -55,6 +55,8 @@ interface EventLogRecord {
   verdict?: "CONFIRMED" | "REFUTED" | null;
   findingsCount?: number | null;
   criticalOrMajorCount?: number | null;
+  // Present only on `event: "verifyGateBlocked"` rows (hooks/verify-gate.ts).
+  trigger?: string;
 }
 
 type LogRecord = DelegationLogRecord | EventLogRecord;
@@ -382,13 +384,17 @@ function render(records: LogRecord[]): string {
   // renders a report instead of being swallowed by the "nothing recorded" short-circuit.
   const skippedCount = records.filter(isEventRecord).filter((r) => r.event === "verifyGateSkipped").length;
   const waivedCount = records.filter(isEventRecord).filter((r) => r.event === "verifyGateWaived").length;
+  const blocked = records.filter(isEventRecord).filter((r) => r.event === "verifyGateBlocked");
+  const unneededWaiverCount = records.filter(isEventRecord).filter((r) => r.event === "verifyGateWaiverUnneeded").length;
 
   if (
     delegations.length === 0 &&
     failOpens.length === 0 &&
     subagentVerdicts.length === 0 &&
     skippedCount === 0 &&
-    waivedCount === 0
+    waivedCount === 0 &&
+    blocked.length === 0 &&
+    unneededWaiverCount === 0
   ) {
     return "No delegations recorded for the requested window.";
   }
@@ -452,6 +458,13 @@ function render(records: LogRecord[]): string {
   // the only durable record that the gate was bypassed rather than satisfied.
   lines.push(
     `Escape-hatch exits: ${skippedCount} skipped (PRAXARCH_SKIP_VERIFY), ${waivedCount} waived (PRAXARCH_VERIFY_WAIVED)`,
+  );
+  // issue #3: blocks were visible only through the waivers they provoked; an unneeded waiver (typed
+  // on a stop the gate would have passed) is the misfire signal.
+  const blockedBy = (trigger: string): number => blocked.filter((r) => r.trigger === trigger).length;
+  lines.push(
+    `Verify-gate blocks: ${blocked.length} (${blockedBy("no-verdict")} no verdict, ${blockedBy("refuted")} refuted, ` +
+      `${blockedBy("stale")} stale); ${unneededWaiverCount} unneeded waiver(s) (typed on a stop the gate would have passed)`,
   );
 
   lines.push("");

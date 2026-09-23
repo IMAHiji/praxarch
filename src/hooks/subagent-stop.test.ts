@@ -32,8 +32,8 @@ function run(home: string, input: unknown): { status: number | null } {
   }
 }
 
-function verdictText(verdict: "CONFIRMED" | "REFUTED"): string {
-  return ["```json", JSON.stringify({ verdict, findings: [] }), "```"].join("\n");
+function verdictText(verdict: "CONFIRMED" | "REFUTED", scope?: string): string {
+  return ["```json", JSON.stringify({ verdict, findings: [], ...(scope === undefined ? {} : { scope }) }), "```"].join("\n");
 }
 
 async function readState(home: string, sessionId: string): Promise<Record<string, unknown>> {
@@ -77,6 +77,8 @@ test("a verdict-bearing agent_type records lastVerifier", async () => {
 
     const state = (await readState(home, "s1")) as { lastVerifier: { verdict: string } | null };
     assert.equal(state.lastVerifier?.verdict, "CONFIRMED");
+    // issue #3: `scope` describes the verdict, not the tree — it must never land in `lastVerifier`.
+    assert.ok(state.lastVerifier !== null && !("scope" in state.lastVerifier), JSON.stringify(state.lastVerifier));
   });
 });
 
@@ -386,6 +388,7 @@ test("a recorded verdict appends exactly one subagentVerdict row", async () => {
     assert.equal(row["verdict"], "CONFIRMED");
     assert.equal(row["findingsCount"], 0);
     assert.equal(row["criticalOrMajorCount"], 0);
+    assert.equal(row["scope"], "session");
     assert.ok("diffHash" in row);
   });
 });
@@ -418,5 +421,117 @@ test("a malformed verdict appends no row", async () => {
     });
     assert.equal(result.status, 0);
     await assert.rejects(readMonthlyLog(home), (err: unknown) => (err as NodeJS.ErrnoException).code === "ENOENT");
+  });
+});
+
+// --- Issue #3: verdict scope. Only a session-scoped verdict may set `lastVerifier` ---------------
+
+test("issue #3: a branch-scoped verdict is logged with its scope but never overwrites lastVerifier", async () => {
+  // Replays the 2026-09 wave-10 evidence: a second verifier's REFUTED verdict about a different
+  // PR overwrote this session's CONFIRMED `lastVerifier`.
+  await withPraxarchHome(async (home) => {
+    const base = { session_id: "j4", cwd: process.cwd(), hook_event_name: "SubagentStop", agent_type: "verifier" };
+    const first = run(home, { ...base, agent_id: "a1", last_assistant_message: verdictText("CONFIRMED") });
+    const second = run(home, {
+      ...base,
+      agent_id: "a2",
+      last_assistant_message: verdictText("REFUTED", "branch:feat/worker-272"),
+    });
+    assert.equal(first.status, 0);
+    assert.equal(second.status, 0);
+
+    const state = (await readState(home, "j4")) as { lastVerifier: { verdict: string } | null };
+    assert.equal(state.lastVerifier?.verdict, "CONFIRMED");
+
+    const rows = await readMonthlyLog(home);
+    assert.equal(rows.length, 2);
+    assert.equal(rows[0]?.["scope"], "session");
+    assert.equal(rows[1]?.["scope"], "branch:feat/worker-272");
+    assert.equal(rows[1]?.["verdict"], "REFUTED");
+  });
+});
+
+test("issue #3: a branch-scoped verdict on a fresh session leaves lastVerifier null", async () => {
+  await withPraxarchHome(async (home) => {
+    const result = run(home, {
+      session_id: "j5",
+      cwd: process.cwd(),
+      hook_event_name: "SubagentStop",
+      agent_id: "a1",
+      agent_type: "verifier",
+      last_assistant_message: verdictText("CONFIRMED", "branch:feat/worker-272"),
+    });
+    assert.equal(result.status, 0);
+    assert.equal(await lastVerifierOrAbsent(home, "j5"), null);
+  });
+});
+
+test("issue #3: an unknown scope is malformed: no row, no lastVerifier", async () => {
+  await withPraxarchHome(async (home) => {
+    const result = run(home, {
+      session_id: "j6",
+      cwd: process.cwd(),
+      hook_event_name: "SubagentStop",
+      agent_id: "a1",
+      agent_type: "verifier",
+      last_assistant_message: verdictText("CONFIRMED", "worktree"),
+    });
+    assert.equal(result.status, 0);
+    assert.equal(await lastVerifierOrAbsent(home, "j6"), null);
+    await assert.rejects(readMonthlyLog(home), (err: unknown) => (err as NodeJS.ErrnoException).code === "ENOENT");
+  });
+});
+
+test("issue #3: a branch-scoped verdict still updates its matching delegations[] entry", async () => {
+  // Pins the design decision: delegations[] is per-delegation bookkeeping the gate never reads, so
+  // the scope guard covers `lastVerifier` only, never the whole state write.
+  await withPraxarchHome(async (home) => {
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(join(home, "state"), { recursive: true });
+    await writeFile(
+      join(home, "state", "j7.json"),
+      JSON.stringify({
+        sessionId: "j7",
+        startedAt: new Date().toISOString(),
+        delegations: [
+          {
+            role: "verifier",
+            model: "inherited",
+            resolvedModel: null,
+            totalTokens: null,
+            durationMs: null,
+            at: new Date().toISOString(),
+            agentId: "match-me",
+          },
+        ],
+        lastVerifier: null,
+        baselineHead: null,
+      }),
+      "utf8",
+    );
+
+    const text = [
+      "```json",
+      JSON.stringify({ verdict: "REFUTED", findings: [{ severity: "major" }], scope: "branch:feat/worker-272" }),
+      "```",
+    ].join("\n");
+    const result = run(home, {
+      session_id: "j7",
+      cwd: process.cwd(),
+      hook_event_name: "SubagentStop",
+      agent_id: "match-me",
+      agent_type: "verifier",
+      last_assistant_message: text,
+    });
+    assert.equal(result.status, 0);
+
+    const state = (await readState(home, "j7")) as {
+      delegations: { verdict: string | null; criticalOrMajorCount: number | null }[];
+      lastVerifier: unknown;
+    };
+    assert.equal(state.delegations.length, 1);
+    assert.equal(state.delegations[0]?.verdict, "REFUTED");
+    assert.equal(state.delegations[0]?.criticalOrMajorCount, 1);
+    assert.equal(state.lastVerifier, null);
   });
 });

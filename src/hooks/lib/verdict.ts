@@ -21,13 +21,26 @@ export interface VerifierVerdictJson {
   // a claim about untrusted input rather than a guarantee. `summarizeVerdict` below is what
   // actually classifies it, fail-closed.
   findings?: { severity?: string }[];
+  // Untrusted agent output, typed `unknown` for the same reason as `severity` above:
+  // `summarizeVerdict` classifies it.
+  scope?: unknown;
 }
+
+/** Which tree a verdict is about: the session's own, or some other branch/PR/worktree (issue #3). */
+export type VerdictScope = "session" | `branch:${string}`;
 
 export interface ParsedVerdict {
   verdict: "CONFIRMED" | "REFUTED";
   findingsCount: number;
   criticalOrMajorCount: number;
+  scope: VerdictScope;
 }
+
+// `branch:` plus a non-empty name with no whitespace, control (Cc) or format (Cf) characters —
+// the value is written verbatim into the JSONL log and echoed to record-verdict's stdout, so ESC
+// sequences, bidi overrides and zero-width characters are shut out. Non-ASCII names still pass.
+// Bounded (in code points, per the `u` flag) for the same reason.
+const BRANCH_SCOPE = /^branch:[^\s\p{Cc}\p{Cf}]{1,255}$/u;
 
 /**
  * Parses the trailing ```json ... ``` fenced block in `text` as a verifier verdict. Deliberately
@@ -99,6 +112,8 @@ export class MalformedVerdictError extends Error {}
  * `findings`, if present, must be an array of objects (each expected to carry a `severity`) — a
  * non-array or an array containing a non-object entry is malformed input, not an empty list. Both
  * checks throw `MalformedVerdictError` rather than silently coercing to something summarizable.
+ * `scope` is validated here as well: missing means `"session"`, and anything other than exactly
+ * `"session"` or `"branch:<name>"` throws `MalformedVerdictError` (issue #3).
  * Callers that must stay non-blocking on any failure (e.g. telemetry.ts) already wrap their entire
  * pipeline in a catch-all; callers that must refuse a malformed verdict outright
  * (record-verdict.ts) catch this specifically.
@@ -116,6 +131,18 @@ export function summarizeVerdict(parsed: VerifierVerdictJson): ParsedVerdict {
   ) {
     throw new MalformedVerdictError("findings must be an array of objects");
   }
+  // issue #3: which tree this verdict is about. Missing means "session" (every verdict before this
+  // field existed was about the session's own tree); anything else must be exactly "session" or
+  // "branch:<name>". No trimming or case-folding — same fail-closed stance as `verdict` above.
+  let scope: VerdictScope;
+  if (parsed.scope === undefined || parsed.scope === "session") scope = "session";
+  else if (typeof parsed.scope === "string" && BRANCH_SCOPE.test(parsed.scope)) scope = parsed.scope as VerdictScope;
+  // The rejected value is echoed truncated: it is arbitrary agent output, and record-verdict prints this.
+  else {
+    throw new MalformedVerdictError(
+      `scope must be "session" or "branch:<name>", got ${JSON.stringify(parsed.scope).slice(0, 80)}`,
+    );
+  }
   // Fail closed on anything that isn't unambiguously minor. Three defects this closes at once,
   // all of which used to let a CONFIRMED verdict with real critical findings pass verify-gate's
   // `criticalOrMajorCount === 0` check (verify-gate.ts:224):
@@ -131,6 +158,7 @@ export function summarizeVerdict(parsed: VerifierVerdictJson): ParsedVerdict {
     verdict: parsed.verdict,
     findingsCount: parsed.findings?.length ?? 0,
     criticalOrMajorCount: criticalOrMajor,
+    scope,
   };
 }
 

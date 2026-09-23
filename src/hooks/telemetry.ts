@@ -12,12 +12,15 @@ import {
   extractTrailingJson,
   MalformedVerdictError,
   summarizeVerdict,
+  type ParsedVerdict,
 } from "./lib/verdict.js";
 
 /**
  * PostToolUse(Agent) — appends a delegation record to the monthly JSONL log and, for verdict
  * roles (config verifyGate.verdictRoles, default ["verifier", "checker", "plan-reviewer"]), parses
- * the required trailing JSON verdict block into session state so verify-gate can check it later.
+ * the required trailing JSON verdict block into session state so verify-gate can check it later
+ * (session-scoped verdicts only; a `branch:<name>`-scoped one is logged but never written to
+ * `lastVerifier`, issue #3).
  *
  * tool_response carries the subagent's resolved model, token usage, and duration (verified
  * against a live capture — see fixtures/post-tool-use.agent.json), so each record includes real
@@ -50,8 +53,7 @@ async function main(): Promise<void> {
   // failing state read (readSessionState throws on non-ENOENT environment errors like EACCES/EISDIR;
   // corrupt content no longer throws, it quarantines to empty state) must not cost the JSONL log
   // its only record of this delegation having happened at all.
-  let parsedVerdict: { verdict: "CONFIRMED" | "REFUTED"; findingsCount: number; criticalOrMajorCount: number } | null =
-    null;
+  let parsedVerdict: ParsedVerdict | null = null;
   // Issue #15: an async dispatch's `tool_response` here is the dispatch-time launch receipt, not
   // the subagent's report — it carries no report text at all, only launch metadata (agentId,
   // resolvedModel, etc). Detect it positively and skip the parse rather than relying on it simply
@@ -92,6 +94,7 @@ async function main(): Promise<void> {
     batchId: batchMatch?.[1] ?? null,
     verdict: parsedVerdict?.verdict ?? null,
     criticalOrMajorCount: parsedVerdict?.criticalOrMajorCount ?? null,
+    scope: parsedVerdict?.scope ?? null,
   });
 
   // Read only for `baselineHead`/`baselineCwd`, which the measurements below need — never mutated
@@ -104,7 +107,9 @@ async function main(): Promise<void> {
   const state = await readSessionState(input.session_id);
 
   let verifierRecord: VerifierRecord | null = null;
-  if (parsedVerdict) {
+  // issue #3: only a session-scoped verdict becomes `lastVerifier`. A branch-scoped one is already on
+  // record in the delegation row above (with its scope) and needs no measurement of this tree at all.
+  if (parsedVerdict?.scope === "session") {
     // Resolved once and reused by both the fingerprint and the counts below — see
     // measurement-cwd.ts's doc comment for why a dead (or laundering) anchor becomes `null`
     // rather than falling back to `input.cwd`. Gated behind `parsedVerdict`, not run
@@ -138,14 +143,10 @@ async function main(): Promise<void> {
     // Invariant verify-gate relies on: diffHash must be a real `string | null` here, never
     // `undefined` — it distinguishes a legacy record (key absent) from a failed fingerprint
     // (key present, null) only because JSON.stringify drops undefined-valued keys but keeps
-    // null ones. `diffHash` above is always assigned string|null, so this holds.
-    verifierRecord = {
-      ...parsedVerdict,
-      recordedAt: at,
-      diffHash,
-      changedLines,
-      changedFiles,
-    };
+    // null ones. `diffHash` above is always assigned string|null, so this holds. `scope` describes
+    // the verdict, not the tree — split off so it never lands in `lastVerifier`.
+    const { scope: _scope, ...counts } = parsedVerdict;
+    verifierRecord = { ...counts, recordedAt: at, diffHash, changedLines, changedFiles };
   }
 
   // Merge-write: re-reads the freshest state immediately before writing and touches only the

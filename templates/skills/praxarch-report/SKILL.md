@@ -43,6 +43,9 @@ What it does report, honestly:
   explicitly. This table reflects *current intent* (frontmatter, right now); the token-spend
   section's `resolvedModel` reflects *historical truth* (what actually ran) — the two can diverge
   after a binding change, and the report labels them separately rather than conflating them.
+- **Verify-gate health** — fail-opens, escape-hatch exits (skipped/waived), blocks by trigger (no
+  verdict / refuted / stale), and unneeded waivers. A high unneeded-waiver count means the gate is
+  being waived by reflex on stops it would have passed anyway — flag that to the user.
 
 If the log directory doesn't exist yet or the window is empty, the report says so plainly — that
 means no delegations have happened in the requested window, not that the tool is broken. Likewise,

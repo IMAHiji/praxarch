@@ -48,7 +48,9 @@ hooks that check the two rules most worth enforcing mechanically:
   that judgment needs context a keyword match can't have.
 - **`verify-gate`** (Stop) blocks session completion when the diff since the session's baseline
   commit (falling back to HEAD, plus untracked new files) is large enough to count as non-trivial
-  (configurable thresholds) and no `CONFIRMED` verifier record with zero
+  (configurable thresholds: `minChangedLines` changed lines on their own, or `minChangedFiles`
+  files once the diff also has `minChangedLinesForFiles` changed lines — a pure file-count trigger
+  fired on multi-file one-liners, issue #3) and no `CONFIRMED` verifier record with zero
   critical/major findings is on file for the session. Two escape hatches exist on purpose —
   `PRAXARCH_SKIP_VERIFY=1` and an explicit `PRAXARCH_VERIFY_WAIVED: <reason>` starting a line of
   the final message (the match is line-start-anchored, so the gate's own quoted instructions can't
@@ -100,7 +102,8 @@ hooks that check the two rules most worth enforcing mechanically:
     (a content hash plus changed-lines/changed-files counts) alongside every verdict it records,
     and `verify-gate` treats the verdict as stale — falling through to the normal block path —
     once the current tree's hash differs from (or can't be compared to) the recorded one *and*
-    the size delta since it was recorded clears `minChangedLines`/`minChangedFiles`. Both
+    the size delta since it was recorded clears the same threshold rule as the non-trivial check
+    (including the `minChangedLinesForFiles` floor). Both
     conditions are required deliberately: a hash difference alone (e.g. lockfile churn
     `verify-gate` doesn't filter out of the hash) can't expire a verdict on its own, and a
     shrinking diff (work reverted since the pass) is never treated as stale. An unfingerprintable
@@ -224,7 +227,12 @@ hooks that check the two rules most worth enforcing mechanically:
     non-enforcement exits are logged the same way — `event: "verifyGateSkipped"` for
     `PRAXARCH_SKIP_VERIFY=1` and `event: "verifyGateWaived"` for an accepted
     `PRAXARCH_VERIFY_WAIVED:` waiver — and both feed the `Escape-hatch exits:` line in
-    `praxarch report`.
+    `praxarch report`. Every block appends `event: "verifyGateBlocked"` (`trigger`:
+    `no-verdict`/`refuted`/`stale`, counts, diffHash; not on loop-guard fail-opens). A waiver is
+    honoured only on a stop that would otherwise block. One typed on a stop the gate would pass
+    anyway (trivial diff, standing waiver, or a passing verdict) logs `event:
+    "verifyGateWaiverUnneeded"` (`passedBy`) and never sets the standing-waiver hash. `praxarch
+    report` shows both on its `Verify-gate blocks:` line.
 
     **`route-guard`'s crash logging uses a distinct event name (issue #24), deliberately.**
     route-guard also fails open on its own internal errors, and also appends a JSONL row for it —
@@ -247,7 +255,7 @@ hooks that check the two rules most worth enforcing mechanically:
     `source === "startup"`, never on resume/clear/compact, so a mid-flight session never gets its
     anchor moved out from under it). `resolveMeasurementCwd` (`measurement-cwd.ts`) is the single
     dispatch every measurement site resolves through before touching `diffStat`/`diffFingerprint`:
-    `verify-gate`'s waiver fingerprint, `diffStat`, and the block-path fingerprint; telemetry's
+    `verify-gate`'s `diffStat` and its one fingerprint (shared by the waiver and block paths); telemetry's
     `captureDiffHash`/`captureDiffCounts`; `record-verdict`'s equivalents. An absent anchor (a
     session that predates this field) falls back to the hook/CLI cwd exactly as before — legacy
     sessions keep today's behavior. A recorded-but-now-missing anchor (a deleted worktree, a moved
@@ -280,7 +288,7 @@ CONFIRMED" is not the same check as "did it confirm." Praxarch's verifier role i
 required to end its response with a fenced JSON block:
 
 ```json
-{ "verdict": "CONFIRMED", "findings": [] }
+{ "verdict": "CONFIRMED", "scope": "session", "findings": [] }
 ```
 
 As of issue #15, `PostToolUse` only ever sees a dispatch-time launch receipt — Claude Code doesn't
@@ -297,6 +305,12 @@ against a verifier that writes "CONFIRMED" out of habit while listing a critical
 subagent that errors or is interrupted before stopping normally). Severity classification is
 fail-closed: a finding counts as critical/major unless its severity is exactly `minor`,
 case-insensitively — an unrecognized or missing severity counts rather than reading as zero.
+
+`scope` means `"session"` when it is missing; a `"branch:<name>"` verdict (a worker's PR or
+another worktree) is logged with its scope but never written to `lastVerifier`, by any of the
+three writers. Any other value is malformed and handled like any malformed block. The reason: in
+one wave, a verifier reviewing another PR overwrote the session's own CONFIRMED verdict with its
+REFUTED one (issue #3).
 
 ### Telemetry: measured, not claimed
 
@@ -402,7 +416,8 @@ Sketch, deliberately unimplemented until the shape is proven useful:
 - **Verdict-expiry's size-delta rule detects growth, not any change** — a same-size in-place
   rewrite of the diff after a verdict was recorded (file/line counts stay flat, only content
   differs) passes as fresh, since the hash-differs condition alone isn't sufficient without an
-  accompanying size delta past `minChangedLines`/`minChangedFiles`. Accepted tradeoff of the
+  accompanying size delta that clears the same threshold rule as the non-trivial check (including
+  the `minChangedLinesForFiles` floor). Accepted tradeoff of the
   hash+delta approach over a heavier `git write-tree` snapshot; see the `verify-gate` bullet above.
 - **A changed pre-existing untracked file is counted in full, not as a delta** — the untracked
   baseline snapshot (issue #16) tells `diffStat` whether a path's content key matches what it was
@@ -431,6 +446,29 @@ Sketch, deliberately unimplemented until the shape is proven useful:
   sketch)" above for why the mechanism is written down rather than built: findings have no stable
   identity across re-verifies, and a disposition is an orchestrator assertion rather than ground
   truth.
+- **A `git diff --numstat` failure zeroes the current counts, which can make a stale verdict read
+  as fresh instead of stale.** `measurementFailed` zeroes `changedLines`/`changedFiles` for the
+  current tree, so the delta against a recorded verdict's own counts goes to zero or negative —
+  `clearsThreshold` never fires on a non-positive delta, so `stale` stays false. A CONFIRMED
+  verdict whose `diffHash` no longer matches the tree then stays valid, and the stop is allowed,
+  even though the tree has moved. The opposite of the fail-closed intent everywhere else in this
+  function. Accepted residual, tracked as a follow-up issue rather than fixed here.
+- **A block itself, not just its audit row, can be lost if the logs directory alone sits on a
+  hung mount** — `appendJsonl` opens O_NONBLOCK, so a FIFO with no reader fails `open()`
+  immediately with ENXIO rather than hanging. But if `open()` or `write()` blocks in the kernel
+  because the logs directory's mount itself is hung — no FIFO involved — the block decision has
+  already reached stdout (`emitOnce` runs before the append is awaited) while the append itself
+  hangs. The watchdog is already disarmed by then, so it does not intervene, and `process.exit`
+  cannot force the issue: Node's exit teardown joins the libuv threadpool, which is stuck in the
+  kernel call. The harness eventually kills the hung process at its own timeout, and this doc
+  states above that a harness-killed hook is treated as a fail-open with no row and no
+  `systemMessage` — so what happens to the already-written stdout in that case is unverified,
+  and the block can be lost outright, not merely undercounted. Self-SIGKILL was considered and
+  rejected for the same reason: how the harness treats a signal-killed hook's already-flushed
+  stdout is equally unverified, so it trades one unverified hang for an equally unverified kill.
+  A stall of the whole `PRAXARCH_HOME` mount already hangs the earlier `updateSessionState` call
+  on this same path, predating this work; the new exposure here is narrower — the logs directory
+  hanging on its own. Accepted residual, tracked as a follow-up issue rather than fixed here.
 
 ### Fail-opens mutation testing found, not review (issue #16)
 

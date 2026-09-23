@@ -22,7 +22,8 @@ import {
  * `event: "subagentVerdict"` row to the monthly JSONL (what `praxarch report` counts).
  * PostToolUse(Agent) still owns the unconditional dispatch-time delegation row (see telemetry.ts)
  * and that write is untouched by anything here — the log stays append-only, no row is ever
- * rewritten.
+ * rewritten. A `branch:<name>`-scoped verdict is logged but never written to `lastVerifier`
+ * (issue #3).
  *
  * Findings this depends on (task 1, `.claude/plans/2026-08-19-subagent-stop-verdicts.md`,
  * observed live on this installed harness version, 2026-08-19):
@@ -116,13 +117,10 @@ async function main(): Promise<void> {
       ? { changedLines: null, changedFiles: null }
       : await captureDiffCounts(measurementCwd, config.verifyGate.ignorePatterns, state.baselineHead, untrackedBaseline);
 
-  const verifierRecord: VerifierRecord = {
-    ...summary,
-    recordedAt: at,
-    diffHash,
-    changedLines,
-    changedFiles,
-  };
+  // `scope` describes the verdict, not the tree — split off so it never lands in `lastVerifier`.
+  // `diffHash` is still assigned explicitly after the spread (see the invariant noted above).
+  const { scope, ...counts } = summary;
+  const verifierRecord: VerifierRecord = { ...counts, recordedAt: at, diffHash, changedLines, changedFiles };
 
   // Its own append-only event row, written BEFORE session state is touched — same ordering
   // contract as telemetry.ts (telemetry.ts:49-51): a corrupt state file must not cost the log its
@@ -141,6 +139,7 @@ async function main(): Promise<void> {
       verdict: summary.verdict,
       findingsCount: summary.findingsCount,
       criticalOrMajorCount: summary.criticalOrMajorCount,
+      scope,
       diffHash,
       changedLines,
       changedFiles,
@@ -153,15 +152,20 @@ async function main(): Promise<void> {
 
   // Merge-write, re-reading the freshest snapshot immediately before mutating — same contract as
   // telemetry.ts's write. Two things happen here:
-  //  1. `lastVerifier` is set — this is the field verify-gate actually reads.
+  //  1. `lastVerifier` is set for session-scoped verdicts only — this is the field verify-gate
+  //     actually reads.
   //  2. The matching `delegations[]` entry (by `agentId`) is updated IN PLACE with the same
   //     verdict fields: no second row, the dispatch-time delegation record stays the single record
   //     of this delegation. If no entry matches (missing `agent_id` on either side, or the
-  //     dispatch row predates this field), `lastVerifier` still gets set — that's what the gate
-  //     needs — but no delegation row is touched; a verdict must never be attributed to the wrong
-  //     delegation by guessing.
+  //     dispatch row predates this field), a session-scoped verdict still sets `lastVerifier` —
+  //     that's what the gate needs (a branch-scoped one never does) — but no delegation row is
+  //     touched; a verdict must never be attributed to the wrong delegation by guessing.
   await updateSessionState(input.session_id, (fresh) => {
-    fresh.lastVerifier = verifierRecord;
+    // issue #3: a verdict about some other branch/PR/worktree (a worker's MR reviewed from this
+    // session) says nothing about this session's own tree. It is on record in the row above, but only
+    // a session-scoped verdict may set — or overwrite — what verify-gate reads. The delegations[]
+    // update below is per-delegation bookkeeping the gate never reads, so it applies to both.
+    if (scope === "session") fresh.lastVerifier = verifierRecord;
     if (agentId) {
       const match = fresh.delegations.find((d) => d.agentId === agentId);
       if (match) {

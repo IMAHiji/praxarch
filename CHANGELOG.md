@@ -114,6 +114,44 @@
   record-verdict` (`model: "n/a"`, `via: "record-verdict"`) are excluded — they're verdict
   records, not dispatches, and counting them would inflate totals and misreport "n/a" as
   "explicit".
+- **`verifyGateBlocked` audit row on every block, and a `Verify-gate blocks:` line in `praxarch
+  report` (issue #3).** Before this, a block was visible only through the waiver it provoked.
+  Every block now appends `event: "verifyGateBlocked"` (`trigger`: `no-verdict`/`refuted`/`stale`,
+  changed-lines/changed-files counts, `diffHash`) — never on the loop-guard's own fail-open paths,
+  which already log `verifyGateFailOpen`. `praxarch report` totals blocks by trigger and unneeded
+  waivers (waivers typed on a stop the gate would have passed anyway) on one line.
+- **Verdict `scope` field (issue #3).** A verifier/checker/plan-reviewer JSON verdict block may
+  now carry `"scope": "session"` (the default, and what a missing field means) or
+  `"scope": "branch:<name>"` for a review of some other branch, PR or worktree. A branch-scoped
+  verdict is logged by `subagent-stop`, `telemetry`, and `record-verdict` with its scope, but none
+  of the three writers ever sets `lastVerifier` from it — only a session-scoped verdict can satisfy
+  or refute this session's own gate. A branch-scoped verdict given to `record-verdict` is logged
+  without reading or writing session state.
+
+### Changed
+
+- **New `minChangedLinesForFiles` floor (default 30) on the file-count trigger, applied to verdict
+  staleness too (issue #3).** verify-gate previously blocked at `minChangedFiles` files
+  regardless of size — one wave saw 45 waivers in a single session, with verdicts recorded at 8
+  changed lines across 3-4 files, because a one-line touch to three files blocked exactly like an
+  80-line change. The file-count trigger now also requires `minChangedLinesForFiles` changed
+  lines; the same rule decides whether a recorded verdict has gone stale, so a multi-file diff
+  under the floor can no longer expire a still-valid verdict either.
+- **Waiver ordering: the pass check now runs before the waiver is honoured (issue #3).** An
+  `PRAXARCH_VERIFY_WAIVED:` waiver is accepted, and stored as a standing waiver, only on a stop
+  that would otherwise block. One typed on a stop the gate would have passed anyway — a trivial
+  diff, a diff already covered by a standing waiver, or a passing verdict — is logged as
+  `event: "verifyGateWaiverUnneeded"` instead, and never sets the standing-waiver hash.
+- **`.claude/plans/` is in verify-gate's default `ignorePatterns` (issue #3).** Planner output
+  under `.claude/plans/` is untracked-but-not-ignored in most repos, so an in-progress plan
+  counted as session work toward the gate's non-trivial threshold; one session blocked on 644
+  lines / 3 files that were mostly plan.
+- **JSONL appends open O_NONBLOCK and loop on short writes (issue #3).** `appendJsonl` used to
+  open through `fs.promises.appendFile`, which blocks: a log path pointed at a writerless FIFO
+  hung the write instead of failing it. It now opens O_NONBLOCK, so that case fails fast with
+  ENXIO, and loops on `write()` so a short write (a busy FIFO reader) retries until the row is
+  complete — a later write failing mid-row (`ENOSPC`, `EDQUOT`) still leaves the partial row on
+  disk and the append throws.
 
 ### Fixed
 

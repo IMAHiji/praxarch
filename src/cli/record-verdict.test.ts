@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TEST_DIST_DIR } from "../test-support/dist-dir.js";
@@ -85,11 +85,11 @@ async function readMonthlyLog(home: string): Promise<Record<string, unknown>[]> 
     .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
-function verifierText(verdict: "CONFIRMED" | "REFUTED", findings: { severity: string }[] = []): string {
+function verifierText(verdict: "CONFIRMED" | "REFUTED", findings: { severity: string }[] = [], scope?: string): string {
   return [
     "Some prose the resumed agent wrote before its verdict.",
     "```json",
-    JSON.stringify({ verdict, findings }),
+    JSON.stringify({ verdict, findings, ...(scope === undefined ? {} : { scope }) }),
     "```",
   ].join("\n");
 }
@@ -294,6 +294,7 @@ test("appends a delegation-log row marked via record-verdict, and praxarch repor
     assert.equal(row?.["verdict"], "REFUTED");
     assert.equal(row?.["criticalOrMajorCount"], 1);
     assert.equal(row?.["findingsCount"], 1);
+    assert.equal(row?.["scope"], "session");
 
     const reportScript = join(TEST_DIST_DIR, "report", "report.js");
     const reportOut = execFileSync("node", [reportScript], {
@@ -546,6 +547,118 @@ test("refuses immediately (no hang) when --file is omitted and stdin is a TTY", 
     process.stderr.write = originalWrite;
     if (originalHome === undefined) delete process.env["PRAXARCH_HOME"];
     else process.env["PRAXARCH_HOME"] = originalHome;
+    await teardownFixture(fixture);
+  }
+});
+
+// --- Issue #3: verdict scope. A branch-scoped verdict is logged, never written to session state ----
+
+test("issue #3: a branch-scoped verdict is logged with its scope and leaves lastVerifier untouched", async () => {
+  const fixture = await setupFixture();
+  try {
+    const first = runRecordVerdict(fixture, ["--session", "s20", "--role", "verifier"], verifierText("CONFIRMED"));
+    assert.equal(first.status, 0, first.stderr);
+
+    const result = runRecordVerdict(
+      fixture,
+      ["--session", "s20", "--role", "verifier"],
+      verifierText("REFUTED", [{ severity: "major" }], "branch:feat/worker-272"),
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /branch:feat\/worker-272/);
+    assert.match(result.stdout, /verify-gate does not read it/);
+
+    const lastVerifier = (await readState(fixture.home, "s20"))["lastVerifier"] as Record<string, unknown>;
+    assert.equal(lastVerifier["verdict"], "CONFIRMED");
+    // `scope` describes the verdict, not the tree — the session-scoped record must not carry it.
+    assert.ok(!("scope" in lastVerifier), JSON.stringify(lastVerifier));
+
+    const rows = (await readMonthlyLog(fixture.home)).filter((r) => r["sessionId"] === "s20");
+    assert.equal(rows.length, 2);
+    assert.equal(rows[1]?.["scope"], "branch:feat/worker-272");
+    assert.equal(rows[1]?.["via"], "record-verdict");
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("issue #3: refuses a verdict block with an unknown scope", async () => {
+  const fixture = await setupFixture();
+  try {
+    const result = runRecordVerdict(
+      fixture,
+      ["--session", "s21", "--role", "verifier"],
+      verifierText("CONFIRMED", [], "worktree"),
+    );
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /malformed verdict block/);
+    assert.equal(await stateExists(fixture.home, "s21"), false);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("issue #3: a branch-scoped verdict whose log row cannot be written exits non-zero", async () => {
+  const fixture = await setupFixture();
+  try {
+    // Same trick as the session-scoped append-failure test above: the log dir's path is a file.
+    await writeFile(join(fixture.home, "logs"), "not a directory");
+
+    const result = runRecordVerdict(
+      fixture,
+      ["--session", "s22", "--role", "verifier"],
+      verifierText("CONFIRMED", [], "branch:feat/worker-272"),
+    );
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /could not be written/);
+    assert.equal(await stateExists(fixture.home, "s22"), false);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+// A branch-scoped verdict never touches session state, so nothing about that state (unreadable,
+// corrupt) may cost it its log row — the row is its only record — or be mutated on its behalf.
+test("issue #3: a branch-scoped verdict is logged even when session state is unreadable", async () => {
+  const fixture = await setupFixture();
+  try {
+    // A directory where the state file should be: readSessionState would throw EISDIR.
+    await mkdir(join(fixture.home, "state", "s23.json"), { recursive: true });
+
+    const result = runRecordVerdict(
+      fixture,
+      ["--session", "s23", "--role", "verifier"],
+      verifierText("CONFIRMED", [], "branch:feat/worker-272"),
+    );
+    assert.equal(result.status, 0, result.stderr);
+
+    const rows = (await readMonthlyLog(fixture.home)).filter((r) => r["sessionId"] === "s23");
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.["scope"], "branch:feat/worker-272");
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("issue #3: a branch-scoped verdict leaves a corrupt state file untouched", async () => {
+  const fixture = await setupFixture();
+  try {
+    const stateDir = join(fixture.home, "state");
+    await mkdir(stateDir, { recursive: true });
+    const corrupt = "{not json";
+    await writeFile(join(stateDir, "s24.json"), corrupt);
+
+    const result = runRecordVerdict(
+      fixture,
+      ["--session", "s24", "--role", "verifier"],
+      verifierText("CONFIRMED", [], "branch:feat/worker-272"),
+    );
+    assert.equal(result.status, 0, result.stderr);
+
+    assert.equal(await readFile(join(stateDir, "s24.json"), "utf8"), corrupt);
+    const entries = await readdir(stateDir);
+    assert.ok(!entries.some((e) => e.includes(".corrupt-")), JSON.stringify(entries));
+  } finally {
     await teardownFixture(fixture);
   }
 });

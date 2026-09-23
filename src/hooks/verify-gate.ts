@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { loadConfig } from "./lib/config.js";
+import { loadConfig, type VerifyGateConfig } from "./lib/config.js";
 import { diffFingerprint, diffStat } from "./lib/git-diff.js";
 import { appendJsonl } from "./lib/jsonl.js";
 import { resolveMeasurementContext } from "./lib/measurement-cwd.js";
@@ -20,8 +20,10 @@ import { formatBuildRef, readBuildInfo } from "./lib/build-info.js";
  * message with PRAXARCH_VERIFY_WAIVED: <reason> for changes that genuinely don't warrant a
  * verifier pass (docs-only, config tweaks the diff-size heuristic can't distinguish). The waiver
  * must begin a line — an unanchored match let the gate's own instruction text, quoted back, waive
- * it. A hook that exceeds its own watchdog budget fails open with reason "timeout", rather than
- * being killed silently by the harness.
+ * it. A waiver is honoured only on a stop that would otherwise block; one typed on a stop that
+ * would already pass on its own is logged as unneeded and never stored (issue #3). A hook that
+ * exceeds its own watchdog budget fails open with reason "timeout", rather than being killed
+ * silently by the harness.
  */
 
 // Anchored to the start of a line (multiline), not matched anywhere in the message: the gate's own
@@ -89,6 +91,18 @@ function withConfigWarnings(output: StopOutput, warnings: string[]): StopOutput 
   };
 }
 
+// issue #3: lines alone make a diff non-trivial, files only with a line floor behind them — a pure
+// file-count trigger fired on multi-file one-liners (8 lines across 4 files blocked 45 times in one
+// orchestrating session). Shared by the non-trivial check and the staleness delta below so both
+// apply one rule, and so a verdict whose counts are missing (compared against 0) is always stale
+// whenever the diff was measured. Known gap, not by design, tracked for a follow-up issue: when
+// numstat itself fails, measurementFailed zeroes the current counts, so a recorded verdict with a
+// stale hash and real counts can see a negative delta and be treated as not stale — the opposite
+// of the fail-closed intent elsewhere in this function.
+function clearsThreshold(lines: number, files: number, gate: VerifyGateConfig): boolean {
+  return lines >= gate.minChangedLines || (files >= gate.minChangedFiles && lines >= gate.minChangedLinesForFiles);
+}
+
 // Clears both loop-guard counters (the per-diff one, and its paired block-hash — see
 // `verifyGateBlockHash` on SessionState — plus the per-cycle total), but only when something
 // actually changes: a quiet stop shouldn't rewrite the state file every time. The in-memory
@@ -131,10 +145,12 @@ async function logFailOpen(sessionId: string | null, reason: "loop-guard" | "loo
 // escape hatches below — neither of which left any trace on disk before this. `praxarch report`
 // totals all three separately, so a gate that is being routinely bypassed doesn't read as a gate
 // that is passing. Best-effort: a log failure here must never turn a clean allow into a crash-path
-// allow with a misleading `reason: "error"` row.
+// allow with a misleading `reason: "error"` row. It is also the best-effort appender for the
+// gate's block audit rows (issue #3) — a logging failure must never turn a block into a
+// crash-path allow.
 async function logEscapeHatch(
   sessionId: string,
-  event: "verifyGateSkipped" | "verifyGateWaived",
+  event: "verifyGateSkipped" | "verifyGateWaived" | "verifyGateBlocked" | "verifyGateWaiverUnneeded",
   fields: Record<string, unknown>,
 ): Promise<void> {
   try {
@@ -168,47 +184,31 @@ async function runGate(): Promise<void> {
     return;
   }
 
-  // Resolved once, before any measurement in this function, and reused at every site below (the
-  // waiver fingerprint here, diffStat, and the block-path fingerprint further down) — see
+  // Resolved once, before any measurement in this function, and reused at every site below —
+  // diffStat and the one fingerprint below, which the waiver and block paths share — see
   // measurement-cwd.ts's doc comment for why a dead anchor becomes `null` rather than a fallback
   // to `input.cwd`. `loadConfig` below deliberately keeps using `input.cwd`: which project's
   // config applies is a property of the hook invocation, not of which tree is being measured.
   const measurement = await resolveMeasurementContext(state.baselineCwd, input.cwd);
   const measurementCwd = measurement.cwd;
 
+  // issue #3: matched here, acted on only once the gate knows whether this stop would pass on its
+  // own. Checked first, a waiver was logged — and stored as a standing waiver — even on stops the
+  // gate would have allowed anyway (in one wave, a waiver 8s after a CONFIRMED verdict on the same
+  // diff hash). Those are now logged as verifyGateWaiverUnneeded and never set verifyGateWaivedHash.
   const waiverMatch = input.last_assistant_message ? WAIVER_PATTERN.exec(input.last_assistant_message) : null;
-  if (waiverMatch) {
-    // Remember which diff was waived. The gate measures the session's whole diff against
-    // baselineHead, so a waiver that only allowed this one stop would re-block on every later
-    // stop — including turns that changed nothing, because the cumulative diff hasn't shrunk.
-    // A null fingerprint is deliberately not stored: an unhashable diff would otherwise be
-    // waived forever, since the "has it moved?" test below could never disprove it. A dead anchor
-    // (measurementCwd === null) is treated identically to an unhashable diff — never fingerprinted
-    // against the wrong (hook) cwd.
-    const waivedHash = measurementCwd === null ? null : await diffFingerprint(measurementCwd);
-    if (waivedHash !== null) state.verifyGateWaivedHash = waivedHash;
-    state.verifyGateConsecutiveBlocks = 0;
-    state.verifyGateBlockHash = null;
-    state.verifyGateCycleBlocks = 0;
-    // Written unconditionally rather than via clearBlockCounters, which skips the write when no
-    // counter was set — that would drop the waiver on a first-round stop, the common case. Only
-    // the fields this gate owns are touched, so a concurrent SubagentStop's `lastVerifier` survives.
-    await updateSessionState(input.session_id, (fresh) => {
-      if (waivedHash !== null) fresh.verifyGateWaivedHash = waivedHash;
-      fresh.verifyGateConsecutiveBlocks = 0;
-      fresh.verifyGateBlockHash = null;
-      fresh.verifyGateCycleBlocks = 0;
-    });
-    await logEscapeHatch(input.session_id, "verifyGateWaived", {
-      // Model-produced text of unbounded length — bounded here so one waiver can't dominate the
-      // log file. `?? ""` covers a pattern match with no captured group, which cannot happen with
-      // the current WAIVER_PATTERN but must not throw if it ever changes.
-      reason: (waiverMatch[1] ?? "").trim().slice(0, 500),
-      diffHash: waivedHash,
-    });
-    emitOnce(allow());
-    return;
-  }
+  // Model-produced text of unbounded length — bounded here so one waiver can't dominate the log
+  // file. `?? ""` covers a pattern match with no captured group, which cannot happen with the
+  // current WAIVER_PATTERN but must not throw if it ever changes.
+  const waiverReason = (waiverMatch?.[1] ?? "").trim().slice(0, 500);
+  const logUnneededWaiver = async (
+    passedBy: "trivial" | "standing-waiver" | "verdict",
+    diffHash: string | null,
+  ): Promise<void> => {
+    if (waiverMatch) {
+      await logEscapeHatch(input.session_id, "verifyGateWaiverUnneeded", { reason: waiverReason, diffHash, passedBy });
+    }
+  };
 
   const { config, warnings } = await loadConfig(input.cwd);
   // The sidecar snapshot, not `state` — `SessionState` only carries `baselineUntrackedCaptured`,
@@ -242,13 +242,13 @@ async function runGate(): Promise<void> {
   const current = currentCounts ?? { changedLines: 0, changedFiles: 0 };
   const { changedLines, changedFiles } = current;
 
-  const isNonTrivial =
-    measurementFailed ||
-    changedLines >= config.verifyGate.minChangedLines ||
-    changedFiles >= config.verifyGate.minChangedFiles;
+  const isNonTrivial = measurementFailed || clearsThreshold(changedLines, changedFiles, config.verifyGate);
   if (!isNonTrivial) {
     await clearBlockCounters(input.session_id, state);
     emitOnce(allow(warnings));
+    // issue #3: the fingerprint is not computed on this path, and must not be computed just to
+    // log a waiver that turned out unneeded — a trivial diff never has one to report.
+    await logUnneededWaiver("trivial", null);
     return;
   }
 
@@ -268,6 +268,7 @@ async function runGate(): Promise<void> {
   if (currentHash !== null && state.verifyGateWaivedHash === currentHash) {
     await clearBlockCounters(input.session_id, state);
     emitOnce(allow(warnings));
+    await logUnneededWaiver("standing-waiver", currentHash);
     return;
   }
 
@@ -298,14 +299,53 @@ async function runGate(): Promise<void> {
     // "Differs" includes "unknown": currentHash === null (the patch itself couldn't be
     // fingerprinted this time) must not read as "unchanged" — that's exactly the failure this
     // fingerprinting exists to catch. Negative deltas (work reverted) never satisfy the size
-    // clause below, so this can't cause a spurious block on a shrinking diff.
+    // clause below, so this can't cause a spurious block on a shrinking diff. A positive file
+    // delta with a negative line delta can't clear the floor either, so it does not count as
+    // stale — the same shrinking-diff exemption, just via the file side this time.
     (currentHash === null || verifierHash !== currentHash) &&
-    (lineDelta >= config.verifyGate.minChangedLines || fileDelta >= config.verifyGate.minChangedFiles);
+    clearsThreshold(lineDelta, fileDelta, config.verifyGate);
 
   const passed = verifier !== null && verifier.verdict === "CONFIRMED" && verifier.criticalOrMajorCount === 0 && !stale;
   if (passed) {
     await clearBlockCounters(input.session_id, state);
     emitOnce(allow(warnings));
+    await logUnneededWaiver("verdict", currentHash);
+    return;
+  }
+
+  if (waiverMatch) {
+    // Remember which diff was waived. The gate measures the session's whole diff against
+    // baselineHead, so a waiver that only allowed this one stop would re-block on every later
+    // stop — including turns that changed nothing, because the cumulative diff hasn't shrunk.
+    // A null fingerprint is deliberately not stored: an unhashable diff would otherwise be
+    // waived forever, since the "has it moved?" test above could never disprove it. A dead anchor
+    // (measurementCwd === null) is treated identically to an unhashable diff — `currentHash` is
+    // already null for it, never a fingerprint of the hook cwd.
+    const waivedHash = currentHash;
+    if (waivedHash !== null) state.verifyGateWaivedHash = waivedHash;
+    state.verifyGateConsecutiveBlocks = 0;
+    state.verifyGateBlockHash = null;
+    state.verifyGateCycleBlocks = 0;
+    // Written unconditionally rather than via clearBlockCounters, which skips the write when no
+    // counter was set — that would drop the waiver on a first-round stop, the common case. Only
+    // the fields this gate owns are touched, so a concurrent SubagentStop's `lastVerifier` survives.
+    await updateSessionState(input.session_id, (fresh) => {
+      if (waivedHash !== null) fresh.verifyGateWaivedHash = waivedHash;
+      fresh.verifyGateConsecutiveBlocks = 0;
+      fresh.verifyGateBlockHash = null;
+      fresh.verifyGateCycleBlocks = 0;
+    });
+    // Emitted before the best-effort append below, same rule as the block path further down
+    // (issue #3 amendment): a slow or stalled log write must never hold up the decision the
+    // harness is waiting on, and must never give the watchdog a window where it looks like no
+    // decision has been reached yet. `updateSessionState` above stays ahead of the emit — unlike
+    // the log append, it is not best-effort: the stored waived hash and reset counters are load-
+    // bearing for later stops (see the waiver-stickiness tests), not just an audit trail.
+    emitOnce(allow());
+    await logEscapeHatch(input.session_id, "verifyGateWaived", {
+      reason: waiverReason,
+      diffHash: waivedHash,
+    });
     return;
   }
 
@@ -375,8 +415,8 @@ async function runGate(): Promise<void> {
     fresh.verifyGateCycleBlocks = priorCycleBlocks + 1;
   });
 
-  // Only one of lineDelta/fileDelta needs to clear its threshold for `stale` to trip (see the
-  // clause above) — the other can independently be negative (e.g. files reverted while an
+  // The line delta alone, or the file delta with enough line growth behind it, clears `stale`
+  // (see the clause above) — the other can independently be negative (e.g. files reverted while an
   // existing file's line count grew past the threshold). A signed number read literally as
   // "grew by -3" or pluralized as "-1 lines" doesn't read as English, so each delta gets its own
   // sign-aware phrasing instead of printing the raw (possibly negative) number.
@@ -393,6 +433,11 @@ async function runGate(): Promise<void> {
         ? `last verifier pass (${verifier.verdict}) is stale — ${lineDeltaPhrase} and the file count ` +
           `${fileDeltaPhrase} since it was recorded`
         : `last verifier pass was ${verifier.verdict} with ${verifier.criticalOrMajorCount} critical/major finding(s)`;
+
+  // Same precedence as `reasonDetail` above: a REFUTED verdict that is also stale reads as stale.
+  // "refuted" covers both non-passing verdict shapes — REFUTED, and CONFIRMED with critical/major
+  // findings — so it does not mean the verdict field literally said REFUTED.
+  const trigger = verifier === null ? "no-verdict" : stale ? "stale" : "refuted";
 
   // Only surfaced on a block, not on every allow — issue #14 Part B wants the running ref
   // discoverable, not printed on every hook invocation. Names the branch/ref this gate was built
@@ -442,10 +487,52 @@ async function runGate(): Promise<void> {
     },
     warnings,
   );
+  // Emit the decision before the best-effort append below, matching fireWatchdog's own rule
+  // ("emit before awaiting anything" — see its comment). A slow or stalled log write must never
+  // hold up the decision the harness is waiting on, and must never give the watchdog a window
+  // where it looks like no decision has been reached yet (it would then fire its own fail-open
+  // allow — first writer wins on stdout, so that allow would beat this block to the harness).
   emitOnce(output);
+  // issue #3: blocks used to be visible only through the waivers they provoked. One row per block
+  // that reaches the model — never on the loop-guard paths above, which log verifyGateFailOpen
+  // instead. Counts are null when the diff couldn't be measured, rather than the zeros `current`
+  // carries for the delta math.
+  await logEscapeHatch(input.session_id, "verifyGateBlocked", {
+    trigger,
+    changedLines: measurementFailed ? null : changedLines,
+    changedFiles: measurementFailed ? null : changedFiles,
+    diffHash: currentHash,
+  });
 }
 
 async function fireWatchdog(budgetMs: number): Promise<void> {
+  // issue #3: a decision already reached the harness (emitOnce is a first-writer-wins guard), most
+  // likely because runGate is now awaiting its own best-effort verifyGateBlocked append. Firing
+  // here would be a no-op on stdout, but it would still write a false "timeout" row alongside the
+  // real decision's own audit row, and its process.exit(0) would cut that still-pending append off
+  // mid-write. Bail out and let runGate finish on its own.
+  //
+  // A stuck-`open()` hang used to make even that plain exit unreachable (Node's exit teardown
+  // joins the libuv threadpool, and a worker blocked in `open()` on a writerless FIFO never
+  // returns from that join). appendJsonl now opens O_NONBLOCK (jsonl.ts), so that open() fails
+  // immediately with ENXIO instead of blocking, closing the FIFO case and making this return
+  // reachable again.
+  //
+  // Residual gap, accepted, not fixed here: O_NONBLOCK only protects the open() against a
+  // writerless FIFO. If the logs directory itself sits on a mount where open() or write() blocks
+  // in the kernel — with no FIFO involved — the block decision still reaches stdout (emitOnce ran
+  // above), but this function returns without exiting, runGate's own append hangs, and the
+  // process never exits; the harness eventually kills it and what happens to a killed hook's
+  // already-written stdout is unverified. A stall of the whole PRAXARCH_HOME mount already hangs
+  // the earlier `updateSessionState` call on this same request path, which predates this work; the
+  // new exposure here is narrower — a logs directory stalling on its own, independent of the rest
+  // of the mount. Tracked as a follow-up issue rather than fixed here.
+  //
+  // Self-SIGKILL (as this function used to do on this branch) was considered and rejected: it
+  // would force the process down deterministically, but the harness's handling of a signal-killed
+  // hook's already-flushed stdout is unverified, and trading a known-uncertain hang for an
+  // equally-unverified kill path isn't a fix.
+  if (hookOutputEmitted) return;
   // Emit before awaiting anything: stdout is what the harness reads, and the log row is
   // best-effort on top of it.
   emitOnce({

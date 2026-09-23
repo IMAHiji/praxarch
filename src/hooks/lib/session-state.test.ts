@@ -1,14 +1,26 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { lstat, mkdir, mkdtemp, readdir, rm, unlink, utimes, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { lstat, mkdir, mkdtemp, readdir, readFile, rm, unlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import type { getMkfifoProbe as GetMkfifoProbe } from "./fixtures/mkfifo-probe.js";
 import { TEST_DIST_DIR } from "../../test-support/dist-dir.js";
 
 const { readSessionState, writeSessionState, updateSessionState } = (await import(
   join(TEST_DIST_DIR, "hooks", "lib", "session-state.js")
 )) as typeof import("./session-state.js");
 const { sessionLockPath } = (await import(join(TEST_DIST_DIR, "hooks", "lib", "paths.js"))) as typeof import("./paths.js");
+const { appendJsonl } = (await import(join(TEST_DIST_DIR, "hooks", "lib", "jsonl.js"))) as typeof import("./jsonl.js");
+// Same convention as untracked.test.ts: `which mkfifo` only proves the binary is on PATH, not
+// that mkfifo(2) actually works in this sandbox, so the real probe creates one and lstats it.
+const { getMkfifoProbe } = (await import(
+  join(TEST_DIST_DIR, "hooks", "lib", "fixtures", "mkfifo-probe.js")
+)) as { getMkfifoProbe: typeof GetMkfifoProbe };
+const mkfifoProbeResult = await getMkfifoProbe();
+const hasMkfifo = mkfifoProbeResult.ok;
+const mkfifoSkipReason = mkfifoProbeResult.reason ?? "mkfifo not available on this platform";
 
 async function withHome(fn: (home: string) => Promise<void>): Promise<void> {
   const home = await mkdtemp(join(tmpdir(), "praxarch-session-state-"));
@@ -175,4 +187,125 @@ test("updateSessionState lands and creates the lock dir even when the state dir 
     const result = await readSessionState("c6");
     assert.equal(result.baselineHead, "w");
   });
+});
+
+// issue #3: appendJsonl opens O_NONBLOCK so a writerless FIFO fails its open() fast (ENXIO)
+// instead of hanging forever in it — the root-cause fix for a watchdog-SIGKILL workaround in
+// verify-gate.ts's fireWatchdog. Bounded with a race against a deadline, not a bare await, so a
+// regression back to blocking semantics fails this test instead of hanging the suite.
+test(
+  "issue #3: appendJsonl on a writerless FIFO rejects with ENXIO within 1s",
+  { skip: hasMkfifo ? false : mkfifoSkipReason },
+  async () => {
+    const dir = await mkdtemp(join(tmpdir(), "praxarch-jsonl-fifo-"));
+    try {
+      const fifoPath = join(dir, "log.jsonl");
+      execFileSync("mkfifo", [fifoPath]);
+      const result = await Promise.race([
+        appendJsonl(fifoPath, { at: "x" }).then(
+          () => ({ ok: true as const }),
+          (err: unknown) => ({ ok: false as const, err }),
+        ),
+        new Promise<never>((_resolve, reject) =>
+          setTimeout(() => reject(new Error("appendJsonl did not settle within 1s")), 1000),
+        ),
+      ]);
+      assert.equal(result.ok, false);
+      assert.equal((result as { err: unknown }).err instanceof Error, true);
+      assert.equal(((result as { err: NodeJS.ErrnoException }).err).code, "ENXIO");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+test("issue #3: appendJsonl writes exactly one line and appends on a second call", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "praxarch-jsonl-normal-"));
+  try {
+    const logPath = join(dir, "log.jsonl");
+    await appendJsonl(logPath, { at: "one" });
+    const afterFirst = (await readFile(logPath, "utf8")).split("\n").filter((line) => line.length > 0);
+    assert.deepEqual(afterFirst, [JSON.stringify({ at: "one" })]);
+
+    await appendJsonl(logPath, { at: "two" });
+    const afterSecond = (await readFile(logPath, "utf8")).split("\n").filter((line) => line.length > 0);
+    assert.deepEqual(afterSecond, [JSON.stringify({ at: "one" }), JSON.stringify({ at: "two" })]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// issue #3: `handle.write` can write fewer bytes than asked -- a FIFO with an idle reader, or
+// ENOSPC/EDQUOT partway through a row on a regular file. `appendFile` used to loop internally and
+// throw on a stuck write; the O_NONBLOCK `open`/`write` rewrite above dropped that loop and let a
+// short write resolve as success, leaving a torn line on disk. These two tests fake
+// `fs.promises.open` (via `node:test`'s module mock, the same pattern as
+// git-diff.test.ts's ignore-before-read test) so a short write is reproducible without racing a
+// real FIFO reader. The mock's `namedExports` must stay exhaustive over every name jsonl.ts pulls
+// from "node:fs/promises" (mkdir, open, readFile) or the cache-busted reimport below fails to
+// link -- mkdir and readFile pass straight through to the real implementations already imported
+// at the top of this file.
+test("issue #3: appendJsonl loops on a short write until the full row lands", async (t) => {
+  const record = { at: "short-write-probe", note: "a row long enough to make a 5-byte first write plainly partial" };
+  const expected = `${JSON.stringify(record)}\n`;
+  const written: Buffer[] = [];
+  let writeCalls = 0;
+  const jsonlUrl = pathToFileURL(join(TEST_DIST_DIR, "hooks", "lib", "jsonl.js")).href;
+  t.mock.module("node:fs/promises", {
+    namedExports: {
+      mkdir,
+      readFile,
+      open: async () => ({
+        write: async (buf: Buffer, offset: number, length: number) => {
+          writeCalls += 1;
+          // First call only makes 5 bytes of progress -- plainly less than the full row -- so a
+          // caller that doesn't loop leaves the remaining bytes unwritten.
+          const chunkLen = writeCalls === 1 ? Math.min(5, length) : length;
+          const chunk = Buffer.from(buf.subarray(offset, offset + chunkLen));
+          written.push(chunk);
+          return { bytesWritten: chunkLen, buffer: buf };
+        },
+        close: async () => undefined,
+      }),
+    },
+  });
+  const freshJsonl = (await import(`${jsonlUrl}?shortwrite=${Date.now()}`)) as typeof import("./jsonl.js");
+  const dir = await mkdtemp(join(tmpdir(), "praxarch-jsonl-shortwrite-"));
+  try {
+    // mkdir passes straight through to the real implementation above; open is faked, so nothing
+    // is actually created at this path -- it only has to be a real, writable directory.
+    await freshJsonl.appendJsonl(join(dir, "short-write.jsonl"), record);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+  assert.ok(writeCalls >= 2, `expected the short first write to force a retry, got ${writeCalls} call(s)`);
+  assert.equal(Buffer.concat(written).toString("utf8"), expected);
+});
+
+test("issue #3: appendJsonl throws rather than spin when a write makes zero progress", async (t) => {
+  const jsonlUrl = pathToFileURL(join(TEST_DIST_DIR, "hooks", "lib", "jsonl.js")).href;
+  let closed = false;
+  t.mock.module("node:fs/promises", {
+    namedExports: {
+      mkdir,
+      readFile,
+      open: async () => ({
+        // EAGAIN-shaped: the write resolves (does not reject) but makes no progress at all, the
+        // way a full non-blocking FIFO does. A caller that busy-loops on this never returns; one
+        // that throws surfaces it as a rejected append instead.
+        write: async () => ({ bytesWritten: 0, buffer: Buffer.alloc(0) }),
+        close: async () => {
+          closed = true;
+        },
+      }),
+    },
+  });
+  const freshJsonl = (await import(`${jsonlUrl}?zerowrite=${Date.now()}`)) as typeof import("./jsonl.js");
+  const dir = await mkdtemp(join(tmpdir(), "praxarch-jsonl-zerowrite-"));
+  try {
+    await assert.rejects(() => freshJsonl.appendJsonl(join(dir, "zero-write.jsonl"), { at: "x" }));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+  assert.equal(closed, true, "the handle must still be closed after a zero-progress write throws");
 });

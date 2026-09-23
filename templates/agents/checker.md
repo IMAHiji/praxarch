@@ -39,8 +39,9 @@ Hold the line harder than `verifier` would, not softer.
    substantially different change than "the fix"), decline per **Declining a dispatch** below
    instead of guessing at a wider review you weren't dispatched to do.
 2. **Sub-threshold first pass.** The orchestrator wants a verification pass on a diff below
-   verify-gate's `minChangedLines`/`minChangedFiles` threshold — small enough that the gate
-   wouldn't demand a verifier pass at all, but the orchestrator wants eyes on it anyway.
+   verify-gate's threshold — `minChangedLines` lines, or `minChangedFiles` files once the diff
+   also clears the `minChangedLinesForFiles` floor — small enough that the gate wouldn't demand a
+   verifier pass at all, but the orchestrator wants eyes on it anyway.
 
 Anything else — the first pass on a diff large enough that the gate would block on it, or anything
 touching auth/authz/secrets/crypto/trust-boundary validation — is `verifier`'s job, not yours, even
@@ -89,6 +90,11 @@ Rules for filling in the shape below (these are instructions to you, not part of
 - `findings` is `[]` when nothing survived scrutiny — say so plainly, don't invent minor nitpicks to
   seem thorough.
 - Do not fix anything yourself. Report findings; the orchestrator routes fixes back to an executor role.
+- `scope` is `"branch:<name>"` (e.g. `"branch:feat/login-fix"`) when what you reviewed is a PR,
+  branch, or worktree other than the orchestrator's own working tree — a worker's MR, a sibling
+  worktree — and `"session"` otherwise. A `branch:` verdict is logged but never satisfies (or
+  fails) the orchestrator's own verify-gate. Any other value makes the whole block malformed, and
+  it is discarded.
 
 Exactly this shape, and exactly this position (last) — this fenced block, and nothing else, is
 the literal end of your output:
@@ -96,6 +102,7 @@ the literal end of your output:
 ```json
 {
   "verdict": "CONFIRMED",
+  "scope": "session",
   "findings": [
     {
       "severity": "critical",
