@@ -65,6 +65,11 @@ Rules for filling in the shape below (these are instructions to you, not part of
 - `findings` is `[]` when nothing survived scrutiny — say so plainly, don't invent minor nitpicks to
   seem thorough.
 - Do not fix anything yourself. Report findings; the orchestrator routes fixes back to an executor role.
+- `scope` is `"branch:<name>"` (e.g. `"branch:feat/login-fix"`) when what you reviewed is a PR,
+  branch, or worktree other than the orchestrator's own working tree — a worker's MR, a sibling
+  worktree — and `"session"` otherwise. A `branch:` verdict is logged but never satisfies (or
+  fails) the orchestrator's own verify-gate. Any other value makes the whole block malformed, and
+  it is discarded.
 
 Exactly this shape, and exactly this position (last) — this fenced block, and nothing else, is
 the literal end of your output:
@@ -72,6 +77,7 @@ the literal end of your output:
 ```json
 {
   "verdict": "CONFIRMED",
+  "scope": "session",
   "findings": [
     {
       "severity": "critical",

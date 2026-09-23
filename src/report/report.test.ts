@@ -491,3 +491,48 @@ test("renders escape-hatch counts", async () => {
     });
   });
 });
+
+test("issue #3: renders verify-gate block counts by trigger and unneeded waivers", async () => {
+  await withPraxarchHome(async (home) => {
+    await withAgentsDir(async (agentsDir) => {
+      await mkdir(join(home, "logs"), { recursive: true });
+      const file = logFilePath(home);
+      const lines = [
+        { at: "t1", sessionId: "s1", role: "mech-executor", model: "sonnet", batchId: null, verdict: null, criticalOrMajorCount: null },
+        { at: "t2", sessionId: "s1", event: "verifyGateBlocked", trigger: "no-verdict", changedLines: 105, changedFiles: 1, diffHash: "h1" },
+        { at: "t3", sessionId: "s2", event: "verifyGateBlocked", trigger: "no-verdict", changedLines: 90, changedFiles: 2, diffHash: "h2" },
+        { at: "t4", sessionId: "s3", event: "verifyGateBlocked", trigger: "refuted", changedLines: 40, changedFiles: 1, diffHash: "h3" },
+        { at: "t5", sessionId: "s4", event: "verifyGateBlocked", trigger: "stale", changedLines: 100, changedFiles: 1, diffHash: "h4" },
+        { at: "t6", sessionId: "s5", event: "verifyGateWaiverUnneeded", reason: "already passing", diffHash: null, passedBy: "verdict" },
+        { at: "t7", sessionId: "s6", event: "verifyGateWaiverUnneeded", reason: "already passing", diffHash: null, passedBy: "verdict" },
+        { at: "t8", sessionId: "s7", event: "verifyGateWaived", reason: "docs only", diffHash: "abc123" },
+      ];
+      await writeFile(file, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+
+      const out = run(home, agentsDir);
+      assert.match(
+        out,
+        /Verify-gate blocks: 4 \(2 no verdict, 1 refuted, 1 stale\); 2 unneeded waiver\(s\) \(typed on a stop the gate would have passed\)/,
+      );
+      assert.match(out, /Escape-hatch exits: 0 skipped \(PRAXARCH_SKIP_VERIFY\), 1 waived \(PRAXARCH_VERIFY_WAIVED\)/);
+      assert.match(out, /Delegations: 1/);
+    });
+  });
+});
+
+test("issue #3: a log of only verifyGateBlocked rows still renders a report", async () => {
+  await withPraxarchHome(async (home) => {
+    await withAgentsDir(async (agentsDir) => {
+      await mkdir(join(home, "logs"), { recursive: true });
+      const file = logFilePath(home);
+      const lines = [
+        { at: "t1", sessionId: "s1", event: "verifyGateBlocked", trigger: "no-verdict", changedLines: 100, changedFiles: 1, diffHash: "h1" },
+      ];
+      await writeFile(file, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+
+      const out = run(home, agentsDir);
+      assert.doesNotMatch(out, /No delegations recorded/);
+      assert.match(out, /Verify-gate blocks: 1 \(1 no verdict, 0 refuted, 0 stale\); 0 unneeded waiver\(s\)/);
+    });
+  });
+});

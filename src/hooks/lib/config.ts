@@ -6,6 +6,12 @@ export interface VerifyGateConfig {
   minChangedLines: number;
   /** Minimum distinct changed files before a verifier pass is required. */
   minChangedFiles: number;
+  /**
+   * Line floor under the file-count trigger: `minChangedFiles` only makes a diff non-trivial once it
+   * also has at least this many changed lines. Without it a one-line touch to three files blocked
+   * like an 80-line change (issue #3). `minChangedLines` on its own still triggers at any file count.
+   */
+  minChangedLinesForFiles: number;
   /** Glob-ish path fragments to exclude from the diff-size calculation (lockfiles, generated files). */
   ignorePatterns: string[];
   /**
@@ -84,7 +90,8 @@ export const DEFAULT_CONFIG: PraxarchConfig = {
   verifyGate: {
     minChangedLines: 80,
     minChangedFiles: 3,
-    ignorePatterns: ["package-lock.json", "pnpm-lock.yaml", "yarn.lock", ".min.js", "dist/"],
+    minChangedLinesForFiles: 30,
+    ignorePatterns: ["package-lock.json", "pnpm-lock.yaml", "yarn.lock", ".min.js", "dist/", ".claude/plans/"],
     verdictRoles: ["verifier", "checker", "plan-reviewer"],
   },
   routeGuard: {
@@ -170,6 +177,15 @@ function validateLayer(path: string, raw: unknown, warnings: string[]): ConfigLa
         } else {
           warnings.push(
             `praxarch config: ${path} verifyGate.minChangedFiles must be a finite number >= 0 — ignoring it`,
+          );
+        }
+      }
+      if ("minChangedLinesForFiles" in vg) {
+        if (isFiniteNonNegativeNumber(vg["minChangedLinesForFiles"])) {
+          validated.minChangedLinesForFiles = vg["minChangedLinesForFiles"];
+        } else {
+          warnings.push(
+            `praxarch config: ${path} verifyGate.minChangedLinesForFiles must be a finite number >= 0 — ignoring it`,
           );
         }
       }

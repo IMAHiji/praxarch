@@ -27,16 +27,20 @@ for the full rationale and the delta from pilotfish.
     (`routeGuard.softDenyRoles`, config-extensible), where the same rule is a warning, not a
     block: `executor` shares `security-executor`'s model tier, so the deny there bought process
     overhead, not real classifier avoidance.
-  - `verify-gate` blocks session completion on non-trivial diffs with no `CONFIRMED`,
-    zero-critical/major verifier record on file (escape hatches included).
+  - `verify-gate` blocks session completion on non-trivial diffs (80+ changed lines, or 3+ files
+    with at least 30 changed lines — all configurable) with no `CONFIRMED`, zero-critical/major
+    verifier record on file (escape hatches included).
   - `telemetry` logs every delegation to JSONL, including the verifier's structured verdict.
   - `session-init` warns on config drift and `CLAUDE_CODE_SUBAGENT_MODEL` conflicts.
 - **Structured verification**: the verifier role must emit a JSON verdict block
   (`CONFIRMED`/`REFUTED` + findings), not free-form prose, so the gate can check it mechanically.
+  The block may carry a `scope`: `"session"` (the default) or `"branch:<name>"` for a review of
+  some other branch, PR or worktree — branch-scoped verdicts are logged but never satisfy this
+  session's gate.
 - **Telemetry surfaces**: a status line showing live role-spend for the current session and
   verify-gate state (no verdict on record, verified/unverified, a standing waiver, blocks already
   spent this stop cycle), and a `praxarch report` CLI / `/praxarch-report` skill for historical role
-  distribution and verifier pass rate.
+  distribution, verifier pass rate, and verify-gate blocks and waivers.
 - **Per-project overrides**: `.claude/praxarch.json` in any repo can retune verify-gate
   thresholds and route-guard strictness for that project. Role→model bindings are retuned the
   native way instead: shadow the agent file in `<project>/.claude/agents/`.
@@ -128,7 +132,8 @@ praxarch record-verdict --session <id> --role verifier --file verdict-output.txt
 Records a verdict role's trailing JSON verdict block into session state for verify-gate, for
 verdicts that arrive outside a hookable event (e.g. a resumed agent's reply). Input is the full
 text of the role's response, read from stdin or `--file`; the fenced JSON verdict block must be
-the last thing in it.
+the last thing in it. A block with `"scope": "branch:<name>"` is logged only; it never becomes
+the verdict verify-gate reads.
 
 ## Using it
 

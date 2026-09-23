@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type { DiffCounts } from "./lib/git-diff.js";
 import type { getMkfifoProbe as GetMkfifoProbe } from "./lib/fixtures/mkfifo-probe.js";
 import { TEST_DIST_DIR } from "../test-support/dist-dir.js";
@@ -1435,6 +1435,626 @@ test("a null current hash against a recorded null diffHash is still stale, not t
   }
 });
 
+// --- Default ignore patterns (issue #3) ------------------------------------------------------
+
+test("issue #3: an untracked plan under .claude/plans/ does not count toward the gate", async () => {
+  const fixture = await setupFixture();
+  try {
+    await mkdir(join(fixture.repo, ".claude", "plans"), { recursive: true });
+    await writeFile(join(fixture.repo, ".claude", "plans", "p.md"), "line\n".repeat(700));
+    const result = run(fixture, {
+      session_id: "s1",
+      cwd: fixture.repo,
+      hook_event_name: "Stop",
+    }) as { decision?: string };
+    assert.equal(result.decision, undefined);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+// --- Line floor under the file-count trigger (issue #3) ------------------------------------------
+
+test("issue #3: a multi-file diff under the line floor is trivial (wave 10: 8 lines across 4 files)", async () => {
+  const fixture = await setupFixture();
+  try {
+    for (let i = 0; i < 4; i++) {
+      await writeFile(join(fixture.repo, `touch-${i}.txt`), "x\n".repeat(2));
+    }
+    const result = run(fixture, {
+      session_id: "s1",
+      cwd: fixture.repo,
+      hook_event_name: "Stop",
+    }) as { decision?: string };
+    assert.equal(result.decision, undefined);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("issue #3: a multi-file diff at the line floor still blocks", async () => {
+  const fixture = await setupFixture();
+  try {
+    for (let i = 0; i < 3; i++) {
+      await writeFile(join(fixture.repo, `touch-${i}.txt`), "x\n".repeat(10));
+    }
+    const result = run(fixture, {
+      session_id: "s1",
+      cwd: fixture.repo,
+      hook_event_name: "Stop",
+    }) as { decision?: string; reason?: string };
+    assert.equal(result.decision, "block");
+    assert.match(result.reason ?? "", /changed 30 lines across 3 files/);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("issue #3: minChangedLinesForFiles 0 in global config restores the pure file-count trigger", async () => {
+  const fixture = await setupFixture();
+  try {
+    await writeFile(join(fixture.home, "config.json"), JSON.stringify({ verifyGate: { minChangedLinesForFiles: 0 } }));
+    for (let i = 0; i < 4; i++) {
+      await writeFile(join(fixture.repo, `touch-${i}.txt`), "x\n".repeat(2));
+    }
+    const result = run(fixture, {
+      session_id: "s1",
+      cwd: fixture.repo,
+      hook_event_name: "Stop",
+    }) as { decision?: string };
+    assert.equal(result.decision, "block");
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("issue #3: a verdict does not go stale on multi-file growth under the line floor", async () => {
+  const fixture = await setupFixture();
+  try {
+    await makeNonTrivialDiff(fixture.repo);
+    const { diffStat, diffFingerprint } = (await import(join(TEST_DIST_DIR, "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
+    const { changedLines, changedFiles } = assertMeasured(await diffStat(fixture.repo, [], null));
+    const hash = await diffFingerprint(fixture.repo);
+    await seedVerifierState(fixture.home, "s1", {
+      verdict: "CONFIRMED",
+      criticalOrMajorCount: 0,
+      findingsCount: 0,
+      diffHash: hash,
+      changedLines,
+      changedFiles,
+    });
+    for (let i = 0; i < 3; i++) {
+      await writeFile(join(fixture.repo, `touch-${i}.txt`), "x\n".repeat(2));
+    }
+    const result = run(fixture, {
+      session_id: "s1",
+      cwd: fixture.repo,
+      hook_event_name: "Stop",
+    }) as { decision?: string };
+    assert.equal(result.decision, undefined);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("issue #3: a verdict goes stale on multi-file growth at or above the line floor", async () => {
+  const fixture = await setupFixture();
+  try {
+    await makeNonTrivialDiff(fixture.repo);
+    const { diffStat, diffFingerprint } = (await import(join(TEST_DIST_DIR, "hooks", "lib", "git-diff.js"))) as typeof import("./lib/git-diff.js");
+    const { changedLines, changedFiles } = assertMeasured(await diffStat(fixture.repo, [], null));
+    const hash = await diffFingerprint(fixture.repo);
+    await seedVerifierState(fixture.home, "s1", {
+      verdict: "CONFIRMED",
+      criticalOrMajorCount: 0,
+      findingsCount: 0,
+      diffHash: hash,
+      changedLines,
+      changedFiles,
+    });
+    for (let i = 0; i < 3; i++) {
+      await writeFile(join(fixture.repo, `touch-${i}.txt`), "x\n".repeat(12));
+    }
+    const result = run(fixture, {
+      session_id: "s1",
+      cwd: fixture.repo,
+      hook_event_name: "Stop",
+    }) as { decision?: string; reason?: string };
+    assert.equal(result.decision, "block");
+    assert.match(result.reason ?? "", /stale/);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+// --- Block audit rows (issue #3) -----------------------------------------------------------
+
+test("issue #3: every block logs a verifyGateBlocked row naming its trigger", async () => {
+  const fixture = await setupFixture();
+  try {
+    await makeNonTrivialDiff(fixture.repo);
+
+    const b1 = run(fixture, { session_id: "b1", cwd: fixture.repo, hook_event_name: "Stop" }) as {
+      decision?: string;
+    };
+    assert.equal(b1.decision, "block");
+
+    await seedVerifierState(fixture.home, "b2", {
+      verdict: "REFUTED",
+      criticalOrMajorCount: 1,
+      findingsCount: 1,
+    });
+    const b2 = run(fixture, { session_id: "b2", cwd: fixture.repo, hook_event_name: "Stop" }) as {
+      decision?: string;
+    };
+    assert.equal(b2.decision, "block");
+
+    const { diffStat, diffFingerprint } = (await import(
+      join(TEST_DIST_DIR, "hooks", "lib", "git-diff.js")
+    )) as typeof import("./lib/git-diff.js");
+    const { changedLines, changedFiles } = assertMeasured(await diffStat(fixture.repo, [], null));
+    const hash = await diffFingerprint(fixture.repo);
+    await seedVerifierState(fixture.home, "b3", {
+      verdict: "CONFIRMED",
+      criticalOrMajorCount: 0,
+      findingsCount: 0,
+      diffHash: hash,
+      changedLines,
+      changedFiles,
+    });
+    await writeFile(join(fixture.repo, "more-work.txt"), "x\n".repeat(100));
+    const b3 = run(fixture, { session_id: "b3", cwd: fixture.repo, hook_event_name: "Stop" }) as {
+      decision?: string;
+    };
+    assert.equal(b3.decision, "block");
+
+    const log = await readMonthlyLog(fixture.home);
+    const rows = log.filter((r) => r["event"] === "verifyGateBlocked");
+
+    const row1 = rows.find((r) => r["sessionId"] === "b1");
+    assert.equal(row1?.["trigger"], "no-verdict");
+    assert.equal(row1?.["changedLines"], 105);
+    assert.equal(row1?.["changedFiles"], 1);
+    assert.equal(typeof row1?.["diffHash"], "string");
+
+    const row2 = rows.find((r) => r["sessionId"] === "b2");
+    assert.equal(row2?.["trigger"], "refuted");
+
+    const row3 = rows.find((r) => r["sessionId"] === "b3");
+    assert.equal(row3?.["trigger"], "stale");
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("issue #3: a loop-guard fail-open logs no verifyGateBlocked row", async () => {
+  const fixture = await setupFixture();
+  try {
+    await makeNonTrivialDiff(fixture.repo);
+    const stop = (active: boolean): { decision?: string; systemMessage?: string } =>
+      run(fixture, {
+        session_id: "s1",
+        cwd: fixture.repo,
+        hook_event_name: "Stop",
+        stop_hook_active: active,
+      }) as { decision?: string; systemMessage?: string };
+
+    assert.equal(stop(false).decision, "block");
+    assert.equal(stop(true).decision, "block");
+    const third = stop(true);
+    assert.equal(third.decision, undefined);
+
+    const log = await readMonthlyLog(fixture.home);
+    assert.equal(log.filter((r) => r["event"] === "verifyGateBlocked").length, 2);
+    assert.equal(log.filter((r) => r["event"] === "verifyGateFailOpen").length, 1);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("issue #3: an unmeasurable diff logs null counts on its verifyGateBlocked row", async () => {
+  const fixture = await setupFixture();
+  try {
+    await makeNonTrivialDiff(fixture.repo);
+    await withFakeGitOnPathFailingNumstat(async (fakeGitDir) => {
+      const result = run(
+        fixture,
+        { session_id: "s1", cwd: fixture.repo, hook_event_name: "Stop" },
+        { PATH: `${fakeGitDir}:${process.env["PATH"] ?? ""}` },
+      ) as { decision?: string };
+      assert.equal(result.decision, "block");
+    });
+
+    const log = await readMonthlyLog(fixture.home);
+    const rows = log.filter((r) => r["event"] === "verifyGateBlocked");
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.["trigger"], "no-verdict");
+    assert.equal(rows[0]?.["changedLines"], null);
+    assert.equal(rows[0]?.["changedFiles"], null);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("issue #3: a CONFIRMED verdict with critical findings blocks with trigger refuted", async () => {
+  const fixture = await setupFixture();
+  try {
+    await makeNonTrivialDiff(fixture.repo);
+    const { diffStat, diffFingerprint } = (await import(
+      join(TEST_DIST_DIR, "hooks", "lib", "git-diff.js")
+    )) as typeof import("./lib/git-diff.js");
+    const { changedLines, changedFiles } = assertMeasured(await diffStat(fixture.repo, [], null));
+    const hash = await diffFingerprint(fixture.repo);
+    await seedVerifierState(fixture.home, "s1", {
+      verdict: "CONFIRMED",
+      criticalOrMajorCount: 1,
+      findingsCount: 1,
+      diffHash: hash,
+      changedLines,
+      changedFiles,
+    });
+    const result = run(fixture, { session_id: "s1", cwd: fixture.repo, hook_event_name: "Stop" }) as {
+      decision?: string;
+    };
+    assert.equal(result.decision, "block");
+
+    const log = await readMonthlyLog(fixture.home);
+    const rows = log.filter((r) => r["event"] === "verifyGateBlocked" && r["sessionId"] === "s1");
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.["trigger"], "refuted");
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+// The log destination itself is a FIFO here (not a diff target, unlike the other FIFO test in
+// this file), and no reader is ever attached. Before the O_NONBLOCK fix in jsonl.ts, the block
+// audit append's own `open()` on this writerless FIFO stayed pending forever, so the process could
+// only be forced down with a watchdog SIGKILL. With appendJsonl opening O_NONBLOCK, that `open()`
+// fails immediately with ENXIO instead — the append is best-effort (logEscapeHatch swallows the
+// error), so the hook simply finishes and exits cleanly on its own, and the watchdog never needs to
+// fire at all. Run in a spawned child, not through `run` (which blocks synchronously on the
+// child's stdio and would deadlock the test process were the append ever to hang). Bounded with
+// explicit deadlines and a kill in the `finally`, rather than a bare await, so a real regression
+// (a hang) fails the test instead of hanging the suite. The SIGKILL in `finally` is a test-harness
+// safety net only, not the mechanism under test.
+test(
+  "issue #3: a stalled log write still blocks and the process exits on its own with code 0",
+  { skip: hasMkfifo ? false : mkfifoSkipReason },
+  async () => {
+    const fixture = await setupFixture();
+    let child: ChildProcessWithoutNullStreams | undefined;
+    try {
+      await makeNonTrivialDiff(fixture.repo);
+      const now = new Date();
+      const logDir = join(fixture.home, "logs");
+      await mkdir(logDir, { recursive: true });
+      const logPath = join(
+        logDir,
+        `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}.jsonl`,
+      );
+      execFileSync("mkfifo", [logPath]);
+
+      const timeoutMs = 1500; // budget ~1200ms at WATCHDOG_FRACTION 0.8
+      child = spawn("node", [script], {
+        cwd: fixture.repo,
+        env: { ...process.env, PRAXARCH_HOME: fixture.home, PRAXARCH_VERIFY_GATE_TIMEOUT_MS: String(timeoutMs) },
+      });
+      let stdout = "";
+      let decision: { decision?: string } | null = null;
+      child.stdout.on("data", (chunk: Buffer) => {
+        stdout += chunk.toString("utf8");
+        if (decision === null) {
+          try {
+            decision = JSON.parse(stdout) as { decision?: string };
+          } catch {
+            // Not a complete JSON chunk yet.
+          }
+        }
+      });
+      child.stdin.write(JSON.stringify({ session_id: "s1", cwd: fixture.repo, hook_event_name: "Stop" }));
+      child.stdin.end();
+
+      // With the FIFO's open() failing fast (ENXIO) instead of hanging, the process should exit
+      // cleanly on its own well within budget — no watchdog SIGKILL required.
+      const { code: exitCode, signal: exitSignal } = await Promise.race([
+        new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) =>
+          child?.on("close", (code, signal) => resolve({ code, signal })),
+        ),
+        new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((_resolve, reject) =>
+          setTimeout(
+            () => reject(new Error("the gate did not exit on its own within budget + 1s")),
+            timeoutMs + 1000,
+          ),
+        ),
+      ]);
+      assert.equal(exitCode, 0);
+      assert.equal(exitSignal, null);
+      assert.equal((decision as { decision?: string } | null)?.decision, "block");
+
+      // No "no false timeout row" check here: the FIFO's open() fails with ENXIO before any
+      // writer ever attaches, so nothing can ever land on it — a read of it would be vacuously
+      // empty regardless of what the hook did. That assertion belongs to a case where the append
+      // actually gets far enough to write something; see "issue #3: a delayed (not failed) log
+      // write still blocks with no false timeout row" below for the real one.
+    } finally {
+      // Test-harness safety net only — the process under test is expected to have already exited
+      // on its own above. A real hang here (a regression) still gets cleaned up rather than
+      // leaking a child into the rest of the suite.
+      child?.kill("SIGKILL");
+      await teardownFixture(fixture);
+    }
+  },
+);
+
+// Regression coverage for two mutants the FIFO test above cannot catch (its "no timeout row" read
+// is vacuous — nothing can ever land on an unopenable FIFO): moving `emitOnce(output)` back after
+// the `verifyGateBlocked` append (`order`), and deleting `fireWatchdog`'s `if (hookOutputEmitted)
+// return;` (`noret`). Both pass all other tests in this file. This test delays the *first* `.jsonl`
+// open by ~3s via a `--import` preload that monkey-patches `fs.promises.open`, with the watchdog
+// budget set well under that delay (1500ms timeout -> ~1200ms budget). On today's code: the block
+// decision reaches stdout immediately (well before the delay), the watchdog fires at ~1200ms but
+// returns early because a decision is already out, and the process exits cleanly once the delayed
+// append finally completes at ~3.1s -- one `verifyGateBlocked` row, no false timeout row. Under
+// `order`, the decision is now gated behind the same delayed append, so the watchdog's own
+// fail-open allow reaches stdout first at ~1.2s (with a timeout row) and the process exits before
+// the real block ever gets a chance to run. Under `noret`, the watchdog does not bail out on a
+// decision that already reached stdout: it appends its own (false) timeout row and calls
+// `process.exit(0)` at ~1.2s, alongside the real block.
+test("issue #3: a delayed (not failed) log write still blocks with no false timeout row", async () => {
+  const fixture = await setupFixture();
+  let child: ChildProcessWithoutNullStreams | undefined;
+  try {
+    await makeNonTrivialDiff(fixture.repo);
+    await mkdir(join(fixture.home, "logs"), { recursive: true });
+
+    const preloadPath = join(fixture.home, "delay-first-jsonl-open.mjs");
+    await writeFile(
+      preloadPath,
+      [
+        "import fsp from 'node:fs/promises';",
+        "import { syncBuiltinESMExports } from 'node:module';",
+        "const real = fsp.open;",
+        "let armed = true;",
+        "fsp.open = async (path, ...rest) => {",
+        "  if (armed && String(path).endsWith('.jsonl')) {",
+        "    armed = false;",
+        "    await new Promise((resolve) => setTimeout(resolve, 3000));",
+        "  }",
+        "  return real(path, ...rest);",
+        "};",
+        "syncBuiltinESMExports();",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const timeoutMs = 1500; // budget ~1200ms at WATCHDOG_FRACTION 0.8, well under the 3s delay
+    child = spawn("node", ["--import", pathToFileURL(preloadPath).href, script], {
+      cwd: fixture.repo,
+      env: { ...process.env, PRAXARCH_HOME: fixture.home, PRAXARCH_VERIFY_GATE_TIMEOUT_MS: String(timeoutMs) },
+    });
+    let stdout = "";
+    let decision: { decision?: string } | null = null;
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+      if (decision === null) {
+        try {
+          decision = JSON.parse(stdout) as { decision?: string };
+        } catch {
+          // Not a complete JSON chunk yet.
+        }
+      }
+    });
+    child.stdin.write(JSON.stringify({ session_id: "s1", cwd: fixture.repo, hook_event_name: "Stop" }));
+    child.stdin.end();
+
+    const { code: exitCode, signal: exitSignal } = await Promise.race([
+      new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) =>
+        child?.on("close", (code, signal) => resolve({ code, signal })),
+      ),
+      new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((_resolve, reject) =>
+        setTimeout(() => reject(new Error("the gate did not exit within the 5s deadline")), 5000),
+      ),
+    ]);
+    assert.equal(exitCode, 0);
+    assert.equal(exitSignal, null);
+    assert.equal((decision as { decision?: string } | null)?.decision, "block");
+
+    const log = await readMonthlyLog(fixture.home);
+    const blocked = log.filter((r) => r["event"] === "verifyGateBlocked" && r["sessionId"] === "s1");
+    assert.equal(blocked.length, 1);
+    const falseTimeouts = log.filter((r) => r["event"] === "verifyGateFailOpen" && r["reason"] === "timeout");
+    assert.equal(falseTimeouts.length, 0);
+  } finally {
+    // Test-harness safety net only — the process under test is expected to have already exited
+    // on its own above.
+    child?.kill("SIGKILL");
+    await teardownFixture(fixture);
+  }
+});
+
+// Same `--import` preload as the delayed-open test above, factored out for reuse by the two
+// unneeded/accepted-waiver variants below. Delays the *first* `.jsonl` open by ~3s so a watchdog
+// budget well under that delay can prove the decision reaches stdout before the delayed append
+// resolves.
+async function writeDelayFirstJsonlOpenPreload(home: string): Promise<string> {
+  const preloadPath = join(home, "delay-first-jsonl-open.mjs");
+  await writeFile(
+    preloadPath,
+    [
+      "import fsp from 'node:fs/promises';",
+      "import { syncBuiltinESMExports } from 'node:module';",
+      "const real = fsp.open;",
+      "let armed = true;",
+      "fsp.open = async (path, ...rest) => {",
+      "  if (armed && String(path).endsWith('.jsonl')) {",
+      "    armed = false;",
+      "    await new Promise((resolve) => setTimeout(resolve, 3000));",
+      "  }",
+      "  return real(path, ...rest);",
+      "};",
+      "syncBuiltinESMExports();",
+    ].join("\n"),
+    "utf8",
+  );
+  return preloadPath;
+}
+
+// issue #3 amendment: the same rule Task 8 applied to the block path (emit before awaiting a
+// best-effort append, and let the watchdog's hookOutputEmitted early return disarm it) must hold
+// on every path this task touches, including the unneeded-waiver log call. Models the delayed-
+// open test above but on the "verdict" unneeded-waiver path (a CONFIRMED verdict already passes,
+// so the waiver typed on this stop is unneeded). Kills two mutants: moving
+// `await logUnneededWaiver(...)` back ahead of `emitOnce(allow(warnings))` on the passed path
+// (`order`), and deleting fireWatchdog's `if (hookOutputEmitted) return;` (`noret`). Under `order`
+// the watchdog's own fail-open allow — carrying a `systemMessage` and a false timeout row — wins
+// stdout at ~1.2s, so this asserts systemMessage is absent as well as the exact row counts. Under
+// `noret` the real `{}` allow reaches stdout first, but the watchdog still appends a false timeout
+// row and exits at ~1.2s, before the delayed verifyGateWaiverUnneeded append ever completes.
+test("issue #3: a delayed (not failed) log write on the unneeded-waiver (verdict) path still allows with no false timeout row", async () => {
+  const fixture = await setupFixture();
+  let child: ChildProcessWithoutNullStreams | undefined;
+  try {
+    await makeNonTrivialDiff(fixture.repo);
+    await mkdir(join(fixture.home, "logs"), { recursive: true });
+    const { diffStat, diffFingerprint } = (await import(
+      join(TEST_DIST_DIR, "hooks", "lib", "git-diff.js")
+    )) as typeof import("./lib/git-diff.js");
+    const { changedLines, changedFiles } = assertMeasured(await diffStat(fixture.repo, [], null));
+    const hash = await diffFingerprint(fixture.repo);
+    await seedVerifierState(fixture.home, "s1", {
+      verdict: "CONFIRMED",
+      criticalOrMajorCount: 0,
+      findingsCount: 0,
+      diffHash: hash,
+      changedLines,
+      changedFiles,
+    });
+
+    const preloadPath = await writeDelayFirstJsonlOpenPreload(fixture.home);
+    const timeoutMs = 1500; // budget ~1200ms at WATCHDOG_FRACTION 0.8, well under the 3s delay
+    child = spawn("node", ["--import", pathToFileURL(preloadPath).href, script], {
+      cwd: fixture.repo,
+      env: { ...process.env, PRAXARCH_HOME: fixture.home, PRAXARCH_VERIFY_GATE_TIMEOUT_MS: String(timeoutMs) },
+    });
+    let stdout = "";
+    let decision: { decision?: string; systemMessage?: string } | null = null;
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+      if (decision === null) {
+        try {
+          decision = JSON.parse(stdout) as { decision?: string; systemMessage?: string };
+        } catch {
+          // Not a complete JSON chunk yet.
+        }
+      }
+    });
+    child.stdin.write(
+      JSON.stringify({
+        session_id: "s1",
+        cwd: fixture.repo,
+        hook_event_name: "Stop",
+        last_assistant_message: "Waiting on workers.\nPRAXARCH_VERIFY_WAIVED: verifiers still running",
+      }),
+    );
+    child.stdin.end();
+
+    const { code: exitCode, signal: exitSignal } = await Promise.race([
+      new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) =>
+        child?.on("close", (code, signal) => resolve({ code, signal })),
+      ),
+      new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((_resolve, reject) =>
+        setTimeout(() => reject(new Error("the gate did not exit within the 5s deadline")), 5000),
+      ),
+    ]);
+    assert.equal(exitCode, 0);
+    assert.equal(exitSignal, null);
+    // decision===undefined is true both for the real allow and for the watchdog's own fail-open
+    // allow, so systemMessage is what actually distinguishes them: only the watchdog's allow
+    // carries one.
+    assert.equal((decision as { decision?: string; systemMessage?: string } | null)?.decision, undefined);
+    assert.equal((decision as { decision?: string; systemMessage?: string } | null)?.systemMessage, undefined);
+
+    const log = await readMonthlyLog(fixture.home);
+    const unneeded = log.filter((r) => r["event"] === "verifyGateWaiverUnneeded" && r["sessionId"] === "s1");
+    assert.equal(unneeded.length, 1);
+    assert.equal(unneeded[0]?.["passedBy"], "verdict");
+    const falseTimeouts = log.filter((r) => r["event"] === "verifyGateFailOpen" && r["reason"] === "timeout");
+    assert.equal(falseTimeouts.length, 0);
+  } finally {
+    child?.kill("SIGKILL");
+    await teardownFixture(fixture);
+  }
+});
+
+// Same rule, on the accepted-waiver path itself: `updateSessionState` still runs before
+// `emitOnce`, since the stored `verifyGateWaivedHash` and reset counters are the semantics tests
+// :737 and :774 depend on and must survive even a process killed right after the decision reaches
+// stdout — but the best-effort `verifyGateWaived` append now runs *after* `emitOnce`, the same
+// order Task 8 gave the block path. Kills the same two mutants as above (`order`: the append moved
+// back ahead of `emitOnce`; `noret`: fireWatchdog's early return deleted).
+test("issue #3: a delayed (not failed) log write on the accepted-waiver path still allows with no false timeout row", async () => {
+  const fixture = await setupFixture();
+  let child: ChildProcessWithoutNullStreams | undefined;
+  try {
+    await makeNonTrivialDiff(fixture.repo);
+    await mkdir(join(fixture.home, "logs"), { recursive: true });
+
+    const preloadPath = await writeDelayFirstJsonlOpenPreload(fixture.home);
+    const timeoutMs = 1500; // budget ~1200ms at WATCHDOG_FRACTION 0.8, well under the 3s delay
+    child = spawn("node", ["--import", pathToFileURL(preloadPath).href, script], {
+      cwd: fixture.repo,
+      env: { ...process.env, PRAXARCH_HOME: fixture.home, PRAXARCH_VERIFY_GATE_TIMEOUT_MS: String(timeoutMs) },
+    });
+    let stdout = "";
+    let decision: { decision?: string; systemMessage?: string } | null = null;
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+      if (decision === null) {
+        try {
+          decision = JSON.parse(stdout) as { decision?: string; systemMessage?: string };
+        } catch {
+          // Not a complete JSON chunk yet.
+        }
+      }
+    });
+    child.stdin.write(
+      JSON.stringify({
+        session_id: "s1",
+        cwd: fixture.repo,
+        hook_event_name: "Stop",
+        last_assistant_message: "PRAXARCH_VERIFY_WAIVED: docs only",
+      }),
+    );
+    child.stdin.end();
+
+    const { code: exitCode, signal: exitSignal } = await Promise.race([
+      new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) =>
+        child?.on("close", (code, signal) => resolve({ code, signal })),
+      ),
+      new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((_resolve, reject) =>
+        setTimeout(() => reject(new Error("the gate did not exit within the 5s deadline")), 5000),
+      ),
+    ]);
+    assert.equal(exitCode, 0);
+    assert.equal(exitSignal, null);
+    assert.equal((decision as { decision?: string; systemMessage?: string } | null)?.decision, undefined);
+    assert.equal((decision as { decision?: string; systemMessage?: string } | null)?.systemMessage, undefined);
+
+    const log = await readMonthlyLog(fixture.home);
+    const waived = log.filter((r) => r["event"] === "verifyGateWaived" && r["sessionId"] === "s1");
+    assert.equal(waived.length, 1);
+    const falseTimeouts = log.filter((r) => r["event"] === "verifyGateFailOpen" && r["reason"] === "timeout");
+    assert.equal(falseTimeouts.length, 0);
+
+    const state = await readState(fixture.home, "s1");
+    assert.equal(typeof state["verifyGateWaivedHash"], "string");
+  } finally {
+    child?.kill("SIGKILL");
+    await teardownFixture(fixture);
+  }
+});
+
 // --- Fail-open visibility (issue #1, defect 3) -------------------------------------------------
 
 test("the loop-guard fail-open is logged to the monthly JSONL", async () => {
@@ -2123,6 +2743,121 @@ test("an accepted waiver logs a verifyGateWaived audit row carrying the reason t
     assert.equal(rows.length, 1);
     assert.equal(rows[0]?.["reason"], "docs only");
     assert.ok(rows[0] && "diffHash" in rows[0]);
+    // issue #3: this stop had no verifier pass on record, so the gate would have blocked without
+    // the waiver -- it was needed, and must not also show up as unneeded.
+    assert.equal(log.filter((r) => r["event"] === "verifyGateWaiverUnneeded").length, 0);
+    const state = await readState(fixture.home, "s1");
+    assert.equal(typeof state["verifyGateWaivedHash"], "string");
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+// issue #3: waiver ordering -- a waiver typed on a stop the gate would have allowed anyway (a
+// standing-waiver-adjacent, CONFIRMED, or trivial-diff stop) must not be honoured as a stored
+// waiver. See the wave-10 replay at the header of this file's plan: a waiver landed 8s after a
+// CONFIRMED verdict on the same diff hash, and was stored as a standing waiver it never needed.
+
+test(
+  "issue #3: a waiver on a stop a CONFIRMED verdict already passes is unneeded and not stored (wave 10 replay)",
+  async () => {
+    const fixture = await setupFixture();
+    try {
+      await makeNonTrivialDiff(fixture.repo);
+      const { diffStat, diffFingerprint } = (await import(
+        join(TEST_DIST_DIR, "hooks", "lib", "git-diff.js")
+      )) as typeof import("./lib/git-diff.js");
+      const { changedLines, changedFiles } = assertMeasured(await diffStat(fixture.repo, [], null));
+      const hash = await diffFingerprint(fixture.repo);
+      await seedVerifierState(fixture.home, "s1", {
+        verdict: "CONFIRMED",
+        criticalOrMajorCount: 0,
+        findingsCount: 0,
+        diffHash: hash,
+        changedLines,
+        changedFiles,
+      });
+
+      const result = run(fixture, {
+        session_id: "s1",
+        cwd: fixture.repo,
+        hook_event_name: "Stop",
+        last_assistant_message: "Waiting on workers.\nPRAXARCH_VERIFY_WAIVED: verifiers still running",
+      }) as { decision?: string };
+      assert.equal(result.decision, undefined);
+
+      const log = await readMonthlyLog(fixture.home);
+      assert.equal(log.filter((r) => r["event"] === "verifyGateWaived").length, 0);
+      const unneeded = log.filter((r) => r["event"] === "verifyGateWaiverUnneeded");
+      assert.equal(unneeded.length, 1);
+      assert.equal(unneeded[0]?.["passedBy"], "verdict");
+      assert.equal(unneeded[0]?.["diffHash"], hash);
+      assert.equal(unneeded[0]?.["reason"], "verifiers still running");
+
+      const state = await readState(fixture.home, "s1");
+      assert.equal(state["verifyGateWaivedHash"], undefined);
+    } finally {
+      await teardownFixture(fixture);
+    }
+  },
+);
+
+test("issue #3: a waiver on a trivial diff is unneeded, with a null diffHash", async () => {
+  const fixture = await setupFixture();
+  try {
+    await seedState(fixture.home, "s1", {});
+    // A trivial diff -- one line changed on a 5-line file, well under both thresholds.
+    await writeFile(join(fixture.repo, "file.txt"), "line\n".repeat(6));
+
+    const result = run(fixture, {
+      session_id: "s1",
+      cwd: fixture.repo,
+      hook_event_name: "Stop",
+      last_assistant_message: "PRAXARCH_VERIFY_WAIVED: not needed",
+    }) as { decision?: string };
+    assert.equal(result.decision, undefined);
+
+    const log = await readMonthlyLog(fixture.home);
+    assert.equal(log.filter((r) => r["event"] === "verifyGateWaived").length, 0);
+    const unneeded = log.filter((r) => r["event"] === "verifyGateWaiverUnneeded");
+    assert.equal(unneeded.length, 1);
+    assert.equal(unneeded[0]?.["passedBy"], "trivial");
+    assert.equal(unneeded[0]?.["diffHash"], null);
+
+    const state = await readState(fixture.home, "s1");
+    assert.equal(state["verifyGateWaivedHash"], undefined);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("issue #3: a waiver restated while a standing waiver covers the diff is unneeded", async () => {
+  const fixture = await setupFixture();
+  try {
+    await makeNonTrivialDiff(fixture.repo);
+    const first = run(fixture, {
+      session_id: "s1",
+      cwd: fixture.repo,
+      hook_event_name: "Stop",
+      last_assistant_message: "PRAXARCH_VERIFY_WAIVED: docs only",
+    }) as { decision?: string };
+    assert.equal(first.decision, undefined);
+
+    // Same tree, another waiver -- the standing waiver from the first stop already covers this
+    // diff, so this one is unneeded.
+    const second = run(fixture, {
+      session_id: "s1",
+      cwd: fixture.repo,
+      hook_event_name: "Stop",
+      last_assistant_message: "PRAXARCH_VERIFY_WAIVED: docs only, still",
+    }) as { decision?: string };
+    assert.equal(second.decision, undefined);
+
+    const log = await readMonthlyLog(fixture.home);
+    assert.equal(log.filter((r) => r["event"] === "verifyGateWaived").length, 1);
+    const unneeded = log.filter((r) => r["event"] === "verifyGateWaiverUnneeded");
+    assert.equal(unneeded.length, 1);
+    assert.equal(unneeded[0]?.["passedBy"], "standing-waiver");
   } finally {
     await teardownFixture(fixture);
   }

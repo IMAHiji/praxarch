@@ -36,7 +36,8 @@ pilotfish 自己的設計文件相當坦誠地說明了刻意省略的部分：�
   的工作。這兩項檢查刻意設計得很窄——「這是不是一個好的派工決定」這種廣泛判斷仍留給
   政策層處理，而非 hook，因為那種判斷需要關鍵字比對無法掌握的脈絡。
 - **`verify-gate`**（Stop）會在工作階段基準 commit 以來的變更量（若無基準則退回 HEAD，
-  另加上未追蹤的新檔案）達到「非瑣碎」門檻（門檻可設定）、
+  另加上未追蹤的新檔案）達到「非瑣碎」門檻（預設為變更 80 行以上，或 3 個以上檔案
+  且至少變更 30 行，皆可設定）、
   且該工作階段沒有零重大／嚴重發現的 `CONFIRMED` 驗證紀錄時，阻擋工作階段結束。
   刻意保留兩個逃生閥——`PRAXARCH_SKIP_VERIFY=1` 與在最終訊息中明確寫出
   `PRAXARCH_VERIFY_WAIVED: <原因>`——因為完全沒有逃生閥的硬性關卡，
@@ -49,7 +50,9 @@ pilotfish 自己的設計文件相當坦誠地說明了刻意省略的部分：�
        fail-open logging, and (3) a documented known limit of the size-delta rule (same-size
        in-place rewrites aren't caught). Not yet translated — see design.md's "verify-gate"
        bullet for the current source text. The "Known limitations" section there also gained a
-       matching bullet, not yet mirrored here. -->
+       matching bullet, not yet mirrored here. The issue #3 additions to that bullet (the
+       `verifyGateBlocked` and `verifyGateWaiverUnneeded` events, and the waiver-after-pass
+       ordering) are also not yet translated. -->
 - **`telemetry`**（PostToolUse）與 **`session-init`**（SessionStart）不做任何強制執行，
   只負責觀察與警告。強制執行只用在「未被強制執行的違規」比「偶爾誤擋一次」
   後果更嚴重的那兩條規則上。
@@ -64,14 +67,16 @@ pilotfish 的 verifier 回傳自由格式的 CONFIRMED／REFUTED 文字。這對
 praxarch 的 verifier 角色被要求在回覆結尾一定要附上一段 JSON 區塊：
 
 ```json
-{ "verdict": "CONFIRMED", "findings": [] }
+{ "verdict": "CONFIRMED", "scope": "session", "findings": [] }
 ```
 
 `telemetry` 會從工具輸出中解析出這段內容，一方面存入該工作階段的狀態（供 `verify-gate`
 立即檢查），另一方面附加到 JSONL 紀錄檔（供 `praxarch report` 統計歷史通過率）。
 判定結果是**推導**出來的，不是單純採信欄位本身：只有零 `critical`／`major` 發現時才算
 `CONFIRMED`，無論 `verdict` 欄位本身寫了什麼——這是為了防範 verifier 出於習慣寫下
-「CONFIRMED」卻同時列出重大發現的情況。
+「CONFIRMED」卻同時列出重大發現的情況。判定區塊可附帶選填的 `scope`：`"session"`
+（預設）或 `"branch:<名稱>"`（審查對象是其他分支、PR 或 worktree）；branch 範圍的判定
+只會被記錄，不會滿足本工作階段的 gate。
 
 ### 遙測：實測，而非宣稱
 

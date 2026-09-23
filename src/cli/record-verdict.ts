@@ -33,6 +33,10 @@ import {
  *  - A fingerprint capture failure is not a refusal (matches telemetry.ts): the verdict is still
  *    recorded, with `diffHash: null`, so verify-gate's present-but-null rule denies it a free pass
  *    rather than the CLI silently discarding an otherwise-legitimate verdict.
+ *  - Scope comes only from the verdict block — there is no CLI flag for it (issue #3). A
+ *    `branch:<name>` scope is logged but session state is never read or written for it, so a
+ *    verdict about some other branch/PR/worktree can never become what verify-gate reads for this
+ *    session.
  */
 
 interface RecordVerdictArgs {
@@ -104,7 +108,48 @@ export async function recordVerdict(argv: string[], cwd: string = process.cwd())
     }
     throw err;
   }
+  const { scope, ...counts } = summary;
   const at = new Date().toISOString();
+
+  // Marked `via: "record-verdict"` so `praxarch report` and any future audit can tell a
+  // CLI-recorded verdict apart from one telemetry.ts observed directly off a tool call.
+  const logRow = {
+    at,
+    sessionId: args.session,
+    role: args.role,
+    model: "n/a",
+    resolvedModel: null,
+    totalTokens: null,
+    durationMs: null,
+    batchId: null,
+    verdict: summary.verdict,
+    findingsCount: summary.findingsCount,
+    criticalOrMajorCount: summary.criticalOrMajorCount,
+    scope,
+    via: "record-verdict",
+  };
+
+  // issue #3: a branch-scoped verdict (a PR/worktree other than the session's own tree) is logged
+  // only, never recorded as what verify-gate reads — so it neither reads nor measures anything below
+  // (same as telemetry.ts). Reading state here would let an unreadable state file cost the verdict
+  // its only record, and let readSessionState's quarantine rename a corrupt one on its behalf.
+  if (scope !== "session") {
+    try {
+      await appendJsonl(logFileForDate(), logRow);
+    } catch (err) {
+      // The log row is its only record, so a failed append is a failure — unlike the session case
+      // below, where the verdict has already landed in state.
+      return fail(`${scope} verdict not recorded — its log row could not be written: ${String(err)}`);
+    }
+    // `scope` passed summarizeVerdict's BRANCH_SCOPE pattern (no whitespace, control or format
+    // characters, bounded length), so it prints verbatim.
+    process.stdout.write(
+      `praxarch record-verdict: logged ${args.role} verdict ${summary.verdict} for ${scope} ` +
+        `(${summary.findingsCount} finding(s), ${summary.criticalOrMajorCount} critical/major) — ` +
+        "branch-scoped, so verify-gate does not read it.\n",
+    );
+    return 0;
+  }
 
   // State read first (for baselineHead and baselineCwd) — the CLI's own `cwd` argument (default
   // `process.cwd()`) is exactly the vector that recorded the issue's 1202/7 repro: a verdict
@@ -139,8 +184,10 @@ export async function recordVerdict(argv: string[], cwd: string = process.cwd())
       ? { changedLines: null, changedFiles: null }
       : await captureDiffCounts(measurementCwd, config.verifyGate.ignorePatterns, baselineHead, untrackedBaseline);
 
+  // `scope` describes the verdict, not the tree — split off so it never lands in `lastVerifier`.
+  // `diffHash` is still assigned explicitly after the spread (a real `string | null`, never undefined).
   const verifierRecord: VerifierRecord = {
-    ...summary,
+    ...counts,
     recordedAt: at,
     diffHash,
     changedLines,
@@ -155,29 +202,13 @@ export async function recordVerdict(argv: string[], cwd: string = process.cwd())
     return fail(`session state unwritable: ${String(err)}`);
   }
 
-  // Marked `via: "record-verdict"` so `praxarch report` and any future audit can tell a
-  // CLI-recorded verdict apart from one telemetry.ts observed directly off a tool call.
-  //
   // The verdict is already recorded in session state by this point (see updateSessionState
   // above) — a failure here (e.g. an unwritable log dir) must not misreport that as an overall
   // failure, or an operator reading a non-zero exit + stack trace would conclude the verdict
   // never landed and waive the gate, which is exactly the failure this feature exists to prevent.
   let logWriteError: unknown;
   try {
-    await appendJsonl(logFileForDate(), {
-      at,
-      sessionId: args.session,
-      role: args.role,
-      model: "n/a",
-      resolvedModel: null,
-      totalTokens: null,
-      durationMs: null,
-      batchId: null,
-      verdict: summary.verdict,
-      findingsCount: summary.findingsCount,
-      criticalOrMajorCount: summary.criticalOrMajorCount,
-      via: "record-verdict",
-    });
+    await appendJsonl(logFileForDate(), logRow);
   } catch (err) {
     logWriteError = err;
   }

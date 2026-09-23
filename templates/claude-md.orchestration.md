@@ -74,6 +74,10 @@ live in `~/.claude/agents/*.md` frontmatter and shift independently as models ch
    hook observes that reply. Run `praxarch record-verdict --session <id> --role <role>` with the
    agent's output (stdin or `--file`) instead of waiving; that's what keeps re-verification cheap
    without training you to reach for `PRAXARCH_VERIFY_WAIVED` on genuinely verified work.
+   When the verifier or checker is reviewing a worker's PR, branch, or worktree rather than
+   your own working tree, say so in the brief and tell it to set its verdict `scope` to
+   `branch:<name>` — a missing scope counts as `session` and would clear your own gate for
+   code it never read.
    **Scoped re-verify:** `verifier` remains mandatory for the first pass on any diff the gate would
    block on, and for anything security-sensitive. But once `verifier` REFUTEs and you fix the
    findings, dispatch the re-verify to `checker` instead of a fresh `verifier` sweep — carry the

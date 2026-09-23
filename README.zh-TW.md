@@ -20,14 +20,18 @@ English version: [README.md](README.md)
 - **強制執行的 hook，而非僅止於政策文字**：
   - `route-guard` 會直接拒絕未指定明確 model 的臨時（ad-hoc）平行派工，以及帶有安全性質
     但未指派給 `security-executor` 的工作。
-  - `verify-gate` 會在變更範圍達到「非瑣碎」門檻、且該工作階段沒有零重大／嚴重發現的
+  - `verify-gate` 會在變更範圍達到「非瑣碎」門檻（預設為變更 80 行以上，或 3 個以上檔案且至少
+    變更 30 行，皆可設定）、且該工作階段沒有零重大／嚴重發現的
     `CONFIRMED` 驗證紀錄時，阻擋工作階段結束（附有逃生閥）。
   - `telemetry` 會把每一次派工記錄到 JSONL 檔案，包括 verifier 的結構化判定結果。
   - `session-init` 會在設定漂移或 `CLAUDE_CODE_SUBAGENT_MODEL` 衝突時發出警告。
 - **結構化驗證**：verifier 角色必須輸出 JSON 判定區塊（`CONFIRMED`／`REFUTED` ＋發現清單），
-  而非自由格式的文字，讓 gate 可以用程式化方式檢查。
+  而非自由格式的文字，讓 gate 可以用程式化方式檢查。判定區塊可附帶選填的 `"scope"`：`"session"`
+  （預設）或 `"branch:<名稱>"`（審查對象是其他分支、PR 或 worktree）；branch 範圍的判定只會
+  被記錄，不會滿足本工作階段的 gate。
 - **遙測介面**：狀態列（status line）即時顯示當前工作階段的角色花費，並提供
-  `praxarch report` CLI／`/praxarch-report` skill，統計歷史角色分布與 verifier 通過率。
+  `praxarch report` CLI／`/praxarch-report` skill，統計歷史角色分布、verifier 通過率，
+  以及 verify-gate 的阻擋與豁免次數。
 - **專案層級覆寫**：任何專案下的 `.claude/praxarch.json` 都能針對該專案調整角色對模型的綁定、
   verify-gate 門檻與 route-guard 的嚴格程度。
 - **`/fan-out` skill**：在多個獨立 git worktree 中平行執行完全可規格化的獨立工作項目，

@@ -215,3 +215,55 @@ test("verdictRoles additivity holds through global + project layers — canonica
     await rm(cwd, { recursive: true, force: true });
   }
 });
+
+test("issue #3: verifyGate.minChangedLinesForFiles defaults to 30 and a project value overrides it", async () => {
+  const home = await mkdtemp(join(tmpdir(), "praxarch-config-"));
+  const cwd = await mkdtemp(join(tmpdir(), "praxarch-config-cwd-"));
+  const prevHome = process.env["PRAXARCH_HOME"];
+  process.env["PRAXARCH_HOME"] = home;
+  try {
+    const defaults = await loadConfig(cwd);
+    assert.equal(defaults.config.verifyGate.minChangedLinesForFiles, 30);
+
+    await mkdir(join(cwd, ".claude"), { recursive: true });
+    await writeFile(
+      join(cwd, ".claude", "praxarch.json"),
+      JSON.stringify({ verifyGate: { minChangedLinesForFiles: 5 } }),
+    );
+    const { config, warnings } = await loadConfig(cwd);
+    assert.equal(config.verifyGate.minChangedLinesForFiles, 5);
+    assert.equal(warnings.length, 0);
+  } finally {
+    if (prevHome === undefined) delete process.env["PRAXARCH_HOME"];
+    else process.env["PRAXARCH_HOME"] = prevHome;
+    await rm(home, { recursive: true, force: true });
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("issue #3: a non-numeric or negative minChangedLinesForFiles is dropped with a warning", async () => {
+  const home = await mkdtemp(join(tmpdir(), "praxarch-config-"));
+  const cwd = await mkdtemp(join(tmpdir(), "praxarch-config-cwd-"));
+  const prevHome = process.env["PRAXARCH_HOME"];
+  process.env["PRAXARCH_HOME"] = home;
+  try {
+    await mkdir(join(cwd, ".claude"), { recursive: true });
+    for (const bad of ["30", -1]) {
+      await writeFile(
+        join(cwd, ".claude", "praxarch.json"),
+        JSON.stringify({ verifyGate: { minChangedLinesForFiles: bad } }),
+      );
+      const { config, warnings } = await loadConfig(cwd);
+      assert.equal(config.verifyGate.minChangedLinesForFiles, 30, JSON.stringify(bad));
+      assert.ok(
+        warnings.some((w) => /verifyGate\.minChangedLinesForFiles must be a finite number >= 0/.test(w)),
+        JSON.stringify(bad),
+      );
+    }
+  } finally {
+    if (prevHome === undefined) delete process.env["PRAXARCH_HOME"];
+    else process.env["PRAXARCH_HOME"] = prevHome;
+    await rm(home, { recursive: true, force: true });
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
