@@ -27,6 +27,20 @@ const BUILTIN_ROLES = [
   "plan-reviewer",
 ];
 
+// The one model tier at which a security-keyword match warns instead of denying (issue #1):
+// security-executor's own binding, pinned against templates/agents/security-executor.md by a
+// route-guard test. Only an ad-hoc call's explicit `model` is compared against it. A defined
+// role's real model depends on which agent file Claude Code loads, which a hook can't know.
+// ponytail: opus is the top tier today; a tier above it needs a rank table here.
+const SECURITY_TIER = "opus";
+
+// Substring, not equality: the Agent tool may pass "opus" or a full id like "claude-opus-4-8".
+// `unknown`, not the declared string type: tool_input is untrusted JSON, and a non-string model
+// that threw here would land in the crash handler's fail-open allow instead of the hard deny.
+function isSecurityTier(model: unknown): boolean {
+  return typeof model === "string" && model.toLowerCase().includes(SECURITY_TIER);
+}
+
 // Keywords match at word boundaries, case-insensitively. A trailing "*" makes it a stem
 // (open-ended suffix); without it the match is exact-word. Substring matching is what made
 // "auth" flag every prompt containing "author" or "Co-Authored-By".
@@ -53,6 +67,12 @@ const BUILTIN_SECURITY_KEYWORDS = [
   "csrf",
   "penetration test*",
   "pentest*",
+  // Password-hashing algorithms, always-match (issue #1); a bare `hash*` would fire on commit
+  // hashes and hashmaps.
+  "bcrypt*",
+  "argon2*",
+  "scrypt",
+  "pbkdf2",
 ];
 
 function keywordPattern(keyword: string): RegExp {
@@ -110,24 +130,28 @@ async function main(): Promise<void> {
   // Review roles are exempt (the 2026-07-08 verifier exemption, generalized to config): a
   // read-only reviewer of auth/secrets code necessarily mentions those keywords, and blocking
   // it here deadlocks against verify-gate, which requires a review pass on exactly these
-  // security-sensitive tickets. Default is ["verifier"]; config adds, never removes.
+  // security-sensitive tickets. Default is ["verifier", "checker", "plan-reviewer", "planner"];
+  // config adds, never removes.
   const reviewRoles = new Set(config.routeGuard.reviewRoles);
   const isReviewRole = subagentType !== undefined && reviewRoles.has(subagentType);
   // A soft-deny warning carried forward from the security-keyword check below, if any, to be
   // attached to the eventual decision. It must never short-circuit the known-role/ad-hoc rules
-  // that run after this block — see the softDenyRoles handling below for why.
+  // that run after this block — see the ad-hoc security-tier handling below for why.
   let softDenyReason: string | undefined;
 
+  const knownRoles = new Set([...BUILTIN_ROLES, ...config.routeGuard.knownRoles]);
+  const isKnownRole = subagentType !== undefined && knownRoles.has(subagentType);
+
   if (matchedKeyword !== undefined && subagentType !== "security-executor" && !isReviewRole) {
-    // Soft-deny roles (default ["executor"]) get a warning instead of the hard deny below: same
-    // model tier as security-executor, so the deny was buying process overhead, not classifier
-    // avoidance, at the cost of reword-and-retry loops. Checked only after the review-role
-    // exemption above, so a role that's already exempt never gets this warning layered on top.
-    const softDenyRoles = new Set(config.routeGuard.softDenyRoles);
-    const isSoftDenyRole = subagentType !== undefined && softDenyRoles.has(subagentType);
-    if (isSoftDenyRole) {
-      // IMPORTANT: do not decide()+return here. A security-keyword match against a soft-deny
-      // role must not bypass the explicit-model-override and ad-hoc-no-model rules below — those
+    // Warn-only for an ad-hoc call that itself asks for security-executor's tier (issue #1): there
+    // the hard deny buys reword-and-retry loops, not a stronger model. Defined roles always take
+    // the hard deny. Their model comes from whichever agent file Claude Code loads (managed,
+    // --add-dir, --agents, ancestor and worktree sources a hook can't see), so this hook can't
+    // know it. Checked only after the review-role exemption above, so an exempt role never gets
+    // this warning layered on top.
+    if (!isKnownRole && isSecurityTier(model)) {
+      // IMPORTANT: do not decide()+return here. A security-keyword match against an ad-hoc
+      // security-tier call must not bypass the explicit-model-override and ad-hoc-no-model rules below — those
       // rules exist independently of the security check and a known role passing an explicit
       // model (or an ad-hoc call passing none) is still wrong even when the prompt also happens
       // to look security-sensitive. Stash the warning and fall through; it's only ever surfaced
@@ -137,7 +161,7 @@ async function main(): Promise<void> {
       // messages regardless of whether a soft-deny warning was also pending.
       softDenyReason =
         `warning — this delegation looks security-sensitive (matched keyword "${matchedKeyword}") ` +
-        `but is going to "${subagentType}"; if it touches auth/secrets/crypto/trust-boundary ` +
+        `but is going to "${subagentType ?? "unset"}"; if it touches auth/secrets/crypto/trust-boundary ` +
         `validation, route it to security-executor instead.`;
     } else {
       emit(
@@ -145,16 +169,15 @@ async function main(): Promise<void> {
           config.routeGuard.strict,
           `this delegation looks security-sensitive (matched keyword "${matchedKeyword}") but ` +
             `subagent_type is "${subagentType ?? "unset"}", not "security-executor". Route ` +
-            `auth/secrets/crypto/validation work to security-executor per the orchestration policy.`,
+            `auth/secrets/crypto/validation work to security-executor per the orchestration policy; ` +
+            `if this isn't security work, an ad-hoc dispatch (no defined role) with model ` +
+            `"${SECURITY_TIER}" gets a warning instead of a block.`,
           warnings,
         ),
       );
       return;
     }
   }
-
-  const knownRoles = new Set([...BUILTIN_ROLES, ...config.routeGuard.knownRoles]);
-  const isKnownRole = subagentType !== undefined && knownRoles.has(subagentType);
 
   // The inverse of the fan-out rule: an explicit model on a defined role silently overrides the
   // role's frontmatter binding. Live telemetry (2026-07-09) showed this defeating tiered routing

@@ -12,9 +12,6 @@ const script = join(TEST_DIST_DIR, "hooks", "route-guard.js");
 const knownRolesProject = join(here, "fixtures", "known-roles-project");
 const reviewRolesProject = join(here, "fixtures", "review-roles-project");
 const malformedConfigProject = join(here, "fixtures", "malformed-config-project");
-const softDenyRolesProject = join(here, "fixtures", "soft-deny-roles-project");
-const malformedSoftDenyProject = join(here, "fixtures", "malformed-soft-deny-project");
-const softDenyAdhocProject = join(here, "fixtures", "soft-deny-adhoc-project");
 const strictFalseProject = join(here, "fixtures", "strict-false-project");
 
 async function run(
@@ -39,6 +36,18 @@ async function run(
 // Isolates the hook from this machine's real global config (~/.claude/praxarch/config.json),
 // whose knownRoles/securityKeywords would otherwise leak into fixture-based assertions.
 const HERMETIC_ENV = { PRAXARCH_HOME: join(knownRolesProject, "no-such-praxarch-home") };
+
+// Exact security-keyword messages (issue #1): the hard deny, now with the ad-hoc opus hint, and
+// the warn-only message an ad-hoc opus call gets instead.
+const securityDeny = (role: string, keyword = "credential*"): string =>
+  `praxarch route-guard: blocked — this delegation looks security-sensitive (matched keyword "${keyword}") ` +
+  `but subagent_type is "${role}", not "security-executor". Route auth/secrets/crypto/validation work ` +
+  `to security-executor per the orchestration policy; if this isn't security work, an ad-hoc dispatch ` +
+  `(no defined role) with model "opus" gets a warning instead of a block.`;
+const securityWarning = (role: string, keyword = "credential*"): string =>
+  `praxarch route-guard: warning — this delegation looks security-sensitive (matched keyword "${keyword}") ` +
+  `but is going to "${role}"; if it touches auth/secrets/crypto/trust-boundary validation, route it to ` +
+  `security-executor instead.`;
 
 test("allows non-Agent tool calls unconditionally", async () => {
   const { decision } = await run({
@@ -292,43 +301,37 @@ test("malformed project config does not disable the guard: defined-role delegati
   assert.match(systemMessage ?? "", /praxarch\.json is unreadable or not valid JSON/);
 });
 
-test("soft-denies (warns, does not block) a security-flavored delegation to executor", async () => {
-  const { decision, systemMessage, stdout } = await run({
-    session_id: "s1",
-    cwd: process.cwd(),
-    hook_event_name: "PreToolUse",
-    tool_name: "Agent",
-    tool_input: { subagent_type: "executor", prompt: "audit the credential rotation logic" },
-  });
-  const parsed = stdout as { hookSpecificOutput: { permissionDecisionReason?: string } };
-  assert.equal(decision, "allow");
-  assert.equal(
-    systemMessage,
-    'praxarch route-guard: warning — this delegation looks security-sensitive (matched keyword ' +
-      '"credential*") but is going to "executor"; if it touches auth/secrets/crypto/trust-boundary ' +
-      "validation, route it to security-executor instead.",
+test("issue #1: a defined role hard-denies a security-flavored delegation (executor, no role-name override)", async () => {
+  const { decision, systemMessage } = await run(
+    {
+      session_id: "s1",
+      cwd: process.cwd(),
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: "executor", prompt: "audit the credential rotation logic" },
+    },
+    HERMETIC_ENV,
   );
-  assert.match(parsed.hookSpecificOutput.permissionDecisionReason ?? "", /route it to security-executor instead/);
-});
-
-test("still hard-denies a security-flavored delegation to mech-executor, message unchanged from today", async () => {
-  const { decision, systemMessage } = await run({
-    session_id: "s1",
-    cwd: process.cwd(),
-    hook_event_name: "PreToolUse",
-    tool_name: "Agent",
-    tool_input: { subagent_type: "mech-executor", prompt: "audit the credential rotation logic" },
-  });
   assert.equal(decision, "deny");
-  assert.equal(
-    systemMessage,
-    'praxarch route-guard: blocked — this delegation looks security-sensitive (matched keyword ' +
-      '"credential*") but subagent_type is "mech-executor", not "security-executor". Route ' +
-      "auth/secrets/crypto/validation work to security-executor per the orchestration policy.",
-  );
+  assert.equal(systemMessage, securityDeny("executor"));
 });
 
-test("ad-hoc dispatch with explicit model still denies on a security keyword match (soft-deny does not apply)", async () => {
+test("still hard-denies a security-flavored delegation to mech-executor, with the ad-hoc opus hint", async () => {
+  const { decision, systemMessage } = await run(
+    {
+      session_id: "s1",
+      cwd: process.cwd(),
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: "mech-executor", prompt: "audit the credential rotation logic" },
+    },
+    HERMETIC_ENV,
+  );
+  assert.equal(decision, "deny");
+  assert.equal(systemMessage, securityDeny("mech-executor"));
+});
+
+test("ad-hoc dispatch on sonnet still denies on a security keyword match (below the security tier)", async () => {
   const { decision } = await run({
     session_id: "s1",
     cwd: process.cwd(),
@@ -355,93 +358,198 @@ test("review-role exemption wins outright over soft-deny: verifier gets a plain 
   assert.equal(systemMessage, undefined);
 });
 
-test("config softDenyRoles extends the warn set additively: implementer also gets warn-only", async () => {
+// The issue #8 fall-through is kept: a pending security warning never survives a later deny, and
+// never short-circuits the explicit-model-override or ad-hoc-no-model rules that run after it.
+// Under the ad-hoc-opus rule no later deny can currently apply to a warned call; these pin that
+// the security check itself denies every defined role and every ad-hoc call below the tier.
+
+test("issue #1: a defined role can't buy warn-only by passing model opus: executor + model opus + keyword hard-denies", async () => {
   const { decision, systemMessage } = await run(
     {
       session_id: "s1",
-      cwd: softDenyRolesProject,
+      cwd: process.cwd(),
       hook_event_name: "PreToolUse",
       tool_name: "Agent",
-      tool_input: { subagent_type: "implementer", prompt: "audit the credential rotation logic" },
-    },
-    HERMETIC_ENV,
-  );
-  assert.equal(decision, "allow");
-  assert.match(systemMessage ?? "", /is going to "implementer"/);
-});
-
-test("malformed softDenyRoles config value warns and falls back to the default [\"executor\"]", async () => {
-  const { decision, systemMessage } = await run(
-    {
-      session_id: "s1",
-      cwd: malformedSoftDenyProject,
-      hook_event_name: "PreToolUse",
-      tool_name: "Agent",
-      tool_input: { subagent_type: "executor", prompt: "audit the credential rotation logic" },
-    },
-    HERMETIC_ENV,
-  );
-  assert.equal(decision, "allow");
-  assert.match(systemMessage ?? "", /routeGuard\.softDenyRoles must be an array of strings/);
-  assert.match(systemMessage ?? "", /is going to "executor"/);
-});
-
-// Regression coverage for the soft-deny-as-bypass bug (GitLab issue #8): a security-keyword
-// match against a softDenyRoles member must not short-circuit the explicit-model-override or
-// ad-hoc-no-model rules that run later in the chain — the warning is only ever surfaced when
-// nothing else in the chain would deny the delegation.
-
-test("explicit-model-override deny wins over a soft-deny warning: executor + model + keyword denies, not a warning-allow", async () => {
-  const { decision, systemMessage } = await run({
-    session_id: "s1",
-    cwd: process.cwd(),
-    hook_event_name: "PreToolUse",
-    tool_name: "Agent",
-    tool_input: { subagent_type: "executor", model: "haiku", prompt: "audit the credential rotation logic" },
-  });
-  assert.equal(decision, "deny");
-  assert.equal(
-    systemMessage,
-    'praxarch route-guard: blocked — delegation to defined role "executor" passes explicit model ' +
-      '"haiku", which overrides the role\'s frontmatter binding and defeats tiered routing. Omit ' +
-      "model — role→model bindings live in the agent file.",
-  );
-});
-
-test("ad-hoc-no-model deny wins over a soft-deny warning: a softDenyRoles role outside knownRoles, dispatched ad-hoc with no model, still denies", async () => {
-  const { decision, systemMessage } = await run(
-    {
-      session_id: "s1",
-      cwd: softDenyAdhocProject,
-      hook_event_name: "PreToolUse",
-      tool_name: "Agent",
-      tool_input: { subagent_type: "plugin:reviewer", prompt: "audit the credential rotation logic" },
+      tool_input: { subagent_type: "executor", model: "opus", prompt: "audit the credential rotation logic" },
     },
     HERMETIC_ENV,
   );
   assert.equal(decision, "deny");
-  assert.match(systemMessage ?? "", /ad-hoc fan-out Agent call/);
-  assert.doesNotMatch(systemMessage ?? "", /security-executor instead/);
+  assert.equal(systemMessage, securityDeny("executor"));
 });
 
-test("strict:false does not double-print or misbehave on the soft-deny path: single message, allow", async () => {
+test("issue #1: ad-hoc dispatch with no model hard-denies on a security keyword", async () => {
+  const { decision, systemMessage } = await run(
+    {
+      session_id: "s1",
+      cwd: process.cwd(),
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: "general-purpose", prompt: "audit the credential rotation logic" },
+    },
+    HERMETIC_ENV,
+  );
+  assert.equal(decision, "deny");
+  assert.equal(systemMessage, securityDeny("general-purpose"));
+});
+
+test("strict:false does not double-print or misbehave on the warn path: single message, allow", async () => {
   const { decision, systemMessage } = await run(
     {
       session_id: "s1",
       cwd: strictFalseProject,
       hook_event_name: "PreToolUse",
       tool_name: "Agent",
-      tool_input: { subagent_type: "executor", prompt: "audit the credential rotation logic" },
+      tool_input: { subagent_type: "general-purpose", model: "opus", prompt: "audit the credential rotation logic" },
     },
     HERMETIC_ENV,
   );
   assert.equal(decision, "allow");
-  assert.equal(
-    systemMessage,
-    'praxarch route-guard: warning — this delegation looks security-sensitive (matched keyword ' +
-      '"credential*") but is going to "executor"; if it touches auth/secrets/crypto/trust-boundary ' +
-      "validation, route it to security-executor instead.",
+  assert.equal(systemMessage, securityWarning("general-purpose"));
+});
+
+test("issue #1: ad-hoc general-purpose on opus gets warn-only on a security keyword", async () => {
+  const { decision, systemMessage, stdout } = await run(
+    {
+      session_id: "s1",
+      cwd: process.cwd(),
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: "general-purpose", model: "opus", prompt: "audit the credential rotation logic" },
+    },
+    HERMETIC_ENV,
   );
+  const parsed = stdout as { hookSpecificOutput: { permissionDecisionReason?: string } };
+  assert.equal(decision, "allow");
+  assert.equal(systemMessage, securityWarning("general-purpose"));
+  assert.match(parsed.hookSpecificOutput.permissionDecisionReason ?? "", /route it to security-executor instead/);
+});
+
+test("issue #1: a full opus model id counts as the security tier", async () => {
+  const { decision, systemMessage } = await run(
+    {
+      session_id: "s1",
+      cwd: process.cwd(),
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_input: {
+        subagent_type: "general-purpose",
+        model: "claude-opus-4-8",
+        prompt: "audit the credential rotation logic",
+      },
+    },
+    HERMETIC_ENV,
+  );
+  assert.equal(decision, "allow");
+  assert.equal(systemMessage, securityWarning("general-purpose"));
+});
+
+test("issue #1: ad-hoc on haiku or model inherit still hard-denies", async () => {
+  for (const model of ["haiku", "inherit"]) {
+    const { decision, systemMessage } = await run(
+      {
+        session_id: "s1",
+        cwd: process.cwd(),
+        hook_event_name: "PreToolUse",
+        tool_name: "Agent",
+        tool_input: { subagent_type: "general-purpose", model, prompt: "audit the credential rotation logic" },
+      },
+      HERMETIC_ENV,
+    );
+    assert.equal(decision, "deny", `expected deny for model: ${model}`);
+    assert.equal(systemMessage, securityDeny("general-purpose"), `model: ${model}`);
+  }
+});
+
+test("issue #1: a config knownRole passing model opus still hard-denies", async () => {
+  const { decision, systemMessage } = await run(
+    {
+      session_id: "s1",
+      cwd: knownRolesProject,
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: "spec-writer", model: "opus", prompt: "audit the credential rotation logic" },
+    },
+    HERMETIC_ENV,
+  );
+  assert.equal(decision, "deny");
+  assert.equal(systemMessage, securityDeny("spec-writer"));
+});
+
+// tool_input is untrusted stdin JSON: a non-string model must take the hard deny, not throw into
+// the crash handler's fail-open allow. A scratch home, because a crash writes a guard-crash row
+// under PRAXARCH_HOME and HERMETIC_ENV's points inside the fixture tree.
+test("issue #1: a non-string model on an ad-hoc keyword hit hard-denies instead of crashing open", async () => {
+  const home = await mkdtemp(join(tmpdir(), "praxarch-routeguard-home-"));
+  try {
+    for (const model of [null, 123, ["opus"], true, {}]) {
+      const { decision, systemMessage } = await run(
+        {
+          session_id: "s1",
+          cwd: process.cwd(),
+          hook_event_name: "PreToolUse",
+          tool_name: "Agent",
+          tool_input: { subagent_type: "general-purpose", model, prompt: "audit the credential rotation logic" },
+        },
+        { PRAXARCH_HOME: home },
+      );
+      assert.equal(decision, "deny", `expected deny for model: ${JSON.stringify(model)}`);
+      assert.equal(systemMessage, securityDeny("general-purpose"), `model: ${JSON.stringify(model)}`);
+    }
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("issue #1: the security tier matches case-insensitively", async () => {
+  for (const model of ["Opus", "OPUS"]) {
+    const { decision, systemMessage } = await run(
+      {
+        session_id: "s1",
+        cwd: process.cwd(),
+        hook_event_name: "PreToolUse",
+        tool_name: "Agent",
+        tool_input: { subagent_type: "general-purpose", model, prompt: "audit the credential rotation logic" },
+      },
+      HERMETIC_ENV,
+    );
+    assert.equal(decision, "allow", `expected warn-only for model: ${model}`);
+    assert.equal(systemMessage, securityWarning("general-purpose"), `model: ${model}`);
+  }
+});
+
+test("issue #1: an ad-hoc opus call with no subagent_type warns as going to \"unset\"", async () => {
+  const { decision, systemMessage } = await run(
+    {
+      session_id: "s1",
+      cwd: process.cwd(),
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_input: { model: "opus", prompt: "audit the credential rotation logic" },
+    },
+    HERMETIC_ENV,
+  );
+  assert.equal(decision, "allow");
+  assert.equal(systemMessage, securityWarning("unset"));
+});
+
+test("issue #1: the warn tier matches security-executor's shipped binding", async () => {
+  const template = await readFile(join(here, "..", "..", "templates", "agents", "security-executor.md"), "utf8");
+  const frontmatter = /^---\n([\s\S]*?)\n---/.exec(template)?.[1] ?? "";
+  const model = /^model:\s*(\S+)\s*$/m.exec(frontmatter)?.[1];
+  assert.ok(model, "templates/agents/security-executor.md has no model: in its frontmatter");
+  const { decision, systemMessage } = await run(
+    {
+      session_id: "s1",
+      cwd: process.cwd(),
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: "general-purpose", model, prompt: "audit the credential rotation logic" },
+    },
+    HERMETIC_ENV,
+  );
+  assert.equal(decision, "allow", `security-executor is bound to "${model}", which should warn, not deny`);
+  assert.equal(systemMessage, securityWarning("general-purpose"));
 });
 
 // --- Crash-visibility (issue #24) ---------------------------------------------------------------
@@ -502,4 +610,37 @@ test("a route-guard crash still allows even when the guard-crash row write also 
   } finally {
     await rm(homeFile, { recursive: true, force: true });
   }
+});
+
+// --- Password-hashing terms (issue #1) ----------------------------------------------------------
+
+async function securityDecisionFor(prompt: string, cwd = process.cwd()): Promise<{ decision: string; systemMessage?: string }> {
+  return run(
+    {
+      session_id: "s1",
+      cwd,
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: "general-purpose", model: "sonnet", prompt },
+    },
+    HERMETIC_ENV,
+  );
+}
+
+// Each prompt contains no other built-in keyword, so dropping any one term from the list flips its
+// prompt to allow; the exact message pins which term matched.
+test("issue #1: password-hashing terms match on the bare word, each on its own", async () => {
+  const failures: string[] = [];
+  for (const [keyword, prompt] of [
+    ["bcrypt*", "Migrate to bcryptjs"],
+    ["argon2*", "Switch the user table to argon2id"],
+    ["scrypt", "Use scrypt for the KDF"],
+    ["pbkdf2", "Raise the pbkdf2 iteration count"],
+  ] as const) {
+    const { decision, systemMessage } = await securityDecisionFor(prompt);
+    if (decision !== "deny" || systemMessage !== securityDeny("general-purpose", keyword)) {
+      failures.push(`${keyword} (${decision}): ${prompt}`);
+    }
+  }
+  assert.deepEqual(failures, []);
 });

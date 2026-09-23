@@ -67,18 +67,18 @@
   review roles are now exempt alongside verifier; additive merge over the default
   `["verifier", "checker", "plan-reviewer", "planner"]`, so the canonical exemption can be
   extended but never dropped.
-- **route-guard: `routeGuard.softDenyRoles` downgrades the security-keyword deny to a warning for
-  `executor`.** `executor` shares `security-executor`'s model tier, so the hard deny on a matched
-  keyword was buying process overhead — reword-and-retry loops — rather than real classifier
-  avoidance; transcript mining (2026-08-19) found 40+ blocks tripped by benign mentions of
-  `credential`/`secret` in registry/npmrc prose, and a laundering workaround had already appeared
-  in one project's agent memory. Roles listed in `routeGuard.softDenyRoles` (default `["executor"]`,
-  additive — never removes `executor`) now get `permissionDecision: "allow"` with a systemMessage
-  naming the matched keyword and suggesting `security-executor`, instead of a deny — but only when
-  nothing else in route-guard's rule chain would deny the delegation anyway (explicit-model-override
-  on a known role, or an ad-hoc call with no model, still deny outright and the warning is dropped
-  in that case). Everything else — `mech-executor`, `scout`/`Explore`/`implementer`, ad-hoc
-  dispatches — keeps the hard deny.
+- **route-guard: security-keyword matches warn instead of deny for ad-hoc opus dispatches
+  (issue #1).** An ad-hoc call (no defined role) that passes an opus `model` gets
+  `permissionDecision: "allow"` with a systemMessage naming the keyword and suggesting
+  `security-executor`; at `security-executor`'s own tier the hard deny bought reword-and-retry
+  loops, not a stronger model. Every defined role still gets the hard deny, including
+  sonnet-bound `executor`, whatever `model` it passes. Its real model depends on which agent file
+  Claude Code loads, which a hook can't reliably know. Ad-hoc calls on sonnet, haiku, `inherit` or
+  no model also keep the hard deny, and the deny message now says how to get the warning.
+  `routeGuard.softDenyRoles` is gone; a config that still sets it gets a warning and the key is
+  ignored. Since 2026-08-20 `praxarch install` has written `"softDenyRoles": ["executor"]` into
+  any `~/.claude/praxarch/config.json` it created, so if yours has a `softDenyRoles` key, delete
+  it to silence the warning.
 - **New `checker` role: sonnet-bound re-verification, cheaper than opus `verifier`.** Verdict
   telemetry showed the opus `verifier` role dominating spend (~11.3M tokens vs ~4.2M for
   `executor`), with 53 back-to-back verifier→verifier dispatches where every post-fix re-verify
@@ -130,6 +130,9 @@
 
 ### Changed
 
+- **route-guard: password-hashing terms count as security keywords (issue #1).** `bcrypt*`,
+  `argon2*`, `scrypt` and `pbkdf2` now force routing to `security-executor`, matched on the bare
+  word like the rest of the built-in list.
 - **New `minChangedLinesForFiles` floor (default 30) on the file-count trigger, applied to verdict
   staleness too (issue #3).** verify-gate previously blocked at `minChangedFiles` files
   regardless of size — one wave saw 45 waivers in a single session, with verdicts recorded at 8

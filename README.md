@@ -23,10 +23,10 @@ for the full rationale and the delta from pilotfish.
   sub-threshold first-pass verification.
 - **Enforcement hooks**, not just policy text:
   - `route-guard` hard-denies ad-hoc fan-out delegations with no explicit model, and
-    security-flavored work not routed to `security-executor` — except for `executor`
-    (`routeGuard.softDenyRoles`, config-extensible), where the same rule is a warning, not a
-    block: `executor` shares `security-executor`'s model tier, so the deny there bought process
-    overhead, not real classifier avoidance.
+    security-flavored work not routed to `security-executor` — except an ad-hoc call (no defined
+    role) that passes `model: "opus"`, where the same rule is a warning, not a block: at
+    `security-executor`'s own tier the deny bought reword-and-retry loops, not a stronger model.
+    Defined roles always get the block.
   - `verify-gate` blocks session completion on non-trivial diffs (80+ changed lines, or 3+ files
     with at least 30 changed lines — all configurable) with no `CONFIRMED`, zero-critical/major
     verifier record on file (escape hatches included).

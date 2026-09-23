@@ -1,5 +1,0 @@
-{
-  "routeGuard": {
-    "softDenyRoles": ["executor", "implementer"]
-  }
-}
