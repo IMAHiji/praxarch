@@ -1,5 +1,0 @@
-{
-  "routeGuard": {
-    "softDenyRoles": "not-an-array"
-  }
-}

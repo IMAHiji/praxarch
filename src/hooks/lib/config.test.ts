@@ -267,3 +267,52 @@ test("issue #3: a non-numeric or negative minChangedLinesForFiles is dropped wit
     await rm(cwd, { recursive: true, force: true });
   }
 });
+
+test("issue #1: routeGuard.softDenyRoles is ignored with a deprecation warning", async () => {
+  const home = await mkdtemp(join(tmpdir(), "praxarch-config-"));
+  const cwd = await mkdtemp(join(tmpdir(), "praxarch-config-cwd-"));
+  const prevHome = process.env["PRAXARCH_HOME"];
+  process.env["PRAXARCH_HOME"] = home;
+  try {
+    await mkdir(join(cwd, ".claude"), { recursive: true });
+    const projectPath = join(cwd, ".claude", "praxarch.json");
+    await writeFile(projectPath, JSON.stringify({ routeGuard: { strict: false, softDenyRoles: ["implementer"] } }));
+    const { config, warnings } = await loadConfig(cwd);
+    assert.ok(
+      warnings.some((w) => w.includes(projectPath) && /routeGuard\.softDenyRoles is no longer supported/.test(w)),
+      JSON.stringify(warnings),
+    );
+    assert.equal("softDenyRoles" in config.routeGuard, false);
+    // The deprecated key is dropped on its own; the rest of the layer still applies.
+    assert.equal(config.routeGuard.strict, false);
+  } finally {
+    if (prevHome === undefined) delete process.env["PRAXARCH_HOME"];
+    else process.env["PRAXARCH_HOME"] = prevHome;
+    await rm(home, { recursive: true, force: true });
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("issue #1: a malformed softDenyRoles value gets only the deprecation warning", async () => {
+  const home = await mkdtemp(join(tmpdir(), "praxarch-config-"));
+  const cwd = await mkdtemp(join(tmpdir(), "praxarch-config-cwd-"));
+  const prevHome = process.env["PRAXARCH_HOME"];
+  process.env["PRAXARCH_HOME"] = home;
+  try {
+    await mkdir(join(cwd, ".claude"), { recursive: true });
+    for (const bad of ["not-an-array", null, 123, true, {}, [7], []]) {
+      await writeFile(join(cwd, ".claude", "praxarch.json"), JSON.stringify({ routeGuard: { softDenyRoles: bad } }));
+      const { config, warnings } = await loadConfig(cwd);
+      const related = warnings.filter((w) => /softDenyRoles/.test(w));
+      assert.equal(related.length, 1, `${JSON.stringify(bad)}: ${JSON.stringify(warnings)}`);
+      assert.match(related[0] ?? "", /is no longer supported/, JSON.stringify(bad));
+      assert.doesNotMatch(related[0] ?? "", /must be an array|non-string element/, JSON.stringify(bad));
+      assert.equal("softDenyRoles" in config.routeGuard, false, JSON.stringify(bad));
+    }
+  } finally {
+    if (prevHome === undefined) delete process.env["PRAXARCH_HOME"];
+    else process.env["PRAXARCH_HOME"] = prevHome;
+    await rm(home, { recursive: true, force: true });
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
