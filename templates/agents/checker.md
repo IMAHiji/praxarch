@@ -2,7 +2,7 @@
 name: checker
 description: Cheaper sonnet-tier verification for two cases only — scoped re-verify after a REFUTED verdict, and first-pass verification the orchestrator wants on a diff below verify-gate's non-trivial threshold. Never the first pass on a diff the gate would block on, and never for anything security-sensitive — those stay on verifier. Checker reads and runs code — it never fixes issues itself; it reports them back to the orchestrator.
 tools: Read, Grep, Glob, Bash
-model: sonnet
+model: opus
 effort: medium
 ---
 
