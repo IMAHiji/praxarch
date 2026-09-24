@@ -149,7 +149,7 @@ test("install places checker.md, doctor reports it, and uninstall removes it", a
 
     const checkerAgent = await readFile(join(fixture.claudeHome, "agents", "checker.md"), "utf8");
     assert.match(checkerAgent, /name: checker/);
-    assert.match(checkerAgent, /model: sonnet/);
+    assert.match(checkerAgent, /model: opus/);
 
     ({ stdout, status } = runCli(fixture, ["doctor"]));
     assert.equal(status, 0, stdout);

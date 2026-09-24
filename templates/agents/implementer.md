@@ -1,7 +1,7 @@
 ---
 name: implementer
 description: Focused implementation agent for the /orchestrate pipeline. Executes exactly one numbered task from a plan file written by the planner agent. Dispatch with the plan file path and a single task number.
-model: sonnet
+model: opus
 effort: medium
 color: blue
 ---
