@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import {
@@ -98,10 +99,31 @@ async function checkSettings(): Promise<Check[]> {
     }
   }
   const statusLine = settings["statusLine"] as { command?: string } | undefined;
-  checks.push({
-    ok: Boolean(statusLine?.command?.includes("praxarch")),
-    message: "settings.json statusLine points at praxarch",
-  });
+  const command = typeof statusLine?.command === "string" ? statusLine.command : "";
+  if (command.includes("praxarch")) {
+    checks.push({ ok: true, message: "settings.json statusLine points at praxarch" });
+  } else {
+    // A user wrapper script (e.g. to append a battery segment) that calls praxarch's statusline.
+    // Any token counts, so `bash ~/wrap.sh` works. Only regular files are read (a FIFO or /dev/stdin
+    // would block readFile forever); stat/read errors just mean "not a wrapper".
+    let wraps = false;
+    for (const token of command.split(/\s+/).filter(Boolean)) {
+      const path = token.startsWith("~/") ? join(homedir(), token.slice(2)) : token;
+      try {
+        if ((await stat(path)).isFile() && (await readTextIfExists(path))?.includes("praxarch/statusline")) {
+          wraps = true;
+          break;
+        }
+      } catch {
+        // not a readable file; keep looking
+      }
+    }
+    checks.push(
+      wraps
+        ? { ok: true, message: `settings.json statusLine wraps praxarch's statusline (${command})` }
+        : { ok: false, message: "settings.json statusLine points at praxarch" },
+    );
+  }
   checks.push(checkAdvisor(settings));
   return checks;
 }
