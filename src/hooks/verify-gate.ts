@@ -95,10 +95,7 @@ function withConfigWarnings(output: StopOutput, warnings: string[]): StopOutput 
 // file-count trigger fired on multi-file one-liners (8 lines across 4 files blocked 45 times in one
 // orchestrating session). Shared by the non-trivial check and the staleness delta below so both
 // apply one rule, and so a verdict whose counts are missing (compared against 0) is always stale
-// whenever the diff was measured. Known gap, not by design, tracked for a follow-up issue: when
-// numstat itself fails, measurementFailed zeroes the current counts, so a recorded verdict with a
-// stale hash and real counts can see a negative delta and be treated as not stale — the opposite
-// of the fail-closed intent elsewhere in this function.
+// whenever the diff was measured.
 function clearsThreshold(lines: number, files: number, gate: VerifyGateConfig): boolean {
   return lines >= gate.minChangedLines || (files >= gate.minChangedFiles && lines >= gate.minChangedLinesForFiles);
 }
@@ -301,9 +298,11 @@ async function runGate(): Promise<void> {
     // fingerprinting exists to catch. Negative deltas (work reverted) never satisfy the size
     // clause below, so this can't cause a spurious block on a shrinking diff. A positive file
     // delta with a negative line delta can't clear the floor either, so it does not count as
-    // stale — the same shrinking-diff exemption, just via the file side this time.
+    // stale — the same shrinking-diff exemption, just via the file side this time. When numstat
+    // failed (issue #4) the zeroed counts make any delta meaningless, so a changed or unknown
+    // fingerprint alone is enough to make the verdict stale.
     (currentHash === null || verifierHash !== currentHash) &&
-    clearsThreshold(lineDelta, fileDelta, config.verifyGate);
+    (measurementFailed || clearsThreshold(lineDelta, fileDelta, config.verifyGate));
 
   const passed = verifier !== null && verifier.verdict === "CONFIRMED" && verifier.criticalOrMajorCount === 0 && !stale;
   if (passed) {

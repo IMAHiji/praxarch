@@ -1676,6 +1676,101 @@ test("issue #3: an unmeasurable diff logs null counts on its verifyGateBlocked r
   }
 });
 
+test("issue #4: a numstat failure makes a CONFIRMED verdict with a mismatched fingerprint stale", async () => {
+  const fixture = await setupFixture();
+  try {
+    await makeNonTrivialDiff(fixture.repo);
+    // Real counts far above the current tree's, so the zeroed-counts delta is negative -- the
+    // case that used to read as not-stale.
+    await seedVerifierState(fixture.home, "s1", {
+      verdict: "CONFIRMED",
+      criticalOrMajorCount: 0,
+      findingsCount: 0,
+      diffHash: "not-the-current-fingerprint",
+      changedLines: 2000,
+      changedFiles: 10,
+    });
+    await withFakeGitOnPathFailingNumstat(async (fakeGitDir) => {
+      const result = run(
+        fixture,
+        { session_id: "s1", cwd: fixture.repo, hook_event_name: "Stop" },
+        { PATH: `${fakeGitDir}:${process.env["PATH"] ?? ""}` },
+      ) as { decision?: string; reason?: string };
+      assert.equal(result.decision, "block");
+      assert.match(result.reason ?? "", /could not be measured/);
+    });
+
+    const log = await readMonthlyLog(fixture.home);
+    const rows = log.filter((r) => r["event"] === "verifyGateBlocked" && r["sessionId"] === "s1");
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.["trigger"], "stale");
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("issue #4: a numstat failure keeps a CONFIRMED verdict whose fingerprint matches the tree valid", async () => {
+  const fixture = await setupFixture();
+  try {
+    await makeNonTrivialDiff(fixture.repo);
+    const { diffFingerprint } = (await import(
+      join(TEST_DIST_DIR, "hooks", "lib", "git-diff.js")
+    )) as typeof import("./lib/git-diff.js");
+    const hash = await diffFingerprint(fixture.repo);
+    assert.notEqual(hash, null);
+    await seedVerifierState(fixture.home, "s1", {
+      verdict: "CONFIRMED",
+      criticalOrMajorCount: 0,
+      findingsCount: 0,
+      diffHash: hash,
+      changedLines: 2000,
+      changedFiles: 10,
+    });
+    await withFakeGitOnPathFailingNumstat(async (fakeGitDir) => {
+      const result = run(
+        fixture,
+        { session_id: "s1", cwd: fixture.repo, hook_event_name: "Stop" },
+        { PATH: `${fakeGitDir}:${process.env["PATH"] ?? ""}` },
+      ) as { decision?: string };
+      assert.equal(result.decision, undefined);
+    });
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
+test("issue #4: a dead anchor makes a fingerprinted CONFIRMED verdict stale (unknown current hash)", async () => {
+  const fixture = await setupFixture();
+  try {
+    await makeNonTrivialDiff(fixture.repo);
+    await seedState(fixture.home, "s1", {
+      baselineCwd: join(fixture.home, "anchor-that-does-not-exist"),
+      lastVerifier: {
+        verdict: "CONFIRMED",
+        criticalOrMajorCount: 0,
+        findingsCount: 0,
+        diffHash: "some-recorded-fingerprint",
+        changedLines: 2000,
+        changedFiles: 10,
+        recordedAt: new Date().toISOString(),
+      },
+    });
+    const result = run(fixture, { session_id: "s1", cwd: fixture.repo, hook_event_name: "Stop" }) as {
+      decision?: string;
+      reason?: string;
+    };
+    assert.equal(result.decision, "block", JSON.stringify(result));
+    assert.match(result.reason ?? "", /baseline directory .* is missing or unusable/);
+
+    const log = await readMonthlyLog(fixture.home);
+    const rows = log.filter((r) => r["event"] === "verifyGateBlocked" && r["sessionId"] === "s1");
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.["trigger"], "stale");
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
 test("issue #3: a CONFIRMED verdict with critical findings blocks with trigger refuted", async () => {
   const fixture = await setupFixture();
   try {
