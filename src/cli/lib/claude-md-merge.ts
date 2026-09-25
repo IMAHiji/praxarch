@@ -4,7 +4,7 @@ const END_MARKER = "<!-- praxarch:orchestration:end -->";
 export interface ClaudeMdMergeResult {
   content: string;
   changed: boolean;
-  action: "inserted" | "updated" | "unchanged";
+  action: "inserted" | "updated" | "unchanged" | "skipped-unpaired-markers";
 }
 
 /**
@@ -24,6 +24,10 @@ export function upsertOrchestrationBlock(existing: string, block: string): Claud
       return { content: existing, changed: false, action: "unchanged" };
     }
     return { content: `${before}${block}${after}`, changed: true, action: "updated" };
+  }
+
+  if (startIdx !== -1 || endIdx !== -1) {
+    return { content: existing, changed: false, action: "skipped-unpaired-markers" };
   }
 
   const separator = existing.length > 0 && !existing.endsWith("\n\n") ? (existing.endsWith("\n") ? "\n" : "\n\n") : "";

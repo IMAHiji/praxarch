@@ -123,7 +123,11 @@ async function planSummary(): Promise<{ lines: string[]; settingsFragment: Setti
   const orchestrationBlock = (await readTextIfExists(join(TEMPLATES_DIR, "claude-md.orchestration.md"))) ?? "";
   const { action } = upsertOrchestrationBlock(existingClaudeMd, orchestrationBlock);
   lines.push(`~/.claude/CLAUDE.md (${CLAUDE_MD_PATH}):`);
-  lines.push(`  - orchestration policy block: ${action}`);
+  lines.push(
+    action === "skipped-unpaired-markers"
+      ? "  - orchestration policy block: skipped — found a praxarch:orchestration marker without its matching pair; left CLAUDE.md untouched (add the missing marker by hand to let install manage the block)"
+      : `  - orchestration policy block: ${action}`,
+  );
 
   const agentFiles = await listMarkdownFiles(join(TEMPLATES_DIR, "agents"));
   lines.push(`~/.claude/agents/ (${AGENTS_DIR}):`);
@@ -221,8 +225,8 @@ export async function install(options: InstallOptions): Promise<void> {
 
   const existingClaudeMd = (await readTextIfExists(CLAUDE_MD_PATH)) ?? "";
   const orchestrationBlock = (await readTextIfExists(join(TEMPLATES_DIR, "claude-md.orchestration.md"))) ?? "";
-  const { content } = upsertOrchestrationBlock(existingClaudeMd, orchestrationBlock);
-  await backupThenWriteText(CLAUDE_MD_PATH, content);
+  const { content, changed } = upsertOrchestrationBlock(existingClaudeMd, orchestrationBlock);
+  if (changed) await backupThenWriteText(CLAUDE_MD_PATH, content);
 
   // A dangling container-dir link makes every later mkdir fail; clear it before writing anything.
   for (const dir of [AGENTS_DIR, SKILLS_DIR, PRAXARCH_INSTALL_DIR]) await clearBrokenDirLink(dir);

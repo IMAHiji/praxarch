@@ -695,6 +695,24 @@ test("install repairs a broken skill-dir symlink instead of crashing on mkdir", 
   }
 });
 
+test("install leaves a CLAUDE.md with an unpaired orchestration start marker untouched", async () => {
+  const fixture = await setupFixture();
+  try {
+    const claudeMdPath = join(fixture.claudeHome, "CLAUDE.md");
+    const seeded = "# Mine\n\n<!-- praxarch:orchestration:start -->\nhand-condensed policy\n";
+    await writeFile(claudeMdPath, seeded);
+
+    const { stdout, status } = runCli(fixture, ["install", "--yes"]);
+    assert.equal(status, 0, stdout);
+
+    const after = await readFile(claudeMdPath, "utf8");
+    assert.equal(after, seeded);
+    assert.equal(after.split("<!-- praxarch:orchestration:start -->").length - 1, 1);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
 test("reinstalling does not spawn a fresh backup when content is unchanged", async () => {
   const fixture = await setupFixture();
   const dotfiles = await mkdtemp(join(tmpdir(), "praxarch-spam-"));
