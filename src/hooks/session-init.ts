@@ -4,6 +4,7 @@ import { access } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { sessionStatePath } from "./lib/paths.js";
 import { readSessionState, writeSessionState } from "./lib/session-state.js";
 import { writeUntrackedBaseline } from "./lib/untracked-baseline-store.js";
 import { captureUntrackedBaseline } from "./lib/untracked.js";
@@ -34,6 +35,8 @@ async function fileExists(path: string): Promise<boolean> {
 async function main(): Promise<void> {
   const input = await readHookInput<SessionStartInput>();
 
+  // Checked before readSessionState, which may quarantine a corrupt file and return empty state.
+  const freshSession = !(await fileExists(sessionStatePath(input.session_id)));
   const state = await readSessionState(input.session_id);
   // Only capture on first run — SessionStart also fires on resume/clear/compact, and
   // re-capturing then would move the verify-gate's baseline mid-session.
@@ -45,35 +48,35 @@ async function main(): Promise<void> {
       state.baselineHead = null;
     }
   }
-  // Gated on `source === "startup"` AND the `in` check together, not either alone:
+  // Gated on (`source === "startup"` OR a fresh state file) AND the marker check, not either alone:
   //
-  // - `source === "startup"` closes the legacy-state laundering hole: a session that began before
-  //   `baselineUntrackedCaptured` existed only ever receives resume/clear/compact events from here
-  //   on (a brand-new session_id is the only way to get a genuine "startup" event), so gating on
-  //   source means such a session's marker is never set and its baseline stays permanently
-  //   "unknown" (count everything) instead of capturing whatever untracked files happen to exist
-  //   at the first post-upgrade SessionStart -- which would silently include the session's own
-  //   in-progress work as if it pre-existed.
-  // - `!== true` is what makes a single "startup" capture durable across the rest of the session:
+  // - The source/fresh half closes the legacy-state laundering hole. What matters is whether a
+  //   state file already existed for this session_id, not the source string: /clear mints a new
+  //   session_id whose first event is "clear", with no prior work to launder. A session whose state
+  //   file predates `baselineUntrackedCaptured` only ever sees resume/clear/compact on an existing
+  //   file, so its marker is never set and its baseline stays "unknown" (count everything) instead
+  //   of capturing its own in-progress work as if it pre-existed. A corrupt file that
+  //   `readSessionState` quarantines existed, so it is not fresh and keeps that fail-safe.
+  // - `!== true` makes a single capture durable across the rest of the session:
   //   `baselineUntrackedCaptured` is `true` the moment a capture is attempted and is the only value
   //   ever written (see the field's doc comment in `lib/session-state.ts`), so re-capturing would
   //   only ever happen on a genuinely-never-set marker -- moving the baseline mid-session and
   //   laundering in-session files out of the measurement, the same class of bug the comment above
   //   guards `baselineHead` against.
-  if (input.source === "startup" && state.baselineUntrackedCaptured !== true) {
+  const mayCapture = input.source === "startup" || freshSession;
+  if (mayCapture && state.baselineUntrackedCaptured !== true) {
     const baseline = await captureUntrackedBaseline(input.cwd);
     await writeUntrackedBaseline(input.session_id, baseline);
     state.baselineUntrackedCaptured = true;
   }
-  // Same laundering trap as the untracked-baseline guard above: gating on `source === "startup"`
-  // alone (dropping the `undefined` check) would move the anchor on every resume/clear/compact,
-  // measuring later diffs from wherever the shell happened to `cd` to at that resume rather than
-  // where the session's baselines were actually captured -- see baselineCwd's doc comment in
-  // session-state.ts and this issue's repro (a `cd` into a worktree got charged against the
-  // primary checkout's baseline). `undefined` (not `!= null`) is deliberate: baselineCwd, once
-  // set, is always a real string -- there is no "attempted and unusable" null state to guard
-  // against here, unlike baselineHead.
-  if (input.source === "startup" && state.baselineCwd === undefined) {
+  // Same laundering trap as the untracked-baseline guard above: dropping the `undefined` check
+  // would move the anchor on every later SessionStart, measuring later diffs from wherever the
+  // shell happened to `cd` to at that resume rather than where the session's baselines were
+  // actually captured -- see baselineCwd's doc comment in session-state.ts and this issue's repro
+  // (a `cd` into a worktree got charged against the primary checkout's baseline). `undefined`
+  // (not `!= null`) is deliberate: baselineCwd, once set, is always a real string -- there is no
+  // "attempted and unusable" null state to guard against here, unlike baselineHead.
+  if (mayCapture && state.baselineCwd === undefined) {
     state.baselineCwd = input.cwd;
   }
   await writeSessionState(state);

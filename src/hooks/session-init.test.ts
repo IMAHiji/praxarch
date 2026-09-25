@@ -382,6 +382,75 @@ test("a resume on a legacy state file (no baselineCwd key) does not add one", as
   });
 });
 
+async function initRepoWithPreexisting(prefix: string): Promise<string> {
+  const repo = await mkdtemp(join(tmpdir(), prefix));
+  execFileSync("git", ["init", "-q"], { cwd: repo });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: repo });
+  await writeFile(join(repo, "tracked.txt"), "line\n");
+  execFileSync("git", ["add", "."], { cwd: repo });
+  execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: repo });
+  await writeFile(join(repo, "preexisting.txt"), "line\n".repeat(5));
+  return repo;
+}
+
+// Issue #11: /clear mints a new session_id whose first SessionStart has source "clear". No state
+// file exists yet, so there is no legacy work to launder -- baselines must be captured.
+for (const source of ["clear", "compact", "resume"]) {
+  test(`a fresh session_id with source "${source}" captures the untracked baseline and baselineCwd`, async () => {
+    await withPraxarchHome(async (home) => {
+      const repo = await initRepoWithPreexisting("praxarch-sessioninit-fresh-");
+      try {
+        run(home, { session_id: "s1", cwd: repo, hook_event_name: "SessionStart", source });
+
+        const state = JSON.parse(await readFile(join(home, "state", "s1.json"), "utf8")) as {
+          baselineUntrackedCaptured?: boolean;
+          baselineUntracked?: unknown;
+          baselineCwd?: string;
+        };
+        assert.equal(state.baselineUntrackedCaptured, true);
+        assert.equal(state.baselineUntracked, undefined);
+        assert.equal(state.baselineCwd, repo);
+
+        const snapshot = JSON.parse(await readFile(join(home, "state", "s1.untracked.json"), "utf8")) as Record<
+          string,
+          string
+        > | null;
+        assert.notEqual(snapshot, null);
+        assert.ok(
+          "p:preexisting.txt" in (snapshot as Record<string, string>),
+          `expected "p:preexisting.txt" in the captured snapshot, got: ${JSON.stringify(snapshot)}`,
+        );
+      } finally {
+        await rm(repo, { recursive: true, force: true });
+      }
+    });
+  });
+}
+
+test("a corrupt pre-existing state file on clear is not a fresh session: no untracked snapshot, no baselineCwd", async () => {
+  await withPraxarchHome(async (home) => {
+    const repo = await initRepoWithPreexisting("praxarch-sessioninit-corrupt-");
+    try {
+      const stateDir = join(home, "state");
+      await mkdir(stateDir, { recursive: true });
+      await writeFile(join(stateDir, "s1.json"), "{not json", "utf8");
+
+      run(home, { session_id: "s1", cwd: repo, hook_event_name: "SessionStart", source: "clear" });
+
+      const state = JSON.parse(await readFile(join(stateDir, "s1.json"), "utf8")) as {
+        baselineUntrackedCaptured?: boolean;
+        baselineCwd?: string;
+      };
+      assert.equal(state.baselineUntrackedCaptured, undefined);
+      assert.equal(state.baselineCwd, undefined);
+      assert.equal(await fileExistsForTest(join(stateDir, "s1.untracked.json")), false);
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+});
+
 test("no warning when role files and env are clean (best-effort against real home)", async () => {
   await withPraxarchHome(async (home) => {
     const result = run(home, {
