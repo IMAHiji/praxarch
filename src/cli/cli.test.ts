@@ -1309,6 +1309,22 @@ test("inherited-model audit: a role with no installed agent file warns as missin
   }
 });
 
+test("inherited-model audit: a plugin-namespaced role (plugin:agent) is skipped, not reported as unknown", async () => {
+  const fixture = await setupFixture();
+  try {
+    runCli(fixture, ["install", "--yes"]);
+    await writeLogRows(fixture, [
+      { at: new Date().toISOString(), sessionId: "s1", role: "some-plugin:agent", model: "inherited", resolvedModel: "claude-opus-4-8", batchId: null, verdict: null, criticalOrMajorCount: null },
+    ]);
+
+    const { stdout, status } = runCli(fixture, ["doctor"]);
+    assert.doesNotMatch(stdout, /inherited-model audit: role "some-plugin:agent"/);
+    assert.equal(status, 0, stdout);
+  } finally {
+    await teardownFixture(fixture);
+  }
+});
+
 test("inherited-model audit: an unknown role's dispatch count reflects rows, not distinct resolvedModel values", async () => {
   const fixture = await setupFixture();
   try {

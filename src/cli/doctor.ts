@@ -410,6 +410,8 @@ async function checkInheritedModelAudit(): Promise<Check[]> {
       r.event === undefined &&
       r.model === "inherited" &&
       typeof r.role === "string" &&
+      // Plugin agents (`plugin:agent`) are outside praxarch's role bindings, so there's nothing to audit them against.
+      !r.role.includes(":") &&
       typeof r.resolvedModel === "string" &&
       r.resolvedModel.length > 0 &&
       !Number.isNaN(Date.parse(r.at)) &&
