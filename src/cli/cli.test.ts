@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { cp, mkdtemp, readFile, readdir, rm, writeFile, mkdir, symlink, lstat, readlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -28,6 +28,7 @@ function runCli(
   args: string[],
   cliPath = cli,
   extraEnv: Record<string, string> = {},
+  timeoutMs?: number,
 ): { stdout: string; stderr: string; status: number } {
   // The default `cli` is spawned straight out of TEST_DIST_DIR, so its own DIST_DIR must resolve
   // to that same tree (real dist/ under plain `pnpm test`, the scratch tree under `pnpm verify`)
@@ -53,7 +54,7 @@ function runCli(
     delete env["PRAXARCH_TEST_DIST_DIR"];
   }
   Object.assign(env, extraEnv);
-  const result = spawnSync("node", [cliPath, ...args], { env });
+  const result = spawnSync("node", [cliPath, ...args], { env, timeout: timeoutMs });
   return {
     stdout: result.stdout?.toString("utf8") ?? "",
     stderr: result.stderr?.toString("utf8") ?? "",
@@ -228,6 +229,132 @@ test("doctor reports all checks passing after a fresh install", async () => {
     assert.doesNotMatch(stdout, /✗/);
   } finally {
     await teardownFixture(fixture);
+  }
+});
+
+// The script lives outside the fixture: the fixture path itself contains "praxarch", which would
+// satisfy the plain substring check and hide whether the wrapper-file read is doing the work.
+async function setStatusLineScript(
+  fixture: Fixture,
+  scriptDir: string,
+  body: string,
+  toCommand: (script: string) => unknown = (script) => script,
+): Promise<void> {
+  const script = join(scriptDir, "statusline-wrapper.sh");
+  assert.ok(!script.includes("praxarch"), `script path ${script} contains "praxarch"; TMPDIR must not contain it`);
+  await writeFile(script, body);
+  const settingsPath = join(fixture.claudeHome, "settings.json");
+  const settings = JSON.parse(await readFile(settingsPath, "utf8"));
+  settings.statusLine = { type: "command", command: toCommand(script) };
+  await writeFile(settingsPath, JSON.stringify(settings, null, 2));
+}
+
+test("doctor accepts a statusLine wrapper script that calls praxarch's statusline", async () => {
+  const fixture = await setupFixture();
+  const scriptDir = await mkdtemp(join(tmpdir(), "statusline-wrapper-"));
+  try {
+    runCli(fixture, ["install", "--yes"]);
+    await setStatusLineScript(fixture, scriptDir, "#!/bin/sh\nnode ~/.claude/praxarch/statusline/statusline.js\n");
+    const { stdout } = runCli(fixture, ["doctor"]);
+    assert.match(stdout, /settings\.json statusLine wraps praxarch's statusline/);
+    assert.doesNotMatch(stdout, /✗ settings\.json statusLine/);
+  } finally {
+    await teardownFixture(fixture);
+    await rm(scriptDir, { recursive: true, force: true });
+  }
+});
+
+test("doctor fails a statusLine script that does not call praxarch", async () => {
+  const fixture = await setupFixture();
+  const scriptDir = await mkdtemp(join(tmpdir(), "statusline-wrapper-"));
+  try {
+    runCli(fixture, ["install", "--yes"]);
+    await setStatusLineScript(fixture, scriptDir, "#!/bin/sh\necho hello\n");
+    const { stdout } = runCli(fixture, ["doctor"]);
+    assert.match(stdout, /✗ settings\.json statusLine points at praxarch/);
+  } finally {
+    await teardownFixture(fixture);
+    await rm(scriptDir, { recursive: true, force: true });
+  }
+});
+
+test("doctor accepts a statusLine wrapper run through an interpreter (bash <script>)", async () => {
+  const fixture = await setupFixture();
+  const scriptDir = await mkdtemp(join(tmpdir(), "statusline-wrapper-"));
+  try {
+    runCli(fixture, ["install", "--yes"]);
+    await setStatusLineScript(
+      fixture,
+      scriptDir,
+      "node ~/.claude/praxarch/statusline/statusline.js\n",
+      (script) => `bash ${script}`,
+    );
+    const { stdout } = runCli(fixture, ["doctor"]);
+    assert.match(stdout, /settings\.json statusLine wraps praxarch's statusline/);
+    assert.doesNotMatch(stdout, /✗ settings\.json statusLine/);
+  } finally {
+    await teardownFixture(fixture);
+    await rm(scriptDir, { recursive: true, force: true });
+  }
+});
+
+test("doctor treats an unreadable statusLine token (a directory) as not a wrapper instead of crashing", async () => {
+  const fixture = await setupFixture();
+  const scriptDir = await mkdtemp(join(tmpdir(), "statusline-wrapper-"));
+  try {
+    runCli(fixture, ["install", "--yes"]);
+    await setStatusLineScript(fixture, scriptDir, "echo hello\n", () => scriptDir);
+    const { stdout, stderr } = runCli(fixture, ["doctor"]);
+    assert.match(stdout, /✗ settings\.json statusLine points at praxarch/, stderr);
+  } finally {
+    await teardownFixture(fixture);
+    await rm(scriptDir, { recursive: true, force: true });
+  }
+});
+
+test("doctor does not hang on a statusLine token that is a FIFO", async () => {
+  const fixture = await setupFixture();
+  const scriptDir = await mkdtemp(join(tmpdir(), "statusline-wrapper-"));
+  try {
+    runCli(fixture, ["install", "--yes"]);
+    const fifo = join(scriptDir, "pipe");
+    execFileSync("mkfifo", [fifo]);
+    await setStatusLineScript(fixture, scriptDir, "echo hello\n", () => `cat ${fifo}`);
+    const { stdout, stderr } = runCli(fixture, ["doctor"], cli, {}, 15000);
+    assert.match(stdout, /✗ settings\.json statusLine points at praxarch/, stderr);
+  } finally {
+    await teardownFixture(fixture);
+    await rm(scriptDir, { recursive: true, force: true });
+  }
+});
+
+test("doctor survives a non-string statusLine command and still runs later checks", async () => {
+  const fixture = await setupFixture();
+  const scriptDir = await mkdtemp(join(tmpdir(), "statusline-wrapper-"));
+  try {
+    runCli(fixture, ["install", "--yes"]);
+    await setStatusLineScript(fixture, scriptDir, "echo hello\n", () => ["~/wrap.sh"]);
+    const { stdout, stderr } = runCli(fixture, ["doctor"]);
+    assert.match(stdout, /✗ settings\.json statusLine points at praxarch/, stderr);
+    assert.match(stdout, /installed version matches repo/, stderr);
+  } finally {
+    await teardownFixture(fixture);
+    await rm(scriptDir, { recursive: true, force: true });
+  }
+});
+
+test("doctor expands a leading ~/ in a statusLine wrapper path", async () => {
+  const fixture = await setupFixture();
+  const home = await mkdtemp(join(tmpdir(), "statusline-home-"));
+  try {
+    runCli(fixture, ["install", "--yes"]);
+    await setStatusLineScript(fixture, home, "echo hello\n", () => "~/wrap.sh");
+    await writeFile(join(home, "wrap.sh"), "node ~/.claude/praxarch/statusline/statusline.js\n");
+    const { stdout } = runCli(fixture, ["doctor"], cli, { HOME: home });
+    assert.match(stdout, /settings\.json statusLine wraps praxarch's statusline \(~\/wrap\.sh\)/);
+  } finally {
+    await teardownFixture(fixture);
+    await rm(home, { recursive: true, force: true });
   }
 });
 
