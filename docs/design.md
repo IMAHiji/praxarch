@@ -106,7 +106,9 @@ hooks that check the two rules most worth enforcing mechanically:
     (including the `minChangedLinesForFiles` floor). Both
     conditions are required deliberately: a hash difference alone (e.g. lockfile churn
     `verify-gate` doesn't filter out of the hash) can't expire a verdict on its own, and a
-    shrinking diff (work reverted since the pass) is never treated as stale. An unfingerprintable
+    shrinking diff (work reverted since the pass) is never treated as stale. The exception is a
+    diff that can't be measured at all: its counts are unknown, so a changed or unknown fingerprint
+    alone makes the verdict stale. An unfingerprintable
     diff counts as "differs," never as "unchanged," since treating an unknown as fresh is exactly
     the failure mode this exists to close. Verdicts recorded before this existed omit the hash
     field entirely and are accepted unconditionally — only in-flight sessions can hold one; a
@@ -446,13 +448,6 @@ Sketch, deliberately unimplemented until the shape is proven useful:
   sketch)" above for why the mechanism is written down rather than built: findings have no stable
   identity across re-verifies, and a disposition is an orchestrator assertion rather than ground
   truth.
-- **A `git diff --numstat` failure zeroes the current counts, which can make a stale verdict read
-  as fresh instead of stale.** `measurementFailed` zeroes `changedLines`/`changedFiles` for the
-  current tree, so the delta against a recorded verdict's own counts goes to zero or negative —
-  `clearsThreshold` never fires on a non-positive delta, so `stale` stays false. A CONFIRMED
-  verdict whose `diffHash` no longer matches the tree then stays valid, and the stop is allowed,
-  even though the tree has moved. The opposite of the fail-closed intent everywhere else in this
-  function. Accepted residual, tracked as a follow-up issue rather than fixed here.
 - **A block itself, not just its audit row, can be lost if the logs directory alone sits on a
   hung mount** — `appendJsonl` opens O_NONBLOCK, so a FIFO with no reader fails `open()`
   immediately with ENXIO rather than hanging. But if `open()` or `write()` blocks in the kernel
