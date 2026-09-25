@@ -216,6 +216,36 @@ test("verdictRoles additivity holds through global + project layers — canonica
   }
 });
 
+test("issue #8: ignorePatterns additivity holds through global + project layers — defaults never dropped", async () => {
+  const home = await mkdtemp(join(tmpdir(), "praxarch-config-"));
+  const cwd = await mkdtemp(join(tmpdir(), "praxarch-config-cwd-"));
+  const prevHome = process.env["PRAXARCH_HOME"];
+  process.env["PRAXARCH_HOME"] = home;
+  try {
+    await writeFile(
+      join(home, "config.json"),
+      JSON.stringify({ verifyGate: { ignorePatterns: ["vendor/"] } }),
+    );
+    await mkdir(join(cwd, ".claude"), { recursive: true });
+    await writeFile(
+      join(cwd, ".claude", "praxarch.json"),
+      JSON.stringify({ verifyGate: { ignorePatterns: ["gen/"] } }),
+    );
+    const { config } = await loadConfig(cwd);
+    assert.deepEqual(config.verifyGate.ignorePatterns, [...DEFAULT_CONFIG.verifyGate.ignorePatterns, "vendor/", "gen/"]);
+  } finally {
+    if (prevHome === undefined) delete process.env["PRAXARCH_HOME"];
+    else process.env["PRAXARCH_HOME"] = prevHome;
+    await rm(home, { recursive: true, force: true });
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("issue #8: default ignorePatterns include .claude/plans/ and .claude/handoffs/", () => {
+  assert.ok(DEFAULT_CONFIG.verifyGate.ignorePatterns.includes(".claude/plans/"));
+  assert.ok(DEFAULT_CONFIG.verifyGate.ignorePatterns.includes(".claude/handoffs/"));
+});
+
 test("issue #3: verifyGate.minChangedLinesForFiles defaults to 30 and a project value overrides it", async () => {
   const home = await mkdtemp(join(tmpdir(), "praxarch-config-"));
   const cwd = await mkdtemp(join(tmpdir(), "praxarch-config-cwd-"));

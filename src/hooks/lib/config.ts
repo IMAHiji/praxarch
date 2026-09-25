@@ -12,14 +12,14 @@ export interface VerifyGateConfig {
    * like an 80-line change (issue #3). `minChangedLines` on its own still triggers at any file count.
    */
   minChangedLinesForFiles: number;
-  /** Glob-ish path fragments to exclude from the diff-size calculation (lockfiles, generated files). */
+  /** Path fragments to exclude from the diff-size calculation (lockfiles, generated files). Additive over the defaults — a config adds patterns but never drops one (issue #8). */
   ignorePatterns: string[];
   /**
    * Roles whose trailing JSON verdict telemetry records for the verify-gate. Without this, an
    * /orchestrate run's plan-reviewer pass goes unrecorded and the gate demands a second review
-   * at stop. Additive over the default ["verifier", "checker", "plan-reviewer"] — unlike
-   * verifyGate's other keys, which override wholesale — so a config can add its own review roles
-   * but never drop the canonical set. `checker` is the sonnet-tier re-verify/sub-threshold
+   * at stop. Additive over the default ["verifier", "checker", "plan-reviewer"] — like
+   * ignorePatterns, unlike the numeric thresholds, which override wholesale — so a config can add
+   * its own review roles but never drop the canonical set. `checker` is the sonnet-tier re-verify/sub-threshold
    * counterpart to `verifier` (issue #21); it emits the identical verdict block. The added role's
    * report contract must end with the same JSON verdict block the verifier template mandates.
    */
@@ -79,7 +79,7 @@ export const DEFAULT_CONFIG: PraxarchConfig = {
     minChangedLines: 80,
     minChangedFiles: 3,
     minChangedLinesForFiles: 30,
-    ignorePatterns: ["package-lock.json", "pnpm-lock.yaml", "yarn.lock", ".min.js", "dist/", ".claude/plans/"],
+    ignorePatterns: ["package-lock.json", "pnpm-lock.yaml", "yarn.lock", ".min.js", "dist/", ".claude/plans/", ".claude/handoffs/"],
     verdictRoles: ["verifier", "checker", "plan-reviewer"],
   },
   routeGuard: {
@@ -237,6 +237,7 @@ function mergeConfig(base: PraxarchConfig, override: ConfigLayer | null): Praxar
     verifyGate: {
       ...base.verifyGate,
       ...(override.verifyGate ?? {}),
+      ignorePatterns: [...base.verifyGate.ignorePatterns, ...(override.verifyGate?.ignorePatterns ?? [])],
       verdictRoles: [
         ...base.verifyGate.verdictRoles,
         ...(override.verifyGate?.verdictRoles ?? []),
