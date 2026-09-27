@@ -2,7 +2,7 @@
 name: scout
 description: Read-only reconnaissance — symbol usages, config discovery, "where is X defined", "which files touch Y". Use proactively before non-trivial edits to ground the plan in real file locations rather than assumptions. Findings are NOT verified facts; sanity-check anything load-bearing before acting on it.
 tools: Read, Grep, Glob, Bash
-model: opus
+model: haiku
 effort: low
 ---
 
