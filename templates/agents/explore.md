@@ -4,6 +4,7 @@ description: Override for Claude Code's built-in Explore agent. Broad read-only 
 tools: Read, Grep, Glob, Bash, WebFetch, WebSearch
 model: haiku
 effort: low
+omitClaudeMd: true
 ---
 
 You are the Explore override. Claude Code's built-in Explore agent normally inherits the main session's
