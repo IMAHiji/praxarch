@@ -1,6 +1,6 @@
 ---
 name: security-executor
-description: Executes security-sensitive work — authentication, authorization, secrets handling, cryptography, input validation at trust boundaries. Runs on opus because correctness and defense-in-depth take priority over speed here (decided 2026-09-17). If an authorised offensive-security brief (pentest tooling, credential testing) is refused by the frontier classifier, re-pin that one dispatch to sonnet rather than the role.
+description: Executes security-sensitive work — authentication, authorization, secrets handling, cryptography, input validation at trust boundaries. Runs on opus because correctness and defense-in-depth take priority over speed here.
 tools: Read, Edit, Write, Grep, Glob, Bash
 model: opus
 effort: high

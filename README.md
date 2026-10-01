@@ -73,6 +73,10 @@ until you confirm (or pass `--yes` for scripted use). Anything it overwrites is 
 `<file>.praxarch-backup-<timestamp>`. It will **not** overwrite a `model`/`fallbackModel` you've
 already set (e.g. via `/model`) — it only sets those if absent.
 
+The full delegation policy is installed as `~/.claude/praxarch/POLICY.md`, a symlink back to this
+checkout's `templates/POLICY.md`, so moving or deleting the checkout breaks it (`praxarch doctor`
+reports that). Your global `CLAUDE.md` gets only a short block pointing at it.
+
 To use the `praxarch` command directly instead of `node dist/cli/index.js` (pnpm ≥ 10 dropped
 `pnpm link --global`; use `link:` so the global install symlinks back to this repo):
 
@@ -119,7 +123,8 @@ Deletes session state under `~/.claude/praxarch/state/` older than `PRAXARCH_STA
 praxarch uninstall
 ```
 
-Removes praxarch's hook entries, role/skill files, and `~/.claude/praxarch/`. Leaves
+Removes praxarch's hook entries, role/skill files, and `~/.claude/praxarch/` (including the
+`POLICY.md` link; the template it points at is untouched). Leaves
 `model`/`fallbackModel` alone and leaves backups in place.
 
 ### Record a verdict
@@ -138,7 +143,8 @@ the verdict verify-gate reads.
 ## Using it
 
 Once installed, delegate from your main Claude Code session using the ten roles — see the
-orchestration policy praxarch adds to your global `CLAUDE.md` for the full delegation protocol
+short block praxarch adds to your global `CLAUDE.md`, which points at `~/.claude/praxarch/POLICY.md`
+for the full delegation protocol
 (complete specs, cheapest-role-first, bounded escalation, mandatory security routing, verify
 before claiming done). Run `praxarch report` any time to see what's actually been delegated
 and how verification is going. Use `/fan-out` when you have three or more independent,

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { cp, mkdtemp, readFile, readdir, rm, writeFile, mkdir, symlink, lstat, readlink } from "node:fs/promises";
+import { cp, mkdtemp, readFile, readdir, rm, writeFile, mkdir, symlink, lstat, readlink, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -551,6 +551,103 @@ test("install leaves a link pointing at this clone alone (the live-linked instal
   }
 });
 
+test("install links praxarch/POLICY.md to templates/POLICY.md and keeps the CLAUDE.md block short (POLICY)", async () => {
+  const fixture = await setupFixture();
+  const repo = await setupRepoCopy();
+  try {
+    const { status, stdout } = runCli(fixture, ["install", "--yes"], repo.cli);
+    assert.equal(status, 0, stdout);
+    const link = join(fixture.claudeHome, "praxarch", "POLICY.md");
+    const tmpl = join(repo.root, "templates", "POLICY.md");
+    assert.ok((await lstat(link)).isSymbolicLink());
+    assert.equal(await realpath(link), await realpath(tmpl));
+    assert.equal(await readFile(link, "utf8"), await readFile(tmpl, "utf8"));
+    assert.match(stdout, /- POLICY\.md: symlink → /);
+    const md = await readFile(join(fixture.claudeHome, "CLAUDE.md"), "utf8");
+    assert.ok(Buffer.byteLength(md) < 2000);
+    assert.ok(md.includes("~/.claude/praxarch/POLICY.md"));
+    assert.ok(!md.includes("### Delegation protocol"));
+  } finally {
+    await rm(repo.root, { recursive: true, force: true });
+    await teardownFixture(fixture);
+  }
+});
+
+test("install replaces a plain-file POLICY.md with the link and backs the old file up (POLICY)", async () => {
+  const fixture = await setupFixture();
+  const repo = await setupRepoCopy();
+  try {
+    const dir = join(fixture.claudeHome, "praxarch");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "POLICY.md"), "OLD POLICY\n");
+    const { status, stdout } = runCli(fixture, ["install", "--yes"], repo.cli);
+    assert.equal(status, 0, stdout);
+    assert.match(stdout, /- POLICY\.md: replace with symlink/);
+    assert.ok((await lstat(join(dir, "POLICY.md"))).isSymbolicLink());
+    const backups = (await readdir(dir)).filter((f) => f.startsWith("POLICY.md.praxarch-backup-"));
+    assert.equal(backups.length, 1);
+    assert.equal(await readFile(join(dir, String(backups[0])), "utf8"), "OLD POLICY\n");
+  } finally {
+    await rm(repo.root, { recursive: true, force: true });
+    await teardownFixture(fixture);
+  }
+});
+
+test("reinstall leaves the POLICY.md link alone and backs nothing up (POLICY)", async () => {
+  const fixture = await setupFixture();
+  const repo = await setupRepoCopy();
+  try {
+    assert.equal(runCli(fixture, ["install", "--yes"], repo.cli).status, 0);
+    const { status, stdout } = runCli(fixture, ["install", "--yes"], repo.cli);
+    assert.equal(status, 0, stdout);
+    assert.match(stdout, /- POLICY\.md: symlinked into a praxarch checkout/);
+    const dir = join(fixture.claudeHome, "praxarch");
+    for (const d of [dir, join(repo.root, "templates")]) {
+      assert.deepEqual((await readdir(d)).filter((f) => f.includes("praxarch-backup")), []);
+    }
+    assert.ok((await lstat(join(dir, "POLICY.md"))).isSymbolicLink());
+  } finally {
+    await rm(repo.root, { recursive: true, force: true });
+    await teardownFixture(fixture);
+  }
+});
+
+test("doctor checks the POLICY.md link and fails on a plain copy (POLICY)", async () => {
+  const fixture = await setupFixture();
+  const repo = await setupRepoCopy();
+  try {
+    assert.equal(runCli(fixture, ["install", "--yes"], repo.cli).status, 0);
+    const first = runCli(fixture, ["doctor"], repo.cli);
+    assert.match(first.stdout, /✓ praxarch\/POLICY\.md links to/);
+    const link = join(fixture.claudeHome, "praxarch", "POLICY.md");
+    const content = await readFile(join(repo.root, "templates", "POLICY.md"), "utf8");
+    await rm(link);
+    await writeFile(link, content);
+    const second = runCli(fixture, ["doctor"], repo.cli);
+    assert.equal(second.status, 1, second.stdout);
+    assert.match(second.stdout, /✗ praxarch\/POLICY\.md is missing, a plain copy/);
+  } finally {
+    await rm(repo.root, { recursive: true, force: true });
+    await teardownFixture(fixture);
+  }
+});
+
+test("uninstall removes the POLICY.md link but not the template it points at (POLICY)", async () => {
+  const fixture = await setupFixture();
+  const repo = await setupRepoCopy();
+  try {
+    assert.equal(runCli(fixture, ["install", "--yes"], repo.cli).status, 0);
+    const { status, stdout } = runCli(fixture, ["uninstall", "--yes"], repo.cli);
+    assert.equal(status, 0, stdout);
+    await assert.rejects(lstat(join(fixture.claudeHome, "praxarch", "POLICY.md")));
+    assert.match(await readFile(join(repo.root, "templates", "POLICY.md"), "utf8"), /^# praxarch delegation policy/);
+    assert.match(stdout, /the POLICY\.md link/);
+  } finally {
+    await rm(repo.root, { recursive: true, force: true });
+    await teardownFixture(fixture);
+  }
+});
+
 test("install updates through a symlinked agent file pointing elsewhere (dotfiles)", async () => {
   const fixture = await setupFixture();
   const dotfiles = await mkdtemp(join(tmpdir(), "praxarch-dotfiles-"));
@@ -978,6 +1075,7 @@ test("install does not create a missing dist subdir inside a symlinked-in checko
       "must not create dist/report inside the checkout",
     );
     assert.match(stdout, /symlinked into a praxarch checkout/);
+    await assert.rejects(lstat(join(cloneA.root, "dist", "POLICY.md")), "must not create POLICY.md inside the checkout");
   } finally {
     await rm(cloneA.root, { recursive: true, force: true });
     await teardownFixture(fixture);

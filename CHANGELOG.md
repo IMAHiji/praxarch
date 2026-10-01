@@ -130,6 +130,7 @@
 
 ### Changed
 
+- **The orchestration policy moves to an installed POLICY.md; the CLAUDE.md block shrinks to about 1.1 KB.** `templates/claude-md.orchestration.md` is now the short always-loaded block (four rules plus a pointer to POLICY.md). The long form (role table, delegation protocol, rationale) lives in the new `templates/POLICY.md`, which `praxarch install` links into `~/.claude/praxarch/POLICY.md` instead of copying, so hand edits land in the repo rather than drifting. An existing regular file there is backed up first. `praxarch doctor` checks the link and its content; `praxarch uninstall` removes it. security-executor's description drops its decision date and its re-pin note.
 - **route-guard: password-hashing terms count as security keywords (issue #1).** `bcrypt*`,
   `argon2*`, `scrypt` and `pbkdf2` now force routing to `security-executor`, matched on the bare
   word like the rest of the built-in list.

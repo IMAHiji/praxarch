@@ -7,13 +7,14 @@ import {
   AGENTS_DIR,
   CLAUDE_MD_PATH,
   DIST_DIR,
+  POLICY_PATH,
   PRAXARCH_INSTALL_DIR,
   REPO_ROOT,
   SETTINGS_PATH,
   SKILLS_DIR,
   TEMPLATES_DIR,
 } from "./lib/paths.js";
-import { exists, isJsonObject, readJsonIfExists, readTextIfExists } from "./lib/fsops.js";
+import { exists, isJsonObject, isSymlink, readJsonIfExists, readTextIfExists, sameContent } from "./lib/fsops.js";
 import { readJsonl } from "../hooks/lib/jsonl.js";
 import { logDir } from "../hooks/lib/paths.js";
 import { pruneRetention } from "./prune.js";
@@ -132,6 +133,17 @@ async function checkClaudeMd(): Promise<Check> {
   const content = await readTextIfExists(CLAUDE_MD_PATH);
   const ok = Boolean(content?.includes("<!-- praxarch:orchestration:start -->"));
   return { ok, message: "CLAUDE.md has the praxarch orchestration policy block" };
+}
+
+async function checkPolicy(): Promise<Check> {
+  const src = join(TEMPLATES_DIR, "POLICY.md");
+  const ok = (await isSymlink(POLICY_PATH)) && (await sameContent(src, POLICY_PATH));
+  return {
+    ok,
+    message: ok
+      ? "praxarch/POLICY.md links to the current templates/POLICY.md"
+      : `praxarch/POLICY.md is missing, a plain copy, or out of date — run \`praxarch install\` (if it links into another checkout, re-point it: ln -sf ${src} ${POLICY_PATH})`,
+  };
 }
 
 async function checkAgents(): Promise<Check[]> {
@@ -528,6 +540,7 @@ export async function doctor(): Promise<void> {
   const checks: Check[] = [
     ...(await checkSettings()),
     await checkClaudeMd(),
+    await checkPolicy(),
     ...(await checkAgents()),
     ...(await checkSkills()),
     ...(await checkDistTree()),
