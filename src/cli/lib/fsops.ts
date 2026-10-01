@@ -1,4 +1,4 @@
-import { access, cp, lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { access, cp, lstat, mkdir, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 export async function exists(path: string): Promise<boolean> {
@@ -139,7 +139,8 @@ export type CopyAction =
   | "already-at-source"
   | "updated-through-symlink"
   | "replaced-broken-symlink"
-  | "unreadable-symlink";
+  | "unreadable-symlink"
+  | "linked";
 
 /** Identical file content — used to make a reinstall a no-op instead of spawning a fresh backup. */
 export async function sameContent(src: string, dest: string): Promise<boolean> {
@@ -192,6 +193,27 @@ export async function copyWithBackup(src: string, dest: string): Promise<{ actio
   }
 
   return { action: (await backupAndCopy(src, dest)) ? "overwritten" : "created" };
+}
+
+/**
+ * Installs dest as a symlink to src, so an edit made through dest lands in the source file
+ * instead of drifting from it. Same guards as copyWithBackup: a dest that already resolves into
+ * a praxarch checkout is a source file and is left alone, and a live symlink elsewhere is the
+ * user's own wiring, so copyWithBackup writes through it. An absent dest, a regular file (backed
+ * up first) or a broken link becomes the symlink.
+ */
+export async function linkWithBackup(src: string, dest: string): Promise<{ action: CopyAction }> {
+  if (await resolvesIntoPraxarchRepo(dest)) return { action: "already-at-source" };
+  if (await isSymlink(dest)) {
+    if (await linkResolves(dest)) return copyWithBackup(src, dest);
+    await rm(dest, { force: true });
+  } else if (await exists(dest)) {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    await rename(dest, `${dest}.praxarch-backup-${timestamp}`);
+  }
+  await mkdir(dirname(dest), { recursive: true });
+  await symlink(src, dest);
+  return { action: "linked" };
 }
 
 /** realpath that reports failure instead of throwing — a self-referential link (ELOOP) must not

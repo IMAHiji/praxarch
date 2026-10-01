@@ -83,7 +83,7 @@ export async function uninstall(options: UninstallOptions): Promise<void> {
   process.stdout.write("  - strip the orchestration policy block from CLAUDE.md\n");
   process.stdout.write(`  - delete agents/{${ROLE_FILES.join(", ")}}.md\n`);
   process.stdout.write(`  - delete skills/{${SKILL_NAMES.join(", ")}}\n`);
-  process.stdout.write(`  - delete ${PRAXARCH_INSTALL_DIR} (compiled hooks, logs, session state, config)\n`);
+  process.stdout.write(`  - delete ${PRAXARCH_INSTALL_DIR} (compiled hooks, the POLICY.md link, logs, session state, config)\n`);
   process.stdout.write("Backups (.praxarch-backup-*) are left in place.\n\n");
 
   if (!options.yes) {

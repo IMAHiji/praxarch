@@ -6,13 +6,14 @@ import {
   CLAUDE_HOME,
   CLAUDE_MD_PATH,
   DIST_DIR,
+  POLICY_PATH,
   PRAXARCH_INSTALL_DIR,
   REPO_ROOT,
   SETTINGS_PATH,
   SKILLS_DIR,
   TEMPLATES_DIR,
 } from "./lib/paths.js";
-import { copyWithBackup, exists, isJsonObject, isSymlink, linkResolves, realpathOrNull, resolvesIntoPraxarchRepo, sameContent, readJsonIfExists, readTextIfExists, writeJson, backupThenWriteJson, backupThenWriteText } from "./lib/fsops.js";
+import { copyWithBackup, linkWithBackup, exists, isJsonObject, isSymlink, linkResolves, realpathOrNull, resolvesIntoPraxarchRepo, sameContent, readJsonIfExists, readTextIfExists, writeJson, backupThenWriteJson, backupThenWriteText } from "./lib/fsops.js";
 import { mergeSettings, type SettingsFragment } from "./lib/settings-merge.js";
 import { upsertOrchestrationBlock } from "./lib/claude-md-merge.js";
 import { DEFAULT_CONFIG } from "../hooks/lib/config.js";
@@ -158,6 +159,16 @@ async function planSummary(): Promise<{ lines: string[]; settingsFragment: Setti
     const plan = await destPlan(join(PRAXARCH_INSTALL_DIR, subdir), src, "overwrite");
     lines.push(`  - ${subdir}/: ${plan === "create" ? "copy compiled files from dist/" : plan}`);
   }
+  const policySrc = join(TEMPLATES_DIR, "POLICY.md");
+  // destPlan covers the cases linkWithBackup hands to the shared guards; the rest become a link,
+  // which destPlan would misdescribe as "create" or "already current, unchanged".
+  const policyPlan =
+    (await resolvesIntoPraxarchRepo(POLICY_PATH)) || (await isSymlink(POLICY_PATH))
+      ? await destPlan(POLICY_PATH, policySrc)
+      : (await exists(POLICY_PATH))
+        ? "replace with symlink (old file backed up)"
+        : `symlink → ${policySrc}`;
+  lines.push(`  - POLICY.md: ${policyPlan}`);
   lines.push(`  - config.json: ${(await exists(globalConfigPath())) ? "already exists, left unchanged" : "create with defaults"}`);
   lines.push("  - VERSION: write");
 
@@ -255,6 +266,8 @@ export async function install(options: InstallOptions): Promise<void> {
   }
 
   await copyDistTree(atSource);
+  const { action: policyAction } = await linkWithBackup(join(TEMPLATES_DIR, "POLICY.md"), POLICY_PATH);
+  if (policyAction === "already-at-source") atSource.push("praxarch/POLICY.md");
 
   if (!(await exists(globalConfigPath()))) {
     await writeJson(globalConfigPath(), DEFAULT_CONFIG);

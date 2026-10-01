@@ -10,6 +10,7 @@ export const SKILLS_DIR = join(CLAUDE_HOME, "skills");
 export const SETTINGS_PATH = join(CLAUDE_HOME, "settings.json");
 export const CLAUDE_MD_PATH = join(CLAUDE_HOME, "CLAUDE.md");
 export const PRAXARCH_INSTALL_DIR = join(CLAUDE_HOME, "praxarch");
+export const POLICY_PATH = join(PRAXARCH_INSTALL_DIR, "POLICY.md");
 
 const here = dirname(fileURLToPath(import.meta.url));
 /** Repo root, resolved relative to the compiled dist/cli/lib/paths.js location. */

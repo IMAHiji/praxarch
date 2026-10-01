@@ -18,7 +18,7 @@ is inspecting exactly what would change before trusting the CLI.
    directory. Do not fetch and apply raw file contents over the network sight-unseen — read what
    you're about to install.
 2. Read every file you're about to install (agents/*.md, claude-md.orchestration.md,
-   settings.fragment.json) so you can explain each one, not just copy it blind.
+   POLICY.md, settings.fragment.json) so you can explain each one, not just copy it blind.
 
 ## What installing changes
 
@@ -30,6 +30,10 @@ is inspecting exactly what would change before trusting the CLI.
 - `~/.claude/CLAUDE.md` — inserts the orchestration policy block between
   `<!-- praxarch:orchestration:start -->` / `<!-- praxarch:orchestration:end -->` markers. If the
   markers already exist, replace only the content between them.
+  The block is the short form and points at `~/.claude/praxarch/POLICY.md`.
+- `~/.claude/praxarch/POLICY.md` — a symlink to `templates/POLICY.md` in the checkout
+  (`ln -s <checkout>/templates/POLICY.md ~/.claude/praxarch/POLICY.md`). An existing regular file
+  there is backed up as `POLICY.md.praxarch-backup-<timestamp>` first.
 - `~/.claude/agents/{scout,Explore,mech-executor,executor,verifier,security-executor}.md` — copy
   from `templates/agents/`.
 - `~/.claude/skills/{fan-out,issues}/SKILL.md` — copy from `templates/skills/`.
