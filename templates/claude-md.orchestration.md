@@ -19,16 +19,36 @@ live in `~/.claude/agents/*.md` frontmatter and shift independently as models ch
 | `verifier` | Fresh-context adversarial review of non-trivial completed work |
 | `checker` | Cheaper sonnet-tier re-verify after a REFUTED verdict, or a sub-threshold first pass — never the first pass on a diff the gate would block on, never security-sensitive work |
 | `security-executor` | Auth, authz, secrets, crypto, trust-boundary validation — always, no exceptions |
-| `planner` | Decomposes a task into a numbered, self-contained implementation plan (`/orchestrate` pipeline) |
-| `implementer` | Executes exactly one numbered task from a planner's plan file (`/orchestrate` pipeline) |
-| `plan-reviewer` | Verifies completed implementation work against the plan file (`/orchestrate` pipeline) |
+| `planner` | Plan pipeline: writes the numbered plan file (highest tier) |
+| `implementer` | Plan pipeline: executes one plan task; independent tasks run in parallel worktrees |
+| `plan-reviewer` | Plan pipeline: verifies the merged result against the plan (satisfies verify-gate) |
+
+**Plan pipeline** (dispatched by hand; the `/orchestrate` skill was retired 2026-10-01):
+1. Dispatch `planner` with the task verbatim plus stated constraints; relay its summary and plan
+   file path.
+2. Get the user's approval. Amendments go back to the same planner via SendMessage; never
+   hand-edit the plan file.
+3. Record `git rev-parse HEAD`, then dispatch one `implementer` per task:
+   `Plan file: <absolute path>. Execute ONLY Task <n>.` A task marked
+   `Security-sensitive: yes` goes to `security-executor` with the same prompt.
+   - Tasks with `Depends on:` run sequentially in plan order in the main tree, each after its
+     dependencies report DONE.
+   - Two or more ready `independent` tasks go out in one message with `isolation: "worktree"`,
+     "You are running with worktree isolation." in the prompt, and a shared
+     `[fanout:<batch-id>]` description prefix. Merge their branches when all report DONE; on a
+     conflict, stop and report.
+   - On FAILED, stop dependent tasks and report the implementer's output verbatim.
+4. Once every task is DONE and every batch merged, dispatch `plan-reviewer` once over the
+   merged result with the plan file path and the starting commit.
+5. Report per-task status, the reviewer's findings verbatim and anything unverified. Don't
+   auto-fix findings; the user decides on re-dispatch.
 
 ### Plan/execute tier rule (hard rule)
 
 - **Planning** runs at the highest tier you currently have available — this varies with usage,
   so check what's actually selected rather than assuming a fixed name. For code, that's the
-  `planner` role via `/orchestrate`, or the orchestrator's own session when it's already at that
-  tier. Planning always ends in a written plan (a plan file for `/orchestrate`; an equivalent
+  `planner` role (the plan pipeline above), or the orchestrator's own session when it's already at
+  that tier. Planning always ends in a written plan (the planner's plan file; an equivalent
   written-down plan for ad-hoc delegation) — never a handoff based only on in-context reasoning.
 - **Execution** always runs at a role bound to a lower tier (`implementer`, `executor`,
   `mech-executor`) — never the orchestrator itself, even when the orchestrator's own session
@@ -107,6 +127,26 @@ live in `~/.claude/agents/*.md` frontmatter and shift independently as models ch
    fully-specifiable pieces of work, launch them together in worktree isolation rather than
    serially — see the `/fan-out` skill. Run one verifier pass over the merged result, not one
    per worker.
+9. **Invalid results are loud, never folded in.** A subagent result with zero tool calls, an
+   empty body, or placeholder text is invalid — relaunch it once, then report it as failed;
+   never fold an invalid result into a synthesis. After any fan-out, report per-agent status
+   (agent | tool calls | outcome) before writing the merged result. (Incidents: a scout
+   returned a 0-tool-call placeholder; a verifier died on a structured-output retry cap.)
+
+### Workflow sizing and cache economics (added 2026-08-30 from the usage audit)
+
+- **Size workflow fan-outs deliberately.** Over the audited 30 days, `workflow-subagent`
+  dispatches were 94% of all subagent requests (10,489 of 11,153) and roughly 40% of total
+  cache token volume, with one parent session fanning out 704 agents wide. Keep Workflow
+  runs within the configured size guideline (medium, under 10 agents) unless the task genuinely
+  warrants more — width beyond the guideline is an explicit per-run decision, never a
+  default. Prefer `pipeline()` over full-width `parallel()` when stages gate each other.
+- **Batch subagent work inside the 5-minute cache window.** Subagent prefixes cache at the
+  5-minute TTL (main sessions get 1 hour), so a dispatch running past ~5 minutes wall-clock
+  re-writes its prefix on later requests. Scope each dispatch so its unit of work completes
+  within the window, or split a long task into sequential short dispatches against a warm
+  prefix. Audited incidence: 573 dispatches exceeded the window in 30 days (~22M tokens of
+  measured TTL-forced re-writes).
 
 ### Retained locally (do not delegate)
 

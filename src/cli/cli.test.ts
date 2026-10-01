@@ -166,7 +166,7 @@ test("install places checker.md, doctor reports it, and uninstall removes it", a
 });
 
 // Issue #11: /issues skill must be installed, reported by doctor, and removed by uninstall
-// exactly like every other skill (fan-out, orchestrate, praxarch-report).
+// exactly like every other skill (fan-out).
 test("install places the issues skill, doctor reports it, and uninstall removes it", async () => {
   const fixture = await setupFixture();
   try {

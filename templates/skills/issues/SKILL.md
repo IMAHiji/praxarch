@@ -31,7 +31,7 @@ approval step.
    - the instruction to mark each issue `Security-sensitive: yes` in its
      body wherever the work touches authentication, authorization, secrets,
      cryptography, or trust-boundary input validation, so a downstream
-     `/orchestrate` dispatch of that issue routes to `security-executor`
+     plan-pipeline dispatch of that issue routes to `security-executor`
    - the instruction to record inter-issue dependencies within the batch
      symbolically, as `{{issue:slug}}` (a short kebab-case slug per drafted
      issue, unique within the batch) — never a predicted issue number, since

@@ -358,6 +358,12 @@
   return value stays exactly as it was; only the number and ordering of git subprocess spawns
   changed.
 
+### Removed
+
+- **`/orchestrate` and `/praxarch-report` skills.** The plan pipeline is now dispatched by hand
+  per the orchestration policy (new Plan pipeline block); the `praxarch report` CLI stays.
+  `doctor` stops checking for both skills; `uninstall` still removes them from older installs.
+
 ## v0.1.1 — 2026-07-13
 
 Fixes driven by the first week of live telemetry (includes the previously uncommitted
