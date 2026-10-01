@@ -1,6 +1,6 @@
 ---
 name: planner
-description: High-effort planning agent for the /orchestrate pipeline. Decomposes a development task into a numbered, independently-executable implementation plan and writes it to a plan file in the working repo. Dispatch with a task description; returns a summary and the plan file path.
+description: High-effort planning agent for the plan pipeline. Decomposes a development task into a numbered, independently-executable implementation plan and writes it to a plan file in the working repo. Dispatch with a task description; returns a summary and the plan file path.
 model: opus
 effort: high
 tools: Read, Glob, Grep, Bash, Write, WebFetch, WebSearch

@@ -35,6 +35,6 @@ mechanical migrations applied to N independent packages.
 ## Reporting
 
 praxarch's telemetry hook reads the `[fanout:<batch-id>]` prefix from each call's `description` and
-records it as that delegation's batch id, so `/praxarch-report` can show a fan-out batch count.
+records it as that delegation's batch id, so `praxarch report` can show a fan-out batch count.
 Without the prefix, the hook still logs the delegation normally — it just won't be counted as part
 of a batch.

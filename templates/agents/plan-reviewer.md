@@ -1,6 +1,6 @@
 ---
 name: plan-reviewer
-description: High-effort verification agent for the /orchestrate pipeline. Compares completed implementation work against the plan file and reports gaps, drift, and unverified claims. Dispatch with the plan file path after all implementer tasks finish.
+description: High-effort verification agent for the plan pipeline. Compares completed implementation work against the plan file and reports gaps, drift, and unverified claims. Dispatch with the plan file path after all implementer tasks finish.
 model: opus
 effort: high
 tools: Read, Glob, Grep, Bash

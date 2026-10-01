@@ -16,7 +16,7 @@ export interface VerifyGateConfig {
   ignorePatterns: string[];
   /**
    * Roles whose trailing JSON verdict telemetry records for the verify-gate. Without this, an
-   * /orchestrate run's plan-reviewer pass goes unrecorded and the gate demands a second review
+   * plan pipeline's plan-reviewer pass goes unrecorded and the gate demands a second review
    * at stop. Additive over the default ["verifier", "checker", "plan-reviewer"] — like
    * ignorePatterns, unlike the numeric thresholds, which override wholesale — so a config can add
    * its own review roles but never drop the canonical set. `checker` is the sonnet-tier re-verify/sub-threshold
@@ -54,7 +54,7 @@ export interface RouteGuardConfig {
    * this exemption route-guard would deny checker's own dispatch for the word "credential" in its
    * prompt (issue #21). The `planner` entry exists because the planner
    * writes only a plan file (never touches source), and blocking it on security-flavored task
-   * text deadlocks /orchestrate on security-sensitive tasks — same rationale as the original
+   * text deadlocks the plan pipeline on security-sensitive tasks — same rationale as the original
    * verifier exemption.
    */
   reviewRoles: string[];

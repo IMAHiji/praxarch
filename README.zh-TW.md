@@ -30,7 +30,7 @@ English version: [README.md](README.md)
   （預設）或 `"branch:<名稱>"`（審查對象是其他分支、PR 或 worktree）；branch 範圍的判定只會
   被記錄，不會滿足本工作階段的 gate。
 - **遙測介面**：狀態列（status line）即時顯示當前工作階段的角色花費，並提供
-  `praxarch report` CLI／`/praxarch-report` skill，統計歷史角色分布、verifier 通過率，
+  `praxarch report` CLI，統計歷史角色分布、verifier 通過率，
   以及 verify-gate 的阻擋與豁免次數。
 - **專案層級覆寫**：任何專案下的 `.claude/praxarch.json` 都能針對該專案調整角色對模型的綁定、
   verify-gate 門檻與 route-guard 的嚴格程度。
@@ -89,7 +89,7 @@ praxarch uninstall
 
 安裝完成後，就可以在主要工作階段中使用這六個角色進行派工——完整的派工協定
 （完整規格、優先使用最便宜可行的角色、有限度的升級、安全性工作強制路由、完成前必須驗證）
-寫在 praxarch 加入你全域 `CLAUDE.md` 的政策區塊中。隨時可執行 `/praxarch-report`
+寫在 praxarch 加入你全域 `CLAUDE.md` 的政策區塊中。隨時可執行 `praxarch report`
 查看實際派工狀況與驗證通過率。當手上有三個以上獨立、可完整規格化的工作項目時，
 可使用 `/fan-out` 平行處理。
 

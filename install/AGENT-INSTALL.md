@@ -32,7 +32,7 @@ is inspecting exactly what would change before trusting the CLI.
   markers already exist, replace only the content between them.
 - `~/.claude/agents/{scout,Explore,mech-executor,executor,verifier,security-executor}.md` — copy
   from `templates/agents/`.
-- `~/.claude/skills/{praxarch-report,fan-out}/SKILL.md` — copy from `templates/skills/`.
+- `~/.claude/skills/{fan-out,issues}/SKILL.md` — copy from `templates/skills/`.
 - `~/.claude/praxarch/` — compiled hooks (`pnpm build` in the repo first, then copy `dist/hooks/`,
   `dist/statusline/`, `dist/report/`), plus a `config.json` with defaults and a `VERSION.json`.
 

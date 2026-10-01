@@ -39,17 +39,17 @@ for the full rationale and the delta from pilotfish.
   session's gate.
 - **Telemetry surfaces**: a status line showing live role-spend for the current session and
   verify-gate state (no verdict on record, verified/unverified, a standing waiver, blocks already
-  spent this stop cycle), and a `praxarch report` CLI / `/praxarch-report` skill for historical role
+  spent this stop cycle), and a `praxarch report` CLI for historical role
   distribution, verifier pass rate, and verify-gate blocks and waivers.
 - **Per-project overrides**: `.claude/praxarch.json` in any repo can retune verify-gate
   thresholds and route-guard strictness for that project. Role→model bindings are retuned the
   native way instead: shadow the agent file in `<project>/.claude/agents/`.
 - **`/fan-out` skill**: the pattern for running several independent, fully-specified units of work
   concurrently in isolated git worktrees, with a single verification pass over the merged result.
-- **`/orchestrate` skill**: a tiered plan/implement/review pipeline — a high-tier `planner` writes
-  an implementation plan, you approve it, `implementer` executes it task-by-task (dispatching
-  independent tasks in parallel via worktree isolation, same as `/fan-out`), and a high-tier
-  `plan-reviewer` verifies the merged result.
+- **Plan pipeline**: the `planner`, `implementer` and `plan-reviewer` roles for a tiered
+  plan/implement/review run, dispatched by hand per the orchestration policy — a high-tier
+  `planner` writes the plan, you approve it, `implementer` executes it task-by-task (independent
+  tasks in parallel worktrees, same as `/fan-out`), and `plan-reviewer` verifies the merged result.
 - **`/issues` skill**: dispatches `planner` to draft tracker-grade issues from a task or roadmap,
   presents the drafts verbatim for approval, then creates them on the repo's GitLab or GitHub
   tracker (`glab`/`gh`, detected from `git remote get-url origin`) with `{{issue:slug}}`
@@ -140,10 +140,9 @@ the verdict verify-gate reads.
 Once installed, delegate from your main Claude Code session using the ten roles — see the
 orchestration policy praxarch adds to your global `CLAUDE.md` for the full delegation protocol
 (complete specs, cheapest-role-first, bounded escalation, mandatory security routing, verify
-before claiming done). Run `/praxarch-report` any time to see what's actually been delegated
+before claiming done). Run `praxarch report` any time to see what's actually been delegated
 and how verification is going. Use `/fan-out` when you have three or more independent,
-fully-specifiable units of work to run in parallel, or `/orchestrate <task>` for a full
-plan/implement/review pipeline on a larger task.
+fully-specifiable units of work to run in parallel, or the plan pipeline (see the policy) for a larger task.
 
 ## Per-project configuration
 
