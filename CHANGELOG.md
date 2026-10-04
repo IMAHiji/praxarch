@@ -4,6 +4,9 @@
 
 ### Added
 
+- **Status line is colored to match the wrapper palette.** Labels and secondary text dim, `✓verified`
+  green, `✗no verdict` and `waived` amber, `✗unverified` and `blocked×N` red, `adv:<model>` cyan; every
+  segment is reset-terminated. `NO_COLOR` (any non-empty value) turns it off. Content is unchanged.
 - Ship `advisorModel: opus` in the settings fragment; surface it in the statusline
   (`adv:<model>`) and `praxarch doctor`.
 - **Status line surfaces verify-gate state.** Shows "no verdict on record", a verified/unverified
