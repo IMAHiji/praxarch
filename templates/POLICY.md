@@ -15,6 +15,15 @@ work, yet it loaded in full during content and research sessions. Three of its r
 enforced mechanically anyway: `route-guard.js` (PreToolUse on Agent) for model binding and
 security routing, and `verify-gate.js` (Stop) for the verifier pass.
 
+Gate design (R150, work-brain `research/ai-delivery/2026-10-03-hook-guardrail-efficacy.md`,
+2026-10-03): four independent studies put prompt-stated prohibitions at 4 to 75 percent
+violation and tool-layer gates at zero, so anything that must not happen is a hook, not an
+instruction. Every block names its rule and the escape hatch and writes a line to the praxarch
+log, because the one logged workaround happened where a denial carried no reason; keyword
+routers (route-guard) are tuned on the logged false positives, GitHub's method at small scale;
+a new deny rule is proven once against a case it must block and once against a case it must
+pass before it is trusted; reminders fire once per session, never per call.
+
 ## Orchestration (praxarch)
 
 This section governs how the main session delegates work. It applies to **this session only** —
@@ -87,6 +96,16 @@ live in `~/.claude/agents/*.md` frontmatter and shift independently as models ch
 1. **Complete specs only.** Every delegation includes: goal, constraints, success criteria,
    relevant paths, and the reasoning behind the ask — not just a task description. Subagents
    start cold; a thin spec produces a thin result.
+   **Provenance (R145, work-brain `research/ai-delivery/2026-10-02-delegation-briefs.md`,
+   2026-10-02).** Every fact the brief states carries where it came from: measured (how), read
+   (which file, which line), or computed (from what). Fifteen of the log's 40 delegation-brief
+   entries were a fact stated as given that nobody had measured or read; six more prescribed a
+   mechanism that could not work. A fact with no provenance is a question for the worker, not an
+   instruction; a mechanism goes in the brief only after a spike showed it works, otherwise the
+   brief names the outcome and the acceptance check. An enumeration says whether it is complete
+   and how it was produced. The worker's first message reads the brief's facts back and names
+   which it will verify before acting (NASA hearback: an unchallenged readback is not a correct
+   one).
 2. **Cheapest capable role first.** Don't reach for `executor` when `mech-executor` covers it,
    and don't delegate at all for single-file reads or quick judgment calls the orchestrator can
    make directly — delegation overhead exceeds the savings below a certain size.

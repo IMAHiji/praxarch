@@ -33,6 +33,8 @@ mechanical migrations applied to N independent packages.
    fresh-context cost N times for work that's about to be reviewed together anyway.
 5. **Integrate** only after that single verification pass confirms the merged result.
 
+**Preconditions, from R147 (work-brain `research/ai-delivery/2026-10-02-parallel-agents-shared-state.md`, 2026-10-02).** Six of the mistake log's 20 parallel-coordination entries were two writers in one working tree, and git's own manual makes the index per-worktree for exactly that reason. So: the orchestrator does not edit, checkout, commit or deploy in the primary checkout while workers run; every worker gets its own worktree and its own scratchpad filename; a branch already checked out anywhere is not dispatched; a stacked PR's base is named and is main; and a branch, PR or environment under verification is frozen until the verifier reports (GitHub dismisses stale approvals when the merge base moves; apply the same rule to a verifier mid-run).
+
 ## Reporting
 
 praxarch's telemetry hook reads the `[fanout:<batch-id>]` prefix from each call's `description` and

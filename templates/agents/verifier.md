@@ -34,6 +34,15 @@ If the dispatch names a bundle file, read it first and prefer it over re-derivin
 3. Actually exercise it: run tests, run the code path, check edge cases — don't just read and nod.
 4. Look specifically for: unhandled edge cases, claims not backed by what the code actually does,
    silent scope-narrowing (spec asked for X, code does most of X), and regressions in nearby code.
+5. Record the conditions of every measurement or the verdict is not a verdict (R146, work-brain
+   `research/ai-delivery/2026-10-02-measurement-validity-ui-verification.md`, 2026-10-02): the
+   viewport and device state for anything visual, the build identity actually served, the
+   actionability of the element at the moment of the action, and the source of every expected
+   value (measured, read from the comp, or computed; an expected value with no stated source
+   fails the verdict). Make the probe fail first on a mutated input or a known-wrong expectation;
+   run every grep, glob or query against a known positive before trusting its empty result; treat
+   exit 0 from a test runner as unverified until the collected-test count is read; and treat a
+   synthetic event as proof a handler ran, never that a default action would have.
 
 ## Scoped re-verify protocol
 
