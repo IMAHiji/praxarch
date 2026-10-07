@@ -21,7 +21,7 @@ const execFileAsync = promisify(execFile);
 // Lowercase "explore" — the installed file is explore.md (the agent *name* "Explore" comes from
 // frontmatter). Checking "Explore.md" only passed on case-insensitive filesystems.
 // Keep in sync with ROLE_FILES in src/cli/doctor.ts.
-const ROLE_FILES = ["scout", "explore", "mech-executor", "executor", "verifier", "checker", "security-executor", "planner", "implementer", "plan-reviewer"];
+const ROLE_FILES = ["scout", "explore", "claude-code-guide", "mech-executor", "executor", "verifier", "checker", "security-executor", "planner", "implementer", "plan-reviewer"];
 
 async function fileExists(path: string): Promise<boolean> {
   try {
@@ -91,7 +91,7 @@ async function main(): Promise<void> {
   }
 
   const agentsDir = join(homedir(), ".claude", "agents");
-  // Ten independent `access` calls — run together rather than serially. `Promise.all` over a `map`
+  // Eleven independent `access` calls — run together rather than serially. `Promise.all` over a `map`
   // preserves ROLE_FILES order, so the warning below still names missing roles in the declared
   // order.
   const roleChecks = await Promise.all(

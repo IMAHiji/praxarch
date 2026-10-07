@@ -35,7 +35,7 @@ export interface RouteGuardConfig {
    */
   securityKeywords: string[];
   /**
-   * Extra subagent types (beyond the built-in ten roles) treated as defined roles: their model
+   * Extra subagent types (beyond the built-in eleven roles) treated as defined roles: their model
    * comes from agent-file frontmatter, so delegations to them must omit `model`. For agents
    * praxarch doesn't install (plugin agents with frontmatter bindings) — without this, strict
    * mode denies them for lacking an explicit `model`, and adding `model` to satisfy the guard

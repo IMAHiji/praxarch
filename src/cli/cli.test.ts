@@ -98,7 +98,7 @@ test("every role template carries an explicit effort frontmatter value", async (
   for (const file of files) {
     const content = await readFile(join(agentsDir, file), "utf8");
     const frontmatter = content.match(/^---\n([\s\S]*?)\n---/)?.[1] ?? "";
-    if (!/^effort:\s*(low|medium|high)\s*$/m.test(frontmatter)) missing.push(file);
+    if (!/^effort:\s*(low|medium|high|xhigh|max)\s*$/m.test(frontmatter)) missing.push(file);
   }
 
   assert.deepEqual(missing, [], `role templates missing an effort frontmatter value: ${missing.join(", ")}`);

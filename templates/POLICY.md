@@ -30,6 +30,7 @@ live in `~/.claude/agents/*.md` frontmatter and shift independently as models ch
 |---|---|
 | `scout` | Read-only recon: symbol usages, config discovery, "where is X" |
 | `Explore` | Broad fan-out search across many files when you only need the conclusion |
+| `claude-code-guide` | Questions about Claude Code, the Agent SDK, or the Claude API, answered from live docs |
 | `mech-executor` | Fully-specified mechanical work: renames, pattern refactors, docs, boilerplate |
 | `executor` | Work needing local design judgment: features, fixes, non-security tradeoffs |
 | `verifier` | Fresh-context adversarial review of non-trivial completed work |
@@ -94,7 +95,12 @@ live in `~/.claude/agents/*.md` frontmatter and shift independently as models ch
 4. **Models come from role bindings.** Never pass `model` when delegating to a defined role —
    an explicit `model` overrides the role's frontmatter binding and silently defeats tiered
    routing. Only ad-hoc calls that use no defined role declare `model` explicitly; never rely
-   on inheriting the main session's model. (praxarch's route-guard hook enforces both.)
+   on inheriting the main session's model.
+   (praxarch's route-guard hook enforces both.)
+   An ad-hoc call or a Workflow `agent()` stage that only reads, searches, extracts, or
+   classifies declares the model `Explore` is bound to; one that writes code or makes a judgment
+   call declares the model `executor` is bound to. Workflow stages count: they were 94% of
+   audited subagent requests.
 5. **Security routing is not optional.** Anything touching authentication, authorization, secrets,
    cryptography, or trust-boundary input validation goes to `security-executor`, full stop — this
    keeps benign defensive-security work away from safety classifiers tuned for general use, and

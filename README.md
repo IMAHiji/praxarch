@@ -15,7 +15,7 @@ for the full rationale and the delta from pilotfish.
 
 ## What you get
 
-- **Ten role-based subagents** (`scout`, `Explore` override, `mech-executor`, `executor`,
+- **Eleven role-based subagents** (`scout`, `Explore` override, `claude-code-guide` override, `mech-executor`, `executor`,
   `verifier`, `checker`, `security-executor`, `planner`, `implementer`, `plan-reviewer`), each
   pinned to a cost-appropriate model tier via frontmatter, named in policy — never by model ID —
   so the whole thing survives model deprecations untouched. `checker` is a sonnet-tier
@@ -142,7 +142,7 @@ the verdict verify-gate reads.
 
 ## Using it
 
-Once installed, delegate from your main Claude Code session using the ten roles — see the
+Once installed, delegate from your main Claude Code session using the eleven roles — see the
 short block praxarch adds to your global `CLAUDE.md`, which points at `~/.claude/praxarch/POLICY.md`
 for the full delegation protocol
 (complete specs, cheapest-role-first, bounded escalation, mandatory security routing, verify
