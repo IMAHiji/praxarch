@@ -2,7 +2,7 @@
 
 A multi-model orchestration harness for [Claude Code](https://claude.com/product/claude-code):
 a frontier model plans, delegates, and reviews in your main session, while cheaper
-role-pinned subagents (haiku/sonnet/opus) do the volume work — with hooks that
+role-pinned subagents (haiku/sonnet/opus/fable) do the volume work — with hooks that
 **enforce** the delegation policy instead of just hoping the model follows it.
 
 Derived from [pilotfish](https://github.com/Nanako0129/pilotfish) (MIT), whose role/policy/settings
@@ -24,7 +24,7 @@ for the full rationale and the delta from pilotfish.
 - **Enforcement hooks**, not just policy text:
   - `route-guard` hard-denies ad-hoc fan-out delegations with no explicit model, and
     security-flavored work not routed to `security-executor` — except an ad-hoc call (no defined
-    role) that passes `model: "opus"`, where the same rule is a warning, not a block: at
+    role) that passes a model at or above `security-executor`'s tier (opus or fable), where the same rule is a warning, not a block: at
     `security-executor`'s own tier the deny bought reword-and-retry loops, not a stronger model.
     Defined roles always get the block.
   - `verify-gate` blocks session completion on non-trivial diffs (80+ changed lines, or 3+ files

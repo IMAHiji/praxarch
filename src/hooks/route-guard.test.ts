@@ -52,7 +52,7 @@ const securityDeny = (role: string, keyword = "credential*"): string =>
   `praxarch route-guard: blocked — this delegation looks security-sensitive (matched keyword "${keyword}") ` +
   `but subagent_type is "${role}", not "security-executor". Route auth/secrets/crypto/validation work ` +
   `to security-executor per the orchestration policy; if this isn't security work, an ad-hoc dispatch ` +
-  `(no defined role) with model "opus" gets a warning instead of a block.`;
+  `(no defined role) with model "opus" or above gets a warning instead of a block.`;
 const securityWarning = (role: string, keyword = "credential*"): string =>
   `praxarch route-guard: warning — this delegation looks security-sensitive (matched keyword "${keyword}") ` +
   `but is going to "${role}"; if it touches auth/secrets/crypto/trust-boundary validation, route it to ` +
@@ -316,13 +316,9 @@ test("issue #17: Explore is not a default review role: the same docs question st
 
 // The review exemption requires known-role status too. Matching the name alone would let an
 // ad-hoc dispatch to a review-role name skip the security check by passing a model.
-// The next two assertions are loose on purpose, so they hold whether or not claude-code-guide is
-// a builtin role. While it isn't, the security-keyword rule decides: deny below opus, a warning
-// on opus. Once it is, the explicit-model rule denies both. Neither case may be a plain allow.
-// The exact security deny and warning messages are pinned by the issue #1 general-purpose tests,
-// and the explicit-model rule by "denies a defined-role delegation that passes an explicit model".
+// claude-code-guide is a built-in role, so any explicit model hits the explicit-model rule.
 test("issue #17: claude-code-guide passing model haiku on a security-keyword prompt is denied", async () => {
-  const { decision } = await run(
+  const { decision, systemMessage } = await run(
     {
       session_id: "s1",
       cwd: noProjectConfig,
@@ -333,10 +329,11 @@ test("issue #17: claude-code-guide passing model haiku on a security-keyword pro
     HERMETIC_ENV,
   );
   assert.equal(decision, "deny");
+  assert.match(systemMessage ?? "", /delegation to defined role "claude-code-guide" passes explicit model "haiku"/);
 });
 
-test("issue #17: claude-code-guide passing model opus on a security-keyword prompt is never a plain allow", async () => {
-  const { decision, systemMessage, stdout } = await run(
+test("issue #17: claude-code-guide passing model opus on a security-keyword prompt is denied", async () => {
+  const { decision, systemMessage } = await run(
     {
       session_id: "s1",
       cwd: noProjectConfig,
@@ -346,7 +343,8 @@ test("issue #17: claude-code-guide passing model opus on a security-keyword prom
     },
     HERMETIC_ENV,
   );
-  assert.ok(decision === "deny" || systemMessage !== undefined, `plain allow: ${JSON.stringify(stdout)}`);
+  assert.equal(decision, "deny");
+  assert.match(systemMessage ?? "", /delegation to defined role "claude-code-guide" passes explicit model "opus"/);
 });
 
 test("issue #17: a role in config reviewRoles but not knownRoles gets no security exemption", async () => {

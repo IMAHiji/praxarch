@@ -225,7 +225,7 @@ function validateLayer(path: string, raw: unknown, warnings: string[]): ConfigLa
       if ("softDenyRoles" in rg) {
         warnings.push(
           `praxarch config: ${path} routeGuard.softDenyRoles is no longer supported — security-keyword ` +
-            `matches now warn only for ad-hoc dispatches with model "opus" (issue #1); ignoring it`,
+            `matches now warn only for ad-hoc dispatches with a model at or above security-executor's tier (issue #1); ignoring it`,
         );
       }
       result.routeGuard = validated;
