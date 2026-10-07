@@ -104,6 +104,38 @@ function decide(strict: boolean, reason: string, configWarnings: string[] = []):
   };
 }
 
+type RouteGuardRule = "security-keyword" | "explicit-model-on-role" | "ad-hoc-no-model";
+
+// Issue #19: one row per deny and per soft-deny warning (plain allows aren't logged), so the
+// security keywords can be tuned on logged false positives. Awaited only after the decision is
+// emitted (AGENTS.md). Best-effort like verify-gate's logEscapeHatch: if a failure escaped here,
+// main().catch would emit a second allow after the real decision and corrupt stdout.
+// - matchedKeyword is set only on security-keyword rows. A keyword that matched but didn't cause
+//   the deny (an exempt or security-executor role denied for its explicit model) would read as a
+//   keyword false positive.
+// - strict is config.routeGuard.strict. Under strict:false, a routeGuardDenied row went out as an
+//   allow. A routeGuardWarned row is always an allow, so there it's just informational.
+// - Neither the prompt nor the model is logged.
+async function logDecision(
+  sessionId: string,
+  event: "routeGuardDenied" | "routeGuardWarned",
+  fields: { subagentType: string | undefined; rule: RouteGuardRule; matchedKeyword: string | null; strict: boolean },
+): Promise<void> {
+  try {
+    await appendJsonl(logFileForDate(), {
+      at: new Date().toISOString(),
+      sessionId,
+      event,
+      subagentType: fields.subagentType ?? null,
+      rule: fields.rule,
+      matchedKeyword: fields.matchedKeyword,
+      strict: fields.strict,
+    });
+  } catch (err) {
+    process.stderr.write(`praxarch route-guard: could not append the ${event} audit row: ${String(err)}\n`);
+  }
+}
+
 // Set as soon as the hook input is parsed, so the crash handler at the bottom of this file can
 // still attribute its guard-crash log row to a session even though the exception it's handling
 // may have happened well past main()'s own scope (e.g. inside loadConfig). Stays null when the
@@ -175,6 +207,12 @@ async function main(): Promise<void> {
           warnings,
         ),
       );
+      await logDecision(input.session_id, "routeGuardDenied", {
+        subagentType,
+        rule: "security-keyword",
+        matchedKeyword,
+        strict: config.routeGuard.strict,
+      });
       return;
     }
   }
@@ -192,6 +230,12 @@ async function main(): Promise<void> {
         warnings,
       ),
     );
+    await logDecision(input.session_id, "routeGuardDenied", {
+      subagentType,
+      rule: "explicit-model-on-role",
+      matchedKeyword: null,
+      strict: config.routeGuard.strict,
+    });
     return;
   }
 
@@ -205,6 +249,12 @@ async function main(): Promise<void> {
         warnings,
       ),
     );
+    await logDecision(input.session_id, "routeGuardDenied", {
+      subagentType,
+      rule: "ad-hoc-no-model",
+      matchedKeyword: null,
+      strict: config.routeGuard.strict,
+    });
     return;
   }
 
@@ -213,6 +263,12 @@ async function main(): Promise<void> {
   // vary with routeGuard.strict); otherwise plain allow.
   if (softDenyReason !== undefined) {
     emit(decide(false, softDenyReason, warnings));
+    await logDecision(input.session_id, "routeGuardWarned", {
+      subagentType,
+      rule: "security-keyword",
+      matchedKeyword: matchedKeyword ?? null,
+      strict: config.routeGuard.strict,
+    });
     return;
   }
 

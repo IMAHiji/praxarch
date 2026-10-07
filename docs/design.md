@@ -414,7 +414,9 @@ Sketch, deliberately unimplemented until the shape is proven useful:
 - **`route-guard`'s security-keyword match is a blunt instrument** — false positives are possible
   on prose that happens to mention a keyword without being security-sensitive work; `strict: false`
   in a project's `praxarch.json` downgrades denials to warnings if this proves too noisy for a
-  given codebase.
+  given codebase. Every deny and warning appends a `routeGuardDenied` / `routeGuardWarned` row
+  (`rule`, `matchedKeyword`, `strict`) to the monthly JSONL (issue #19), so the false positives
+  can be counted from the log and the keyword list tuned on them.
 - **Verdict-expiry's size-delta rule detects growth, not any change** — a same-size in-place
   rewrite of the diff after a verdict was recorded (file/line counts stay flat, only content
   differs) passes as fresh, since the hash-differs condition alone isn't sufficient without an
