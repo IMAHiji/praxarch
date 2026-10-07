@@ -7,6 +7,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TEST_DIST_DIR } from "../test-support/dist-dir.js";
 
+// Content assertions compare against the ANSI-stripped output; the color tests below pin the codes.
+// eslint-disable-next-line no-control-regex
+const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, "");
+
 const script = join(TEST_DIST_DIR, "statusline", "statusline.js");
 
 async function withPraxarchHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
@@ -21,13 +25,15 @@ async function withPraxarchHome<T>(fn: (home: string) => Promise<T>): Promise<T>
 // No claudeHome passed means "no settings.json to read" — must resolve to an empty, hermetic temp
 // dir, never the real ~/.claude (deleting the env override instead would let the process fall back
 // to reading the actual user's settings.json, which is neither hermetic nor reproducible in CI).
-function run(home: string, input: unknown, claudeHome?: string): string {
+function run(home: string, input: unknown, claudeHome?: string, extraEnv: Record<string, string> = {}): string {
   const ownedClaudeHome = claudeHome === undefined ? mkdtempSync(join(tmpdir(), "praxarch-statusline-claude-empty-")) : null;
   try {
     const env: Record<string, string | undefined> = {
       ...process.env,
+      NO_COLOR: undefined,
       PRAXARCH_HOME: home,
       PRAXARCH_TARGET_CLAUDE_HOME: claudeHome ?? ownedClaudeHome ?? undefined,
+      ...extraEnv,
     };
     return execFileSync("node", [script], {
       input: JSON.stringify(input),
@@ -58,13 +64,13 @@ const oneDelegation = [{ role: "executor", model: "sonnet", at: "2026-08-22T00:0
 
 test("prints bare name when no session id is provided", async () => {
   await withPraxarchHome(async (home) => {
-    assert.equal(run(home, {}), "praxarch");
+    assert.equal(stripAnsi(run(home, {})), "praxarch");
   });
 });
 
 test("prints idle for a session with no delegations", async () => {
   await withPraxarchHome(async (home) => {
-    assert.equal(run(home, { session_id: "s1" }), "praxarch ▸ idle");
+    assert.equal(stripAnsi(run(home, { session_id: "s1" })), "praxarch ▸ idle");
   });
 });
 
@@ -84,7 +90,7 @@ test("summarizes role counts, token spend, and verifier status", async () => {
         lastVerifier: { verdict: "CONFIRMED", findingsCount: 0, criticalOrMajorCount: 0, recordedAt: "2026-07-09T00:03:00.000Z" },
       }),
     );
-    assert.equal(run(home, { session_id: "s1" }), "praxarch ▸ scout×2 verify×1 48k tok ✓verified");
+    assert.equal(stripAnsi(run(home, { session_id: "s1" })), "praxarch ▸ scout×2 verify×1 48k tok ✓verified");
   });
 });
 
@@ -101,7 +107,7 @@ test("tolerates old-format delegation records without token fields", async () =>
       }),
     );
     // No verdict on record + real delegated work = exactly what verify-gate would block on.
-    assert.equal(run(home, { session_id: "s1" }), "praxarch ▸ exec×1 ✗no verdict");
+    assert.equal(stripAnsi(run(home, { session_id: "s1" })), "praxarch ▸ exec×1 ✗no verdict");
   });
 });
 
@@ -119,7 +125,7 @@ test("shows the verdict-time diff size when the record carries it", async () => 
         changedFiles: 4,
       },
     });
-    assert.equal(run(home, { session_id: "s1" }), "praxarch ▸ exec×1 ✓verified@120L/4f");
+    assert.equal(stripAnsi(run(home, { session_id: "s1" })), "praxarch ▸ exec×1 ✓verified@120L/4f");
   });
 });
 
@@ -137,7 +143,7 @@ test("a null changedLines suppresses the size suffix entirely", async () => {
         changedFiles: 4,
       },
     });
-    assert.equal(run(home, { session_id: "s1" }), "praxarch ▸ exec×1 ✓verified");
+    assert.equal(stripAnsi(run(home, { session_id: "s1" })), "praxarch ▸ exec×1 ✓verified");
   });
 });
 
@@ -152,7 +158,7 @@ test("a record predating size capture renders no suffix", async () => {
         recordedAt: "2026-08-22T00:02:00.000Z",
       },
     });
-    assert.equal(run(home, { session_id: "s1" }), "praxarch ▸ exec×1 ✓verified");
+    assert.equal(stripAnsi(run(home, { session_id: "s1" })), "praxarch ▸ exec×1 ✓verified");
   });
 });
 
@@ -167,7 +173,7 @@ test("a REFUTED verdict shows its critical/major count", async () => {
         recordedAt: "2026-08-22T00:02:00.000Z",
       },
     });
-    assert.equal(run(home, { session_id: "s1" }), "praxarch ▸ exec×1 ✗unverified(2 crit/major)");
+    assert.equal(stripAnsi(run(home, { session_id: "s1" })), "praxarch ▸ exec×1 ✗unverified(2 crit/major)");
   });
 });
 
@@ -182,7 +188,7 @@ test("a REFUTED verdict with zero critical/major has no count suffix", async () 
         recordedAt: "2026-08-22T00:02:00.000Z",
       },
     });
-    assert.equal(run(home, { session_id: "s1" }), "praxarch ▸ exec×1 ✗unverified");
+    assert.equal(stripAnsi(run(home, { session_id: "s1" })), "praxarch ▸ exec×1 ✗unverified");
   });
 });
 
@@ -197,7 +203,7 @@ test("a CONFIRMED verdict carrying critical findings does not read as verified",
         recordedAt: "2026-08-22T00:02:00.000Z",
       },
     });
-    assert.equal(run(home, { session_id: "s1" }), "praxarch ▸ exec×1 ✗unverified(1 crit/major)");
+    assert.equal(stripAnsi(run(home, { session_id: "s1" })), "praxarch ▸ exec×1 ✗unverified(1 crit/major)");
   });
 });
 
@@ -207,7 +213,7 @@ test("a standing waiver is shown alongside, never instead of, the verdict state"
       delegations: oneDelegation,
       verifyGateWaivedHash: "deadbeef",
     });
-    assert.equal(run(home, { session_id: "s1" }), "praxarch ▸ exec×1 ✗no verdict waived");
+    assert.equal(stripAnsi(run(home, { session_id: "s1" })), "praxarch ▸ exec×1 ✗no verdict waived");
   });
 });
 
@@ -217,7 +223,7 @@ test("an empty-string waiver hash renders nothing", async () => {
       delegations: oneDelegation,
       verifyGateWaivedHash: "",
     });
-    assert.equal(run(home, { session_id: "s1" }), "praxarch ▸ exec×1 ✗no verdict");
+    assert.equal(stripAnsi(run(home, { session_id: "s1" })), "praxarch ▸ exec×1 ✗no verdict");
   });
 });
 
@@ -226,7 +232,7 @@ test("blocks already spent this cycle are shown even with no delegations", async
     await seedState(home, "s1", {
       verifyGateCycleBlocks: 2,
     });
-    assert.equal(run(home, { session_id: "s1" }), "praxarch ▸ blocked×2");
+    assert.equal(stripAnsi(run(home, { session_id: "s1" })), "praxarch ▸ blocked×2");
   });
 });
 
@@ -242,7 +248,7 @@ test("a zero cycle-block counter renders nothing", async () => {
         recordedAt: "2026-08-22T00:02:00.000Z",
       },
     });
-    assert.equal(run(home, { session_id: "s1" }), "praxarch ▸ exec×1 ✓verified");
+    assert.equal(stripAnsi(run(home, { session_id: "s1" })), "praxarch ▸ exec×1 ✓verified");
   });
 });
 
@@ -278,7 +284,7 @@ test("the statusline spawns no git subprocess", async () => {
           PATH: `${shimDir}:${process.env["PATH"] ?? ""}`,
         },
       }).toString("utf8");
-      assert.equal(out, "praxarch ▸ exec×1 ✓verified@120L/4f");
+      assert.equal(stripAnsi(out), "praxarch ▸ exec×1 ✓verified@120L/4f");
       await assert.rejects(() => stat(marker), "the statusline must not invoke git");
     } finally {
       await rm(shimDir, { recursive: true, force: true });
@@ -292,7 +298,7 @@ test("shows the advisor model when configured in Claude settings", async () => {
     const claudeHome = await mkdtemp(join(tmpdir(), "praxarch-statusline-claude-"));
     try {
       await writeFile(join(claudeHome, "settings.json"), JSON.stringify({ advisorModel: "opus" }));
-      assert.equal(run(home, { session_id: "s1" }, claudeHome), "praxarch ▸ adv:opus");
+      assert.equal(stripAnsi(run(home, { session_id: "s1" }, claudeHome)), "praxarch ▸ adv:opus");
     } finally {
       await rm(claudeHome, { recursive: true, force: true });
     }
@@ -304,7 +310,7 @@ test("omits the advisor indicator when settings.json lacks advisorModel", async 
     const claudeHome = await mkdtemp(join(tmpdir(), "praxarch-statusline-claude-"));
     try {
       await writeFile(join(claudeHome, "settings.json"), JSON.stringify({ model: "best" }));
-      const out = run(home, { session_id: "s1" }, claudeHome);
+      const out = stripAnsi(run(home, { session_id: "s1" }, claudeHome));
       assert.equal(out, "praxarch ▸ idle");
       assert.ok(!out.includes("adv:"));
     } finally {
@@ -317,12 +323,70 @@ test("renders normally with no crash when settings.json is absent", async () => 
   await withPraxarchHome(async (home) => {
     const claudeHome = await mkdtemp(join(tmpdir(), "praxarch-statusline-claude-"));
     try {
-      const out = run(home, { session_id: "s1" }, claudeHome);
+      const out = stripAnsi(run(home, { session_id: "s1" }, claudeHome));
       assert.equal(out, "praxarch ▸ idle");
       assert.ok(!out.includes("adv:"));
       assert.ok(out.startsWith("praxarch ▸"));
     } finally {
       await rm(claudeHome, { recursive: true, force: true });
     }
+  });
+});
+
+const ESC = "\x1b[";
+
+test("colors each segment and reset-terminates every one", async () => {
+  await withPraxarchHome(async (home) => {
+    const claudeHome = await mkdtemp(join(tmpdir(), "praxarch-statusline-claude-"));
+    try {
+      await writeFile(join(claudeHome, "settings.json"), JSON.stringify({ advisorModel: "opus" }));
+      await seedState(home, "s1", {
+        delegations: [{ role: "executor", model: "sonnet", totalTokens: 5000, at: "2026-08-22T00:01:00.000Z" }],
+        verifyGateWaivedHash: "deadbeef",
+        verifyGateCycleBlocks: 1,
+      });
+      const out = run(home, { session_id: "s1" }, claudeHome);
+      assert.equal(
+        out,
+        `${ESC}2mpraxarch ▸${ESC}0m exec×1 ${ESC}2m5k tok${ESC}0m ${ESC}33m✗no verdict${ESC}0m ` +
+          `${ESC}33mwaived${ESC}0m ${ESC}31mblocked×1${ESC}0m ${ESC}36madv:opus${ESC}0m`,
+      );
+    } finally {
+      await rm(claudeHome, { recursive: true, force: true });
+    }
+  });
+});
+
+test("verdict states map to green and red, and idle is dim", async () => {
+  await withPraxarchHome(async (home) => {
+    assert.equal(run(home, { session_id: "s1" }), `${ESC}2mpraxarch ▸${ESC}0m ${ESC}2midle${ESC}0m`);
+    assert.equal(run(home, {}), `${ESC}2mpraxarch${ESC}0m`);
+    const base = { findingsCount: 0, recordedAt: "2026-08-22T00:02:00.000Z" };
+    await seedState(home, "ok", {
+      delegations: oneDelegation,
+      lastVerifier: { ...base, verdict: "CONFIRMED", criticalOrMajorCount: 0, changedLines: 1, changedFiles: 1 },
+    });
+    assert.ok(run(home, { session_id: "ok" }).endsWith(`${ESC}32m✓verified@1L/1f${ESC}0m`));
+    await seedState(home, "bad", {
+      delegations: oneDelegation,
+      lastVerifier: { ...base, verdict: "REFUTED", criticalOrMajorCount: 2 },
+    });
+    assert.ok(run(home, { session_id: "bad" }).endsWith(`${ESC}31m✗unverified(2 crit/major)${ESC}0m`));
+  });
+});
+
+test("NO_COLOR disables all color when non-empty", async () => {
+  await withPraxarchHome(async (home) => {
+    await seedState(home, "s1", { delegations: oneDelegation, verifyGateCycleBlocks: 1 });
+    const out = run(home, { session_id: "s1" }, undefined, { NO_COLOR: "1" });
+    assert.equal(out, "praxarch ▸ exec×1 ✗no verdict blocked×1");
+    assert.equal(run(home, {}, undefined, { NO_COLOR: "1" }), "praxarch");
+    assert.equal(run(home, { session_id: "idle" }, undefined, { NO_COLOR: "1" }), "praxarch ▸ idle");
+  });
+});
+
+test("an empty NO_COLOR does not disable color", async () => {
+  await withPraxarchHome(async (home) => {
+    assert.ok(run(home, {}, undefined, { NO_COLOR: "" }).includes(ESC));
   });
 });

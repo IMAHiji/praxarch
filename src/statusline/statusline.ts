@@ -32,6 +32,21 @@ const ROLE_LABEL: Record<string, string> = {
   "security-executor": "sec",
 };
 
+// Palette matches the wrapper status line: dim for labels and secondary text, green/amber/red for
+// gate state, cyan for the model. Every painted segment is reset-terminated so nothing bleeds into
+// the segments around it. NO_COLOR (https://no-color.org): any non-empty value disables color.
+const RESET = "\x1b[0m";
+const DIM = "\x1b[2m";
+const GREEN = "\x1b[32m";
+const AMBER = "\x1b[33m";
+const RED = "\x1b[31m";
+const CYAN = "\x1b[36m";
+
+function paint(code: string, text: string): string {
+  const noColor = process.env["NO_COLOR"];
+  return noColor !== undefined && noColor !== "" ? text : `${code}${text}${RESET}`;
+}
+
 function formatTokens(total: number): string {
   if (total >= 1_000_000) return `${(total / 1_000_000).toFixed(1)}M`;
   if (total >= 1_000) return `${Math.round(total / 1_000)}k`;
@@ -53,7 +68,7 @@ function gateParts(state: SessionState): string[] {
     // "idle". `delegations.length` is the only work signal on disk — there is no diff measurement
     // in session state at all, so a session doing everything locally shows nothing here until the
     // gate blocks it once (the cycle-block marker below).
-    if (state.delegations.length > 0) parts.push("✗no verdict");
+    if (state.delegations.length > 0) parts.push(paint(AMBER, "✗no verdict"));
   } else if (verifier.verdict === "CONFIRMED" && verifier.criticalOrMajorCount === 0) {
     // The size the verdict was recorded against — NOT the current diff. This is exactly what
     // verify-gate's staleness rule (verify-gate.ts:209-216) compares the live size against, so
@@ -63,20 +78,20 @@ function gateParts(state: SessionState): string[] {
     const lines = verifier.changedLines;
     const files = verifier.changedFiles;
     const size = typeof lines === "number" && typeof files === "number" ? `@${lines}L/${files}f` : "";
-    parts.push(`✓verified${size}`);
+    parts.push(paint(GREEN, `✓verified${size}`));
   } else {
     // Everything that will not satisfy the gate: a REFUTED verdict, or a CONFIRMED one carrying
     // critical/major findings — verify-gate requires both conditions. The count is appended only
     // when non-zero, so the plain REFUTED case renders exactly as it did before this change.
     const count = verifier.criticalOrMajorCount;
-    parts.push(count > 0 ? `✗unverified(${count} crit/major)` : "✗unverified");
+    parts.push(paint(RED, count > 0 ? `✗unverified(${count} crit/major)` : "✗unverified"));
   }
 
   // Additive, never suppressing: a waiver holds only while the diff fingerprint it was recorded
   // against still matches (see verifyGateWaivedHash's doc comment in session-state.ts), so hiding
   // "no verdict" behind it would be the misleading direction for a display.
   if (typeof state.verifyGateWaivedHash === "string" && state.verifyGateWaivedHash.length > 0) {
-    parts.push("waived");
+    parts.push(paint(AMBER, "waived"));
   }
 
   // The per-cycle total, not the per-diff counter: it is never reset by tree movement, so a
@@ -84,7 +99,7 @@ function gateParts(state: SessionState): string[] {
   // Shown regardless of delegation count — it is the one hard proof of a non-trivial diff this
   // process can read without measuring anything.
   const cycleBlocks = state.verifyGateCycleBlocks ?? 0;
-  if (cycleBlocks > 0) parts.push(`blocked×${cycleBlocks}`);
+  if (cycleBlocks > 0) parts.push(paint(RED, `blocked×${cycleBlocks}`));
 
   return parts;
 }
@@ -97,7 +112,7 @@ async function advisorPart(): Promise<string | null> {
     const raw = await readFile(claudeSettingsPath(), "utf8");
     const settings = JSON.parse(raw) as { advisorModel?: unknown };
     return typeof settings.advisorModel === "string" && settings.advisorModel.length > 0
-      ? `adv:${settings.advisorModel}`
+      ? paint(CYAN, `adv:${settings.advisorModel}`)
       : null;
   } catch {
     return null;
@@ -114,7 +129,7 @@ async function main(): Promise<void> {
   }
 
   if (!sessionId) {
-    process.stdout.write("praxarch");
+    process.stdout.write(paint(DIM, "praxarch"));
     return;
   }
 
@@ -129,17 +144,17 @@ async function main(): Promise<void> {
   }
 
   const parts = [...counts.entries()].map(([label, count]) => `${label}×${count}`);
-  if (tokens > 0) parts.push(`${formatTokens(tokens)} tok`);
+  if (tokens > 0) parts.push(paint(DIM, `${formatTokens(tokens)} tok`));
 
   parts.push(...gateParts(state));
 
   const advisor = await advisorPart();
   if (advisor !== null) parts.push(advisor);
 
-  const summary = parts.length > 0 ? parts.join(" ") : "idle";
-  process.stdout.write(`praxarch ▸ ${summary}`);
+  const summary = parts.length > 0 ? parts.join(" ") : paint(DIM, "idle");
+  process.stdout.write(`${paint(DIM, "praxarch ▸")} ${summary}`);
 }
 
 main().catch(() => {
-  process.stdout.write("praxarch");
+  process.stdout.write(paint(DIM, "praxarch"));
 });
