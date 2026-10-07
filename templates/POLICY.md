@@ -43,7 +43,7 @@ live in `~/.claude/agents/*.md` frontmatter and shift independently as models ch
 | `mech-executor` | Fully-specified mechanical work: renames, pattern refactors, docs, boilerplate |
 | `executor` | Work needing local design judgment: features, fixes, non-security tradeoffs |
 | `verifier` | Fresh-context adversarial review of non-trivial completed work |
-| `checker` | Cheaper sonnet-tier re-verify after a REFUTED verdict, or a sub-threshold first pass — never the first pass on a diff the gate would block on, never security-sensitive work |
+| `checker` | Cheaper-tier re-verify after a REFUTED verdict, or a sub-threshold first pass — never the first pass on a diff the gate would block on, never security-sensitive work |
 | `security-executor` | Auth, authz, secrets, crypto, trust-boundary validation — always, no exceptions |
 | `planner` | Plan pipeline: writes the numbered plan file (highest tier) |
 | `implementer` | Plan pipeline: executes one plan task; independent tasks run in parallel worktrees |
@@ -124,7 +124,7 @@ live in `~/.claude/agents/*.md` frontmatter and shift independently as models ch
    cryptography, or trust-boundary input validation goes to `security-executor`, full stop — this
    keeps benign defensive-security work away from safety classifiers tuned for general use, and
    keeps that code path held to one consistently careful standard. (An ad-hoc call — no defined
-   role — that passes `model: "opus"` gets a warning instead of a block on a security-keyword
+   role — that passes a model at or above `security-executor`'s bound tier gets a warning instead of a block on a security-keyword
    match; every defined role gets the block. Route deliberately, don't rely on the warning as the
    check.)
 6. **Verify before claiming done.** Non-trivial changes (anything beyond a trivial fix) get a
@@ -164,10 +164,12 @@ live in `~/.claude/agents/*.md` frontmatter and shift independently as models ch
    carry those verbatim, never your assessment of whether the fix resolved them.
 7. **Scout findings are leads, not facts.** Sanity-check anything scout found that the plan
    actually depends on before acting on it.
-8. **Parallel fan-out for independent units.** When you have three or more genuinely independent,
-   fully-specifiable pieces of work, launch them together in worktree isolation rather than
-   serially — see the `/fan-out` skill. Run one verifier pass over the merged result, not one
-   per worker.
+8. **Serial worker by default; fan out only for judgment.** A battery of mechanical, fully-specified
+   edits goes to ONE `mech-executor` working serial branches off main, one PR per unit: parallel
+   workers each pay the cold-start cost for work one worker does in sequence. Fan out in worktree
+   isolation only when each unit needs its own judgment and the units are genuinely independent,
+   three or four workers at most (see the `/fan-out` skill). Run one verifier pass over the merged
+   result, not one per worker.
 9. **Invalid results are loud, never folded in.** A subagent result with zero tool calls, an
    empty body, or placeholder text is invalid — relaunch it once, then report it as failed;
    never fold an invalid result into a synthesis. After any fan-out, report per-agent status
