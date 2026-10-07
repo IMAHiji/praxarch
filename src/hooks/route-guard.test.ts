@@ -11,6 +11,9 @@ const here = dirname(fileURLToPath(import.meta.url));
 const script = join(TEST_DIST_DIR, "hooks", "route-guard.js");
 const knownRolesProject = join(here, "fixtures", "known-roles-project");
 const reviewRolesProject = join(here, "fixtures", "review-roles-project");
+const reviewOnlyProject = join(here, "fixtures", "review-only-project");
+// A cwd with no .claude/praxarch.json, so only the built-in defaults apply.
+const noProjectConfig = join(knownRolesProject, "no-such-project");
 const malformedConfigProject = join(here, "fixtures", "malformed-config-project");
 const strictFalseProject = join(here, "fixtures", "strict-false-project");
 
@@ -270,6 +273,93 @@ test("security redirect still applies to non-review roles under a reviewRoles co
     HERMETIC_ENV,
   );
   assert.equal(decision, "deny");
+});
+
+// Issue #17: claude-code-guide answers questions from Anthropic's docs, so a question that only
+// mentions a security topic is not security work. It is a builtin role and a default review role,
+// so with no project config the exemption comes from the defaults alone.
+test("issue #17: claude-code-guide is a default review role: a security-keyword docs question gets a plain allow", async () => {
+  const { decision, systemMessage } = await run(
+    {
+      session_id: "s1",
+      cwd: noProjectConfig,
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: "claude-code-guide", prompt: "how do I configure oauth for MCP servers" },
+    },
+    HERMETIC_ENV,
+  );
+  assert.equal(decision, "allow");
+  assert.equal(systemMessage, undefined);
+});
+
+test("issue #17: Explore is not a default review role: the same docs question still hard-denies", async () => {
+  const { decision, systemMessage } = await run(
+    {
+      session_id: "s1",
+      cwd: noProjectConfig,
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: "Explore", prompt: "how do I configure oauth for MCP servers" },
+    },
+    HERMETIC_ENV,
+  );
+  assert.equal(decision, "deny");
+  assert.equal(systemMessage, securityDeny("Explore", "oauth*"));
+});
+
+// The review exemption requires known-role status too. Matching the name alone would let an
+// ad-hoc dispatch to a review-role name skip the security check by passing a model.
+// The next two assertions are loose on purpose, so they hold whether or not claude-code-guide is
+// a builtin role. While it isn't, the security-keyword rule decides: deny below opus, a warning
+// on opus. Once it is, the explicit-model rule denies both. Neither case may be a plain allow.
+// The exact security deny and warning messages are pinned by the issue #1 general-purpose tests,
+// and the explicit-model rule by "denies a defined-role delegation that passes an explicit model".
+test("issue #17: claude-code-guide passing model haiku on a security-keyword prompt is denied", async () => {
+  const { decision } = await run(
+    {
+      session_id: "s1",
+      cwd: noProjectConfig,
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: "claude-code-guide", model: "haiku", prompt: "how do I configure oauth for MCP servers" },
+    },
+    HERMETIC_ENV,
+  );
+  assert.equal(decision, "deny");
+});
+
+test("issue #17: claude-code-guide passing model opus on a security-keyword prompt is never a plain allow", async () => {
+  const { decision, systemMessage, stdout } = await run(
+    {
+      session_id: "s1",
+      cwd: noProjectConfig,
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: "claude-code-guide", model: "opus", prompt: "how do I configure oauth for MCP servers" },
+    },
+    HERMETIC_ENV,
+  );
+  assert.ok(decision === "deny" || systemMessage !== undefined, `plain allow: ${JSON.stringify(stdout)}`);
+});
+
+test("issue #17: a role in config reviewRoles but not knownRoles gets no security exemption", async () => {
+  const { decision, systemMessage } = await run(
+    {
+      session_id: "s1",
+      cwd: reviewOnlyProject,
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_input: {
+        subagent_type: "pr-review-toolkit:silent-failure-hunter",
+        model: "sonnet",
+        prompt: "how do I configure oauth for MCP servers",
+      },
+    },
+    HERMETIC_ENV,
+  );
+  assert.equal(decision, "deny");
+  assert.equal(systemMessage, securityDeny("pr-review-toolkit:silent-failure-hunter", "oauth*"));
 });
 
 test("still denies a role absent from both builtin and config knownRoles", async () => {
