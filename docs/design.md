@@ -8,12 +8,12 @@
 
 1. **Settings layer** (`~/.claude/settings.json`) — model aliases (`best`) and a fallback chain,
    so the config survives model deprecations without edits.
-2. **Role layer** (`~/.claude/agents/*.md`) — ten roles, each pinned to a cost-appropriate model
+2. **Role layer** (`~/.claude/agents/*.md`) — eleven roles, each pinned to a cost-appropriate model
    tier via frontmatter: `scout` (recon), `Explore` (override of the built-in agent, which
-   otherwise silently inherits the main session's model), `mech-executor` (fully-specified
+   otherwise silently inherits the main session's model), `claude-code-guide` (questions about Claude Code, the Agent SDK, and the API, from live docs), `mech-executor` (fully-specified
    mechanical work), `executor` (judgment-requiring work), `verifier` (fresh-context adversarial
-   review), `security-executor` (auth/secrets/crypto, on opus because correctness outweighs speed there;
-   a single refused offensive-security brief is re-pinned to sonnet per dispatch, not per role).
+   review), `checker` (cheaper sonnet-tier re-verify after a REFUTED verdict), `security-executor` (auth/secrets/crypto, on opus because correctness outweighs speed there;
+   a single refused offensive-security brief is re-pinned to sonnet per dispatch, not per role), `planner` (writes the numbered plan file), `implementer` (executes one plan task), `plan-reviewer` (verifies the merged result against the plan).
 3. **Policy layer** (`~/.claude/CLAUDE.md`) — delegation rules written entirely in role names,
    never model IDs, so role→model bindings can change underneath the policy without touching it.
 

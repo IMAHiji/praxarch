@@ -178,7 +178,7 @@ function tierRank(model: string | null): number {
   // A `model:` key present but empty (e.g. `model: ""`) is the same "no binding" state as the key
   // being absent entirely — both render as "inherited (no binding)" below, so both must sort at 99.
   if (model === null || model === "") return 99;
-  const order: Record<string, number> = { haiku: 0, sonnet: 1, opus: 2 };
+  const order: Record<string, number> = { haiku: 0, sonnet: 1, opus: 2, fable: 3 };
   return order[model] ?? 50;
 }
 
@@ -256,7 +256,7 @@ async function loadRoleBindings(): Promise<BindingsData> {
   return { bindings, skipped, dirMissing: false };
 }
 
-// Sorted by model tier (haiku < sonnet < opus < other/unrecognized < inherited/no-binding), then
+// Sorted by model tier (haiku < sonnet < opus < fable < other/unrecognized < inherited/no-binding), then
 // role name within a tier.
 function renderRoleBindings(data: BindingsData, delegations: DelegationLogRecord[]): string[] {
   const lines: string[] = [];

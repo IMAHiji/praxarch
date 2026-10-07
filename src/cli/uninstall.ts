@@ -27,7 +27,7 @@ async function removeInstalled(path: string, kept: string[]): Promise<void> {
 
 // Lowercase "explore" — the installed file is explore.md; "Explore.md" only matched on
 // case-insensitive filesystems, silently orphaning the file on uninstall elsewhere.
-const ROLE_FILES = ["scout", "explore", "mech-executor", "executor", "verifier", "checker", "security-executor", "planner", "implementer", "plan-reviewer"];
+const ROLE_FILES = ["scout", "explore", "claude-code-guide", "mech-executor", "executor", "verifier", "checker", "security-executor", "planner", "implementer", "plan-reviewer"];
 // orchestrate and praxarch-report were retired 2026-10-01; still removed here so uninstall
 // cleans up older installs.
 const SKILL_NAMES = ["fan-out", "issues", "orchestrate", "praxarch-report"];
