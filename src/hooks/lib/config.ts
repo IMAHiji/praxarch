@@ -46,7 +46,7 @@ export interface RouteGuardConfig {
    * Read-only review roles exempt from the security-keyword redirect. A reviewer of
    * auth/secrets/crypto code necessarily mentions those keywords, and denying it deadlocks
    * against verify-gate — the hardcoded verifier exemption (approved 2026-07-08), generalized.
-   * Additive over the default ["verifier", "checker", "plan-reviewer", "planner"], so a config
+   * Additive over the default ["verifier", "checker", "plan-reviewer", "planner", "claude-code-guide"], so a config
    * can add reviewers but never drop the canonical set. `checker` gets the same exemption as
    * `verifier` for the same deadlock-avoidance reason: re-verifying a fix means reading and
    * discussing security-sensitive code (without actively reviewing it the way `verifier` does —
@@ -55,7 +55,12 @@ export interface RouteGuardConfig {
    * prompt (issue #21). The `planner` entry exists because the planner
    * writes only a plan file (never touches source), and blocking it on security-flavored task
    * text deadlocks the plan pipeline on security-sensitive tasks — same rationale as the original
-   * verifier exemption.
+   * verifier exemption. `claude-code-guide` answers questions from Anthropic's docs, so a docs
+   * question that mentions OAuth or secrets isn't security work (issue #17). `Explore` is left out
+   * on purpose: it searches this codebase, so a security-flavored Explore prompt means reading
+   * security code. The exemption applies only to a role that is also a known role (built-in or
+   * `knownRoles`). A name listed here alone exempts nothing, because an ad-hoc call to that name
+   * could otherwise pass any model and skip the security check (issue #17).
    */
   reviewRoles: string[];
 }
@@ -86,7 +91,8 @@ export const DEFAULT_CONFIG: PraxarchConfig = {
     strict: true,
     securityKeywords: [],
     knownRoles: [],
-    reviewRoles: ["verifier", "checker", "plan-reviewer", "planner"],
+    // Explore is left out by user decision (#17): it searches this codebase, so it keeps the hard deny.
+    reviewRoles: ["verifier", "checker", "plan-reviewer", "planner", "claude-code-guide"],
   },
 };
 

@@ -1,0 +1,5 @@
+{
+  "routeGuard": {
+    "reviewRoles": ["pr-review-toolkit:silent-failure-hunter"]
+  }
+}

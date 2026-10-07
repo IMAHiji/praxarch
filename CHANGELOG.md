@@ -74,9 +74,10 @@
   2026-07-08 exemption was hardcoded to `subagent_type === "verifier"`, so other read-only
   review agents (pr-review-toolkit's reviewers) hit the identical deadlock: reviewing
   auth/secrets code mentions the keywords, strict mode denies the dispatch. Config-listed
-  review roles are now exempt alongside verifier; additive merge over the default
-  `["verifier", "checker", "plan-reviewer", "planner"]`, so the canonical exemption can be
-  extended but never dropped.
+  review roles are now exempt alongside verifier, but only if they are also known roles (built
+  in or listed in `knownRoles`); additive merge over the default
+  `["verifier", "checker", "plan-reviewer", "planner", "claude-code-guide"]`, so the canonical
+  exemption can be extended but never dropped.
 - **route-guard: security-keyword matches warn instead of deny for ad-hoc opus dispatches
   (issue #1).** An ad-hoc call (no defined role) that passes an opus `model` gets
   `permissionDecision: "allow"` with a systemMessage naming the keyword and suggesting
@@ -144,6 +145,9 @@
 - **route-guard: password-hashing terms count as security keywords (issue #1).** `bcrypt*`,
   `argon2*`, `scrypt` and `pbkdf2` now force routing to `security-executor`, matched on the bare
   word like the rest of the built-in list.
+- **route-guard: `claude-code-guide` joins the default `reviewRoles`, and the exemption now requires
+  known-role status (issue #17).** A role listed only in `reviewRoles`, not built in or in
+  `knownRoles`, now goes through the security-keyword check like any ad-hoc call.
 - **New `minChangedLinesForFiles` floor (default 30) on the file-count trigger, applied to verdict
   staleness too (issue #3).** verify-gate previously blocked at `minChangedFiles` files
   regardless of size — one wave saw 45 waivers in a single session, with verdicts recorded at 8

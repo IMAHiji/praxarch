@@ -162,20 +162,22 @@ async function main(): Promise<void> {
   const securityKeywords = [...BUILTIN_SECURITY_KEYWORDS, ...config.routeGuard.securityKeywords];
   const matchedKeyword = securityKeywords.find((kw) => keywordPattern(kw).test(haystack));
 
+  const knownRoles = new Set([...BUILTIN_ROLES, ...config.routeGuard.knownRoles]);
+  const isKnownRole = subagentType !== undefined && knownRoles.has(subagentType);
+
   // Review roles are exempt (the 2026-07-08 verifier exemption, generalized to config): a
   // read-only reviewer of auth/secrets code necessarily mentions those keywords, and blocking
   // it here deadlocks against verify-gate, which requires a review pass on exactly these
-  // security-sensitive tickets. Default is ["verifier", "checker", "plan-reviewer", "planner"];
-  // config adds, never removes.
+  // security-sensitive tickets. Default is ["verifier", "checker", "plan-reviewer", "planner",
+  // "claude-code-guide"]; config adds, never removes. The exemption also requires known-role
+  // status (issue #17): on the name alone, an ad-hoc call to a review-role name could pass any
+  // model and skip the security check.
   const reviewRoles = new Set(config.routeGuard.reviewRoles);
-  const isReviewRole = subagentType !== undefined && reviewRoles.has(subagentType);
+  const isReviewRole = isKnownRole && subagentType !== undefined && reviewRoles.has(subagentType);
   // A soft-deny warning carried forward from the security-keyword check below, if any, to be
   // attached to the eventual decision. It must never short-circuit the known-role/ad-hoc rules
   // that run after this block — see the ad-hoc security-tier handling below for why.
   let softDenyReason: string | undefined;
-
-  const knownRoles = new Set([...BUILTIN_ROLES, ...config.routeGuard.knownRoles]);
-  const isKnownRole = subagentType !== undefined && knownRoles.has(subagentType);
 
   if (matchedKeyword !== undefined && subagentType !== "security-executor" && !isReviewRole) {
     // Warn-only for an ad-hoc call that itself asks for security-executor's tier (issue #1): there
