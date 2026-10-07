@@ -208,7 +208,7 @@ async function main(): Promise<void> {
             `subagent_type is "${subagentType ?? "unset"}", not "security-executor". Route ` +
             `auth/secrets/crypto/validation work to security-executor per the orchestration policy; ` +
             `if this isn't security work, an ad-hoc dispatch (no defined role) with model ` +
-            `"${SECURITY_TIER}" gets a warning instead of a block.`,
+            `"${SECURITY_TIER}" or above gets a warning instead of a block.`,
           warnings,
         ),
       );

@@ -58,7 +58,7 @@
   than one per task. `plan-reviewer`'s JSON verdict block is now a built-in `verifyGate.verdictRoles`
   and `routeGuard.reviewRoles` entry, so a project's own config no longer needs to add it. (Note:
   `README.zh-TW.md` hasn't been updated for this change yet.)
-- **route-guard: `routeGuard.knownRoles` config extends the defined-role set.** The built-in ten
+- **route-guard: `routeGuard.knownRoles` config extends the defined-role set.** The built-in eleven
   roles are praxarch's own; agents installed by other tools with their own frontmatter bindings
   (plugin agents) were caught by the ad-hoc rule: strict mode denied them for lacking `model`,
   and passing `model` to satisfy it overrides the binding the guard exists to protect.
@@ -170,6 +170,7 @@
   ENXIO, and loops on `write()` so a short write (a busy FIFO reader) retries until the row is
   complete — a later write failing mid-row (`ENOSPC`, `EDQUOT`) still leaves the partial row on
   disk and the append throws.
+- **Post-merge sweep: security-tier wording and role count (issue #20).** The route-guard deny hint, README, the routeGuard `$comment` and the config warning now say an ad-hoc call with a model at or above security-executor's tier gets the warning, not only `opus`. The README lists fable among the tiers.
 
 ### Fixed
 
@@ -374,7 +375,7 @@
   `isGitRepo` result already proven by `resolveMeasurementContext`), and parallelized `diffStat`'s
   three independent probes (baseline chain + numstat, repo root, untracked listing),
   `diffFingerprint`'s three independent probes (status, HEAD, show-toplevel), and
-  `session-init`'s ten role-file existence checks. Every failure/classification rule and every
+  `session-init`'s eleven role-file existence checks. Every failure/classification rule and every
   return value stays exactly as it was; only the number and ordering of git subprocess spawns
   changed.
 
