@@ -319,6 +319,31 @@ test("role bindings: absent agents directory and a malformed agent file both deg
   });
 });
 
+// Issue #18: tierRank shares route-guard's tier ranking. fable sorts above opus, a full model id
+// sorts with its tier, and unrecognized (50) then no-binding (99) keep their places at the end.
+test("role bindings: sort by the shared tier rank, unrecognized then inherited last", async () => {
+  await withPraxarchHome(async (home) => {
+    await withAgentsDir(async (agentsDir) => {
+      const roles: [string, string | null][] = [
+        ["a-unknown", "gpt-5"],
+        ["b-fable", "fable"],
+        ["c-opus-id", "claude-opus-4-8"],
+        ["d-inherited", null],
+        ["e-haiku", "haiku"],
+        ["f-empty", '""'],
+      ];
+      for (const [name, model] of roles) {
+        const modelLine = model === null ? "" : `model: ${model}\n`;
+        await writeFile(join(agentsDir, `${name}.md`), `---\nname: ${name}\n${modelLine}---\n\nbody\n`);
+      }
+
+      const out = run(home, agentsDir);
+      const order = [...out.matchAll(/^ {2}([a-f]-[a-z-]+): /gm)].map((m) => m[1]);
+      assert.deepEqual(order, ["e-haiku", "c-opus-id", "b-fable", "a-unknown", "d-inherited", "f-empty"]);
+    });
+  });
+});
+
 // --- Model provenance section (issue #24) ---------------------------------------------------
 // #7 was filed off a hand-rolled count that read two disjoint sets (540 "inherited" rows, 163
 // "general-purpose" rows, zero overlap) as if one were a subset of the other. These fixtures

@@ -3,6 +3,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { readJsonl } from "../hooks/lib/jsonl.js";
 import { agentsDir, logDir } from "../hooks/lib/paths.js";
+import { TIER_ORDER, tierOf } from "../hooks/lib/tiers.js";
 
 /**
  * praxarch report: role distribution, verification pass rate, token spend, model provenance, and
@@ -178,8 +179,8 @@ function tierRank(model: string | null): number {
   // A `model:` key present but empty (e.g. `model: ""`) is the same "no binding" state as the key
   // being absent entirely — both render as "inherited (no binding)" below, so both must sort at 99.
   if (model === null || model === "") return 99;
-  const order: Record<string, number> = { haiku: 0, sonnet: 1, opus: 2, fable: 3 };
-  return order[model] ?? 50;
+  const tier = tierOf(model);
+  return tier === null ? 50 : TIER_ORDER.indexOf(tier);
 }
 
 interface AgentFrontmatter {
