@@ -1487,3 +1487,201 @@ test("inherited-model audit: a role designed to inherit (no model: key) has noth
     await teardownFixture(fixture);
   }
 });
+
+// A symlinked install (agent/skill links into a checkout) must keep tracking the checkout: a NEW
+// template used to be copied, so it froze at install time while its siblings stayed live (#21).
+// These tests add a template to the repo copy after the fact, the way `git pull` would.
+const NEW_AGENT = "newrole.md";
+const NEW_SKILL = "newskill";
+
+async function addNewTemplates(repo: { root: string }): Promise<{ agentSrc: string; skillSrc: string }> {
+  const agentSrc = join(repo.root, "templates", "agents", NEW_AGENT);
+  await writeFile(agentSrc, "---\nname: newrole\n---\nbody\n");
+  const skillSrc = join(repo.root, "templates", "skills", NEW_SKILL);
+  await mkdir(skillSrc, { recursive: true });
+  await writeFile(join(skillSrc, "SKILL.md"), "---\nname: newskill\n---\nbody\n");
+  return { agentSrc, skillSrc };
+}
+
+async function backupsIn(dirs: string[]): Promise<string[]> {
+  const found: string[] = [];
+  for (const dir of dirs) {
+    found.push(...(await readdir(dir)).filter((f) => f.includes("praxarch-backup")).map((f) => join(dir, f)));
+  }
+  return found;
+}
+
+test("symlinked install: a new agent template is linked, not copied (#21)", async () => {
+  const fixture = await setupFixture();
+  const repo = await setupRepoCopy();
+  try {
+    const { agentSrc } = await addNewTemplates(repo);
+    await mkdir(join(fixture.claudeHome, "agents"), { recursive: true });
+    const scoutLink = join(fixture.claudeHome, "agents", "scout.md");
+    const scoutSrc = join(repo.root, "templates", "agents", "scout.md");
+    await symlink(scoutSrc, scoutLink);
+
+    const { status, stdout } = runCli(fixture, ["install", "--yes"], repo.cli);
+    assert.equal(status, 0, stdout);
+
+    const dest = join(fixture.claudeHome, "agents", NEW_AGENT);
+    assert.ok((await lstat(dest)).isSymbolicLink(), "the new agent must be a link");
+    // realpath on both sides: the spawned CLI sees /private/var where mkdtemp gave /var on macOS.
+    assert.equal(await realpath(await readlink(dest)), await realpath(agentSrc));
+    assert.equal(await realpath(dest), await realpath(agentSrc));
+
+    // Editing the template must show through the link — the point of linking.
+    await writeFile(agentSrc, "EDITED\n");
+    assert.equal(await readFile(dest, "utf8"), "EDITED\n");
+
+    // The pre-existing link is untouched, and nothing leaked into the checkout.
+    assert.equal(await readlink(scoutLink), scoutSrc);
+    assert.deepEqual(
+      await backupsIn([
+        join(repo.root, "templates"),
+        join(repo.root, "templates", "agents"),
+        join(repo.root, "templates", "skills"),
+      ]),
+      [],
+    );
+
+    // A reinstall leaves the links alone.
+    const again = runCli(fixture, ["install", "--yes"], repo.cli);
+    assert.equal(again.status, 0, again.stdout);
+    assert.equal(await realpath(await readlink(dest)), await realpath(agentSrc));
+  } finally {
+    await rm(repo.root, { recursive: true, force: true });
+    await teardownFixture(fixture);
+  }
+});
+
+test("symlinked install: a new skill dir is linked as a whole dir (#21)", async () => {
+  const fixture = await setupFixture();
+  const repo = await setupRepoCopy();
+  try {
+    const { skillSrc } = await addNewTemplates(repo);
+    await mkdir(join(fixture.claudeHome, "skills"), { recursive: true });
+    const faLink = join(fixture.claudeHome, "skills", "fan-out");
+    const faSrc = join(repo.root, "templates", "skills", "fan-out");
+    await symlink(faSrc, faLink);
+
+    const { status, stdout } = runCli(fixture, ["install", "--yes"], repo.cli);
+    assert.equal(status, 0, stdout);
+
+    const dest = join(fixture.claudeHome, "skills", NEW_SKILL);
+    assert.ok((await lstat(dest)).isSymbolicLink(), "the new skill dir must be a link");
+    assert.equal(await realpath(await readlink(dest)), await realpath(skillSrc));
+    assert.equal(await readFile(join(dest, "SKILL.md"), "utf8"), "---\nname: newskill\n---\nbody\n");
+
+    assert.equal(await readlink(faLink), faSrc, "the existing skill link is untouched");
+    assert.deepEqual(await backupsIn([join(repo.root, "templates", "skills"), faSrc, skillSrc]), []);
+  } finally {
+    await rm(repo.root, { recursive: true, force: true });
+    await teardownFixture(fixture);
+  }
+});
+
+test("symlinked install: the plan says link for new files, and existing copies stay copies (#21)", async () => {
+  const fixture = await setupFixture();
+  const repo = await setupRepoCopy();
+  try {
+    await addNewTemplates(repo);
+    await mkdir(join(fixture.claudeHome, "agents"), { recursive: true });
+    await symlink(join(repo.root, "templates", "agents", "scout.md"), join(fixture.claudeHome, "agents", "scout.md"));
+    // A stale real file in a symlinked install keeps today's behaviour: overwritten with a backup.
+    const stale = join(fixture.claudeHome, "agents", "explore.md");
+    await writeFile(stale, "STALE\n");
+
+    const { status, stdout } = runCli(fixture, ["install", "--yes"], repo.cli);
+    assert.equal(status, 0, stdout);
+
+    assert.match(stdout, /- newrole\.md: symlink → /);
+    assert.match(stdout, /- newskill: symlink → /);
+    assert.match(stdout, /- explore\.md: overwrite \(backed up\)/);
+    assert.match(stdout, /- scout\.md: symlinked into a praxarch checkout/);
+
+    assert.ok(!(await lstat(stale)).isSymbolicLink(), "an existing copy is not converted to a link");
+    assert.equal(
+      await readFile(stale, "utf8"),
+      await readFile(join(repo.root, "templates", "agents", "explore.md"), "utf8"),
+    );
+    assert.equal((await backupsIn([join(fixture.claudeHome, "agents")])).length, 1);
+  } finally {
+    await rm(repo.root, { recursive: true, force: true });
+    await teardownFixture(fixture);
+  }
+});
+
+test("copy install: a new agent and skill are still copied (#21)", async () => {
+  const fixture = await setupFixture();
+  const repo = await setupRepoCopy();
+  try {
+    // First install is a copy install: no agent or skill links exist yet.
+    assert.equal(runCli(fixture, ["install", "--yes"], repo.cli).status, 0);
+    for (const entry of await readdir(join(fixture.claudeHome, "agents"))) {
+      assert.ok(!(await lstat(join(fixture.claudeHome, "agents", entry))).isSymbolicLink(), entry);
+    }
+    await addNewTemplates(repo);
+
+    const { status, stdout } = runCli(fixture, ["install", "--yes"], repo.cli);
+    assert.equal(status, 0, stdout);
+
+    const agent = join(fixture.claudeHome, "agents", NEW_AGENT);
+    assert.ok((await lstat(agent)).isFile(), "the new agent is a real file");
+    assert.ok((await lstat(join(fixture.claudeHome, "skills", NEW_SKILL))).isDirectory(), "the new skill is a real dir");
+    assert.match(stdout, /- newrole\.md: create/);
+    assert.match(stdout, /- newskill: create/);
+  } finally {
+    await rm(repo.root, { recursive: true, force: true });
+    await teardownFixture(fixture);
+  }
+});
+
+test("a link to an unrelated target does not make it a symlinked install (#21)", async () => {
+  const fixture = await setupFixture();
+  const repo = await setupRepoCopy();
+  const dotfiles = await mkdtemp(join(tmpdir(), "praxarch-dot-"));
+  try {
+    await addNewTemplates(repo);
+    await writeFile(join(dotfiles, "mine.md"), "MINE\n");
+    await mkdir(join(fixture.claudeHome, "agents"), { recursive: true });
+    await symlink(join(dotfiles, "mine.md"), join(fixture.claudeHome, "agents", "mine.md"));
+
+    const { status, stdout } = runCli(fixture, ["install", "--yes"], repo.cli);
+    assert.equal(status, 0, stdout);
+    assert.ok((await lstat(join(fixture.claudeHome, "agents", NEW_AGENT))).isFile());
+  } finally {
+    await rm(dotfiles, { recursive: true, force: true });
+    await rm(repo.root, { recursive: true, force: true });
+    await teardownFixture(fixture);
+  }
+});
+
+// Links into ANOTHER checkout (an old clone, a temporary worktree) must not make new templates link
+// into the checkout install is running from: remove that checkout and the link dangles (#21).
+test("links into a different checkout do not make it a symlinked install (#21)", async () => {
+  const fixture = await setupFixture();
+  const cloneA = await setupRepoCopy();
+  const cloneB = await setupRepoCopy();
+  try {
+    await addNewTemplates(cloneB);
+    await mkdir(join(fixture.claudeHome, "agents"), { recursive: true });
+    const scoutLink = join(fixture.claudeHome, "agents", "scout.md");
+    const scoutSrc = join(cloneA.root, "templates", "agents", "scout.md");
+    await symlink(scoutSrc, scoutLink);
+
+    const { status, stdout } = runCli(fixture, ["install", "--yes"], cloneB.cli);
+    assert.equal(status, 0, stdout);
+
+    const dest = join(fixture.claudeHome, "agents", NEW_AGENT);
+    assert.ok((await lstat(dest)).isFile(), "the new agent is copied, not linked into the running checkout");
+    assert.match(stdout, /- newrole\.md: create/);
+    assert.match(stdout, /- newskill: create/);
+    assert.ok((await lstat(join(fixture.claudeHome, "skills", NEW_SKILL))).isDirectory());
+    assert.equal(await readlink(scoutLink), scoutSrc, "the other checkout's link is left as it was");
+  } finally {
+    await rm(cloneA.root, { recursive: true, force: true });
+    await rm(cloneB.root, { recursive: true, force: true });
+    await teardownFixture(fixture);
+  }
+});

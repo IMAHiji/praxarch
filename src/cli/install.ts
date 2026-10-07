@@ -1,6 +1,6 @@
 import { cp, mkdir, readdir, readFile, rm } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import {
   AGENTS_DIR,
   CLAUDE_HOME,
@@ -53,6 +53,50 @@ async function destPlan(dest: string, src: string, overwriteLabel = "overwrite (
   if (!(await exists(dest))) return "create";
   // Mirror backupAndCopy: identical bytes mean no write and no backup, so don't promise either.
   return (await sameContent(src, dest)) ? "already current, unchanged" : overwriteLabel;
+}
+
+/** Nothing at `path`, not even a dangling link — lstat-level, unlike exists(), which follows links. */
+async function isAbsent(path: string): Promise<boolean> {
+  return !(await exists(path)) && !(await isSymlink(path));
+}
+
+/**
+ * A symlinked install is one where some agent file or skill dir is a symlink into THIS checkout's
+ * templates, the repo install is running from (the dev-mode wiring the README describes). New templates then
+ * get linked too, so they track the checkout like their siblings instead of freezing at install
+ * time (#21). A plain copy install, or links that point anywhere else (dotfiles, another clone or
+ * a temporary worktree), do not qualify: a link into a checkout that later goes away would dangle.
+ */
+async function isSymlinkedInstall(): Promise<boolean> {
+  // templates/, not the repo root: a worktree nested under the root is another checkout.
+  const root = await realpathOrNull(TEMPLATES_DIR);
+  if (root === null) return false;
+  for (const dir of [AGENTS_DIR, SKILLS_DIR]) {
+    let entries: string[];
+    try {
+      entries = await readdir(dir);
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const path = join(dir, entry);
+      if (!(await isSymlink(path))) continue;
+      const target = await realpathOrNull(path);
+      if (target !== null && target.startsWith(`${root}${sep}`)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Plan line for a template that does not exist at `linkPath` yet on a symlinked install, or null
+ * when the normal copy plan applies. Mirrors linkWithBackup's guard order: a path that would land
+ * inside a checkout is left as-is rather than linked.
+ */
+async function newLinkPlan(linkPath: string, target: string): Promise<string | null> {
+  if (!(await isAbsent(linkPath))) return null;
+  if (await resolvesIntoPraxarchRepo(linkPath)) return AT_SOURCE_PLAN;
+  return `symlink → ${target}`;
 }
 
 /** A broken dir symlink must be unlinked before we can mkdir/copy into it. */
@@ -110,8 +154,9 @@ async function readFragmentOrThrow(): Promise<SettingsFragment> {
   return result.status === "ok" ? result.value : {};
 }
 
-async function planSummary(): Promise<{ lines: string[]; settingsFragment: SettingsFragment }> {
+async function planSummary(): Promise<{ lines: string[]; settingsFragment: SettingsFragment; linkNew: boolean }> {
   const lines: string[] = [];
+  const linkNew = await isSymlinkedInstall();
 
   const fragmentRaw = await readFragmentOrThrow();
   const { $comment: _comment, ...settingsFragment } = fragmentRaw;
@@ -133,7 +178,9 @@ async function planSummary(): Promise<{ lines: string[]; settingsFragment: Setti
   const agentFiles = await listMarkdownFiles(join(TEMPLATES_DIR, "agents"));
   lines.push(`~/.claude/agents/ (${AGENTS_DIR}):`);
   for (const file of agentFiles) {
-    const plan = await destPlan(join(AGENTS_DIR, file), join(TEMPLATES_DIR, "agents", file));
+    const src = join(TEMPLATES_DIR, "agents", file);
+    const dest = join(AGENTS_DIR, file);
+    const plan = (linkNew ? await newLinkPlan(dest, src) : null) ?? (await destPlan(dest, src));
     lines.push(`  - ${file}: ${plan}`);
   }
 
@@ -148,7 +195,10 @@ async function planSummary(): Promise<{ lines: string[]; settingsFragment: Setti
     // A live symlinked skill dir needs no special case: the SKILL.md path simply resolves through
     // it, and destPlan's praxarch-repo check catches links that point back into a checkout.
     const src = join(TEMPLATES_DIR, "skills", dir, "SKILL.md");
-    lines.push(`  - ${dir}: ${await destPlan(join(SKILLS_DIR, dir, "SKILL.md"), src)}`);
+    const plan =
+      (linkNew ? await newLinkPlan(join(SKILLS_DIR, dir), join(TEMPLATES_DIR, "skills", dir)) : null) ??
+      (await destPlan(join(SKILLS_DIR, dir, "SKILL.md"), src));
+    lines.push(`  - ${dir}: ${plan}`);
   }
 
   lines.push(`~/.claude/praxarch/ (${PRAXARCH_INSTALL_DIR}):`);
@@ -172,7 +222,7 @@ async function planSummary(): Promise<{ lines: string[]; settingsFragment: Setti
   lines.push(`  - config.json: ${(await exists(globalConfigPath())) ? "already exists, left unchanged" : "create with defaults"}`);
   lines.push("  - VERSION: write");
 
-  return { lines, settingsFragment };
+  return { lines, settingsFragment, linkNew };
 }
 
 async function confirm(question: string): Promise<boolean> {
@@ -214,7 +264,7 @@ async function copyDistTree(atSource: string[]): Promise<void> {
 }
 
 export async function install(options: InstallOptions): Promise<void> {
-  const { lines, settingsFragment } = await planSummary();
+  const { lines, settingsFragment, linkNew } = await planSummary();
 
   process.stdout.write("praxarch install plan:\n\n");
   process.stdout.write(`${lines.join("\n")}\n\n`);
@@ -246,7 +296,11 @@ export async function install(options: InstallOptions): Promise<void> {
 
   const agentFiles = await listMarkdownFiles(join(TEMPLATES_DIR, "agents"));
   for (const file of agentFiles) {
-    const { action } = await copyWithBackup(join(TEMPLATES_DIR, "agents", file), join(AGENTS_DIR, file));
+    const src = join(TEMPLATES_DIR, "agents", file);
+    const dest = join(AGENTS_DIR, file);
+    // Link only what is new; an existing copy or link keeps its current handling.
+    const place = linkNew && (await isAbsent(dest)) ? linkWithBackup : copyWithBackup;
+    const { action } = await place(src, dest);
     if (action === "already-at-source") atSource.push(`agents/${file}`);
   }
 
@@ -257,11 +311,12 @@ export async function install(options: InstallOptions): Promise<void> {
     skillDirs = [];
   }
   for (const dir of skillDirs) {
+    // Decided before clearBrokenDirLink, as in the plan: a dangling skill link is repaired by copy.
+    const linkDir = linkNew && (await isAbsent(join(SKILLS_DIR, dir)));
     await clearBrokenDirLink(join(SKILLS_DIR, dir));
-    const { action } = await copyWithBackup(
-      join(TEMPLATES_DIR, "skills", dir, "SKILL.md"),
-      join(SKILLS_DIR, dir, "SKILL.md"),
-    );
+    const { action } = linkDir
+      ? await linkWithBackup(join(TEMPLATES_DIR, "skills", dir), join(SKILLS_DIR, dir))
+      : await copyWithBackup(join(TEMPLATES_DIR, "skills", dir, "SKILL.md"), join(SKILLS_DIR, dir, "SKILL.md"));
     if (action === "already-at-source") atSource.push(`skills/${dir}/`);
   }
 

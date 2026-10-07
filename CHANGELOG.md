@@ -174,6 +174,12 @@
 
 ### Fixed
 
+- **install: a symlinked install links new agents and skills instead of copying them.** When any
+  existing agent file or skill dir is a symlink into the checkout install runs from, a template new to
+  `~/.claude` is now linked (agents as files, skills as whole dirs, like `POLICY.md`), so it tracks
+  later edits and `git pull`. Before this, only the files that already existed stayed live and every
+  new one froze at its install-time copy. Existing links, existing copies, and copy installs behave
+  as before, and the plan preview shows `symlink →` for the files that will be linked.
 - **route-guard: an ad-hoc call asking for a model above opus warns instead of hard-denying.** The
   security tier was the substring `"opus"`, so `model: "fable"` on a security-keyword match took the
   deny that `model: "opus"` doesn't. Tiers now rank haiku < sonnet < opus < fable in one shared
