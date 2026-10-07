@@ -5,7 +5,8 @@ Delegation policy for code work — full version in `~/.claude/praxarch/POLICY.m
 (roles, the delegation protocol, rationale). Read it before any non-trivial delegation.
 Four rules decide things before you get there:
 
-- **Plan high, execute low — hard rule.** Planning runs at the highest tier available and
+- **Plan high, execute low — hard rule for code work** (content, research and instruction-file
+  prose stay with the main session). Planning runs at the highest tier available and
   ends in a *written* plan, never an in-context handoff. Execution always runs at a
   lower-tier role, never the orchestrator itself — being the highest-tier session is a
   reason to delegate, not licence to do it yourself.

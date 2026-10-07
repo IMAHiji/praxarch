@@ -1,20 +1,26 @@
 ---
 name: fan-out
-description: Run several independent, fully-specifiable units of work in parallel using isolated git worktrees, then verify and integrate the merged result in one pass. Use when you have three or more genuinely independent pieces of work — not for anything with shared state or ordering dependencies between the pieces.
+description: Run three or four independent units of work in parallel, one isolated git worktree each, then verify and integrate the merged result in one pass. Use only when each unit needs its own judgment and the units share no state or ordering. A battery of mechanical edits goes to one serial mech-executor instead.
 ---
 
 ## When this applies
 
 Use fan-out only when all of the following hold:
 
-- **Three or more** independent units of work (below that, the coordination overhead isn't worth it).
-- Each unit is **fully specifiable up front** — if you'd need to check in mid-task, it's not a fan-out
-  candidate, it's a regular `executor` delegation.
+- **Three or four** independent units of work. Below three the coordination overhead isn't worth it;
+  above four, split into sequential batches.
+- Each unit **needs its own judgment** during execution (an `executor`-shaped task), yet its goal,
+  constraints and acceptance check can be written up front. If you'd need to check in mid-task, it's
+  a regular `executor` delegation, not a fan-out.
 - The units **don't share mutable state** and have **no ordering dependency** on each other. If unit B
   needs unit A's output, this isn't fan-out — do them serially.
 
-Classic fits: independent bug fixes across unrelated files, parallel per-module test coverage,
-mechanical migrations applied to N independent packages.
+Not a fit: a battery of mechanical, fully-specified edits (renames, a convention applied across N
+files, boilerplate). That goes to one `mech-executor` working serial branches off main, one PR per
+unit, because parallel workers each pay the cold-start cost for work one worker does in sequence.
+
+Classic fits: independent bug fixes across unrelated modules, per-module test coverage where each
+module needs its own test design.
 
 ## Method
 

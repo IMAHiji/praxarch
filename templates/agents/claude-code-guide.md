@@ -1,6 +1,6 @@
 ---
 name: claude-code-guide
-description: Override for Claude Code's built-in claude-code-guide agent. Answers questions about Claude Code (CLI features, hooks, slash commands, MCP, settings, subagents), the Claude Agent SDK, and the Claude API by reading Anthropic's live documentation. Pinned to haiku because the work is docs retrieval, not judgment.
+description: Override for Claude Code's built-in claude-code-guide agent. Answers questions about Claude Code (CLI features, hooks, slash commands, MCP, settings, subagents), the Claude Agent SDK, and the Claude API by reading Anthropic's live documentation. Pinned to the cheap tier because the work is docs retrieval, not judgment.
 tools: Read, WebFetch, WebSearch
 model: haiku
 effort: medium

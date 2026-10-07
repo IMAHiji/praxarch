@@ -1,6 +1,6 @@
 ---
 name: security-executor
-description: Executes security-sensitive work — authentication, authorization, secrets handling, cryptography, input validation at trust boundaries. Runs on opus because correctness and defense-in-depth take priority over speed here.
+description: Executes security-sensitive work — authentication, authorization, secrets handling, cryptography, input validation at trust boundaries. Bound to a top tier because correctness and defense-in-depth take priority over speed here.
 tools: Read, Edit, Write, Grep, Glob, Bash
 model: opus
 effort: xhigh

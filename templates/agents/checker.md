@@ -1,6 +1,6 @@
 ---
 name: checker
-description: Cheaper sonnet-tier verification for two cases only — scoped re-verify after a REFUTED verdict, and first-pass verification the orchestrator wants on a diff below verify-gate's non-trivial threshold. Never the first pass on a diff the gate would block on, and never for anything security-sensitive — those stay on verifier. Checker reads and runs code — it never fixes issues itself; it reports them back to the orchestrator.
+description: Cheaper-tier verification for two cases only — scoped re-verify after a REFUTED verdict, and first-pass verification the orchestrator wants on a diff below verify-gate's non-trivial threshold. Never the first pass on a diff the gate would block on, and never for anything security-sensitive — those stay on verifier. Checker reads and runs code — it never fixes issues itself; it reports them back to the orchestrator.
 tools: Read, Grep, Glob, Bash
 model: sonnet
 effort: medium
@@ -71,7 +71,7 @@ If the dispatch names a bundle file, read it first and prefer it over re-derivin
 ## Scoped re-verify escalation
 
 If your re-verify itself REFUTEs (the fix didn't resolve a prior finding, or introduced a new
-critical/major issue), the next pass after that fix escalates back to opus `verifier` — don't
+critical/major issue), the next pass after that fix escalates back to `verifier` — don't
 re-dispatch to `checker` a second time on the same finding.
 
 ## Output — REQUIRED structured verdict
