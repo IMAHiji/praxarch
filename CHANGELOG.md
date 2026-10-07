@@ -169,6 +169,11 @@
 
 ### Fixed
 
+- **route-guard: an ad-hoc call asking for a model above opus warns instead of hard-denying.** The
+  security tier was the substring `"opus"`, so `model: "fable"` on a security-keyword match took the
+  deny that `model: "opus"` doesn't. Tiers now rank haiku < sonnet < opus < fable in one shared
+  module (`src/hooks/lib/tiers.ts`); anything at or above opus warns, and unknown or non-string
+  models still deny. `praxarch report` sorts role bindings by the same rank.
 - **verify-gate: a hook killed at the harness timeout no longer fails open silently.** Claude Code
   treats a Stop hook killed at its configured `timeout` as a non-blocking allow with no JSONL row
   and no `systemMessage` — indistinguishable on disk from a clean pass. verify-gate now installs

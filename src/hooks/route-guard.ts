@@ -2,6 +2,7 @@
 import { loadConfig } from "./lib/config.js";
 import { appendJsonl } from "./lib/jsonl.js";
 import { logFileForDate } from "./lib/paths.js";
+import { TIER_ORDER, tierOf, type Tier } from "./lib/tiers.js";
 import { emit, readHookInput, type PreToolUseInput, type PreToolUseOutput } from "./lib/hook-io.js";
 
 /**
@@ -28,18 +29,19 @@ const BUILTIN_ROLES = [
   "plan-reviewer",
 ];
 
-// The one model tier at which a security-keyword match warns instead of denying (issue #1):
+// The lowest model tier at which a security-keyword match warns instead of denying (issue #1):
 // security-executor's own binding, pinned against templates/agents/security-executor.md by a
-// route-guard test. Only an ad-hoc call's explicit `model` is compared against it. A defined
-// role's real model depends on which agent file Claude Code loads, which a hook can't know.
-// ponytail: opus is the top tier today; a tier above it needs a rank table here.
-const SECURITY_TIER = "opus";
+// route-guard test. Any tier ranked at or above it warns too (issue #18: fable outranks opus).
+// Only an ad-hoc call's explicit `model` is compared against it. A defined role's real model
+// depends on which agent file Claude Code loads, which a hook can't know.
+const SECURITY_TIER: Tier = "opus";
 
-// Substring, not equality: the Agent tool may pass "opus" or a full id like "claude-opus-4-8".
-// `unknown`, not the declared string type: tool_input is untrusted JSON, and a non-string model
-// that threw here would land in the crash handler's fail-open allow instead of the hard deny.
-function isSecurityTier(model: unknown): boolean {
-  return typeof model === "string" && model.toLowerCase().includes(SECURITY_TIER);
+// tierOf takes `unknown`, not the declared string type: tool_input is untrusted JSON, and a
+// non-string model that threw here would land in the crash handler's fail-open allow instead of
+// the hard deny. Unknown or non-string models rank nowhere, so they deny.
+function atOrAboveSecurityTier(model: unknown): boolean {
+  const tier = tierOf(model);
+  return tier !== null && TIER_ORDER.indexOf(tier) >= TIER_ORDER.indexOf(SECURITY_TIER);
 }
 
 // Keywords match at word boundaries, case-insensitively. A trailing "*" makes it a stem
@@ -182,7 +184,7 @@ async function main(): Promise<void> {
     // --add-dir, --agents, ancestor and worktree sources a hook can't see), so this hook can't
     // know it. Checked only after the review-role exemption above, so an exempt role never gets
     // this warning layered on top.
-    if (!isKnownRole && isSecurityTier(model)) {
+    if (!isKnownRole && atOrAboveSecurityTier(model)) {
       // IMPORTANT: do not decide()+return here. A security-keyword match against an ad-hoc
       // security-tier call must not bypass the explicit-model-override and ad-hoc-no-model rules below — those
       // rules exist independently of the security check and a known role passing an explicit

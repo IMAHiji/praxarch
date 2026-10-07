@@ -450,6 +450,41 @@ test("issue #1: a full opus model id counts as the security tier", async () => {
   assert.equal(systemMessage, securityWarning("general-purpose"));
 });
 
+// Issue #18: the security tier is a rank, not a substring. fable outranks opus, so an ad-hoc fable
+// call warns like an opus one. The sonnet, haiku and non-string denies are pinned by the tests
+// around this one.
+test("issue #18: ad-hoc fable, short name or full id, warns like opus on a security keyword", async () => {
+  for (const model of ["fable", "claude-fable-5-1", "claude-fable-5-1[1m]"]) {
+    const { decision, systemMessage } = await run(
+      {
+        session_id: "s1",
+        cwd: process.cwd(),
+        hook_event_name: "PreToolUse",
+        tool_name: "Agent",
+        tool_input: { subagent_type: "general-purpose", model, prompt: "review auth flow" },
+      },
+      HERMETIC_ENV,
+    );
+    assert.equal(decision, "allow", `expected warn-only for model: ${model}`);
+    assert.equal(systemMessage, securityWarning("general-purpose", "auth"), `model: ${model}`);
+  }
+});
+
+test("issue #18: a defined role can't buy warn-only by passing model fable either", async () => {
+  const { decision, systemMessage } = await run(
+    {
+      session_id: "s1",
+      cwd: process.cwd(),
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: "executor", model: "fable", prompt: "review auth flow" },
+    },
+    HERMETIC_ENV,
+  );
+  assert.equal(decision, "deny");
+  assert.equal(systemMessage, securityDeny("executor", "auth"));
+});
+
 test("issue #1: ad-hoc on haiku or model inherit still hard-denies", async () => {
   for (const model of ["haiku", "inherit"]) {
     const { decision, systemMessage } = await run(
@@ -556,6 +591,28 @@ test("issue #1: the warn tier matches security-executor's shipped binding", asyn
   );
   assert.equal(decision, "allow", `security-executor is bound to "${model}", which should warn, not deny`);
   assert.equal(systemMessage, securityWarning("general-purpose"));
+
+  // Issue #18: every tier at or above the security tier warns, so the warn above no longer proves
+  // the security tier IS the binding. The tier one rank below it must still deny.
+  const { TIER_ORDER, tierOf } = (await import(
+    join(TEST_DIST_DIR, "hooks", "lib", "tiers.js")
+  )) as typeof import("./lib/tiers.js");
+  const bound = tierOf(model);
+  assert.ok(bound, `security-executor's model "${model}" is not a known tier`);
+  const below = TIER_ORDER[TIER_ORDER.indexOf(bound) - 1];
+  if (below !== undefined) {
+    const { decision: belowDecision } = await run(
+      {
+        session_id: "s1",
+        cwd: process.cwd(),
+        hook_event_name: "PreToolUse",
+        tool_name: "Agent",
+        tool_input: { subagent_type: "general-purpose", model: below, prompt: "audit the credential rotation logic" },
+      },
+      HERMETIC_ENV,
+    );
+    assert.equal(belowDecision, "deny", `"${below}" is below security-executor's "${model}" and should deny`);
+  }
 });
 
 // --- Crash-visibility (issue #24) ---------------------------------------------------------------
