@@ -1,7 +1,8 @@
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -20,7 +21,7 @@ async function run(
 ): Promise<{ decision: string; systemMessage?: string; stdout: unknown }> {
   const stdout = execFileSync("node", [script], {
     input: JSON.stringify(input),
-    env: env ? { ...process.env, ...env } : process.env,
+    env: { ...process.env, ...HERMETIC_ENV, ...env },
   }).toString("utf8");
   const parsed = JSON.parse(stdout) as {
     hookSpecificOutput: { permissionDecision: string };
@@ -33,9 +34,14 @@ async function run(
   };
 }
 
-// Isolates the hook from this machine's real global config (~/.claude/praxarch/config.json),
-// whose knownRoles/securityKeywords would otherwise leak into fixture-based assertions.
-const HERMETIC_ENV = { PRAXARCH_HOME: join(knownRolesProject, "no-such-praxarch-home") };
+// Isolates the hook from this machine's real ~/.claude/praxarch: its global config.json, whose
+// knownRoles/securityKeywords would otherwise leak into fixture-based assertions, and its monthly
+// log, which every deny and warning now appends a row to (issue #19). run() applies this by
+// default, so no spawn writes to the real log or into the fixture tree. The directory starts
+// empty, so there's no config.json in it.
+const SCRATCH_HOME = mkdtempSync(join(tmpdir(), "praxarch-routeguard-scratch-"));
+after(() => rmSync(SCRATCH_HOME, { recursive: true, force: true }));
+const HERMETIC_ENV = { PRAXARCH_HOME: SCRATCH_HOME };
 
 // Exact security-keyword messages (issue #1): the hard deny, now with the ad-hoc opus hint, and
 // the warn-only message an ad-hoc opus call gets instead.
@@ -477,8 +483,8 @@ test("issue #1: a config knownRole passing model opus still hard-denies", async 
 });
 
 // tool_input is untrusted stdin JSON: a non-string model must take the hard deny, not throw into
-// the crash handler's fail-open allow. A scratch home, because a crash writes a guard-crash row
-// under PRAXARCH_HOME and HERMETIC_ENV's points inside the fixture tree.
+// the crash handler's fail-open allow. Its own scratch home, so a crash's guard-crash row (or this
+// test's deny rows) stays out of the shared one.
 test("issue #1: a non-string model on an ad-hoc keyword hit hard-denies instead of crashing open", async () => {
   const home = await mkdtemp(join(tmpdir(), "praxarch-routeguard-home-"));
   try {
@@ -609,6 +615,182 @@ test("a route-guard crash still allows even when the guard-crash row write also 
     assert.equal(decision, "allow");
   } finally {
     await rm(homeFile, { recursive: true, force: true });
+  }
+});
+
+// --- Deny/warn audit rows (issue #19) -----------------------------------------------------------
+// Every deny and every soft-deny warning appends one row, so the security keywords can be tuned on
+// logged false positives. Plain allows write nothing. Each case gets a fresh home so "exactly one
+// row" counts only its own spawn.
+
+function agentCall(sessionId: string, toolInput: Record<string, unknown>, cwd = process.cwd()): unknown {
+  return { session_id: sessionId, cwd, hook_event_name: "PreToolUse", tool_name: "Agent", tool_input: toolInput };
+}
+
+async function decideAndReadLog(
+  input: unknown,
+): Promise<{ decision: string; rows: Record<string, unknown>[] }> {
+  const home = await mkdtemp(join(tmpdir(), "praxarch-routeguard-home-"));
+  try {
+    const { decision } = await run(input, { PRAXARCH_HOME: home });
+    const rows = await readMonthlyLog(home).catch((err: NodeJS.ErrnoException) => {
+      if (err.code === "ENOENT") return [];
+      throw err;
+    });
+    return { decision, rows };
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+}
+
+// Pins the full row: the exact key set, so a row can't quietly grow a field (like the prompt)
+// without a test noticing. `at` is checked for shape and then dropped.
+function assertOneRow(rows: Record<string, unknown>[], expected: Record<string, unknown>): void {
+  assert.equal(rows.length, 1, `expected exactly one row, got ${JSON.stringify(rows)}`);
+  const { at, ...rest } = rows[0] ?? {};
+  assert.ok(typeof at === "string" && !Number.isNaN(Date.parse(at)), `bad at: ${String(at)}`);
+  assert.deepEqual(rest, expected);
+}
+
+test("issue #19: a security-keyword deny writes one routeGuardDenied row", async () => {
+  const { decision, rows } = await decideAndReadLog(
+    agentCall("s-log-kw", { subagent_type: "mech-executor", prompt: "audit the credential rotation logic" }),
+  );
+  assert.equal(decision, "deny");
+  assertOneRow(rows, {
+    sessionId: "s-log-kw",
+    event: "routeGuardDenied",
+    subagentType: "mech-executor",
+    rule: "security-keyword",
+    matchedKeyword: "credential*",
+    strict: true,
+  });
+});
+
+test("issue #19: an explicit-model-on-role deny writes one row, with matchedKeyword null even when a keyword also matched", async () => {
+  for (const [sessionId, toolInput] of [
+    ["s-log-model-1", { subagent_type: "executor", model: "sonnet", prompt: "refactor the widget module" }],
+    // security-executor skips the keyword check, so "jwt"/"secret" matching here didn't cause the
+    // deny; logging it would count as a keyword false positive that never happened.
+    ["s-log-model-2", { subagent_type: "security-executor", model: "opus", prompt: "rotate the JWT secret" }],
+  ] as const) {
+    const { decision, rows } = await decideAndReadLog(agentCall(sessionId, toolInput));
+    assert.equal(decision, "deny", sessionId);
+    assertOneRow(rows, {
+      sessionId,
+      event: "routeGuardDenied",
+      subagentType: toolInput.subagent_type,
+      rule: "explicit-model-on-role",
+      matchedKeyword: null,
+      strict: true,
+    });
+  }
+});
+
+test("issue #19: an ad-hoc-no-model deny writes one row; a missing subagent_type logs as null", async () => {
+  for (const [sessionId, toolInput, subagentType] of [
+    ["s-log-adhoc-1", { subagent_type: "general-purpose", prompt: "look into the bug" }, "general-purpose"],
+    ["s-log-adhoc-2", { prompt: "look into the bug" }, null],
+  ] as const) {
+    const { decision, rows } = await decideAndReadLog(agentCall(sessionId, toolInput));
+    assert.equal(decision, "deny", sessionId);
+    assertOneRow(rows, {
+      sessionId,
+      event: "routeGuardDenied",
+      subagentType,
+      rule: "ad-hoc-no-model",
+      matchedKeyword: null,
+      strict: true,
+    });
+  }
+});
+
+test("issue #19: a soft-deny warning writes one routeGuardWarned row", async () => {
+  const { decision, rows } = await decideAndReadLog(
+    agentCall("s-log-warn", {
+      subagent_type: "general-purpose",
+      model: "opus",
+      prompt: "audit the credential rotation logic",
+    }),
+  );
+  assert.equal(decision, "allow");
+  assertOneRow(rows, {
+    sessionId: "s-log-warn",
+    event: "routeGuardWarned",
+    subagentType: "general-purpose",
+    rule: "security-keyword",
+    matchedKeyword: "credential*",
+    strict: true,
+  });
+});
+
+// strict:false emits a would-be deny as an allow; the row must still say it was a deny, and say
+// it wasn't enforced.
+test("issue #19: under strict:false a deny is emitted as an allow but still logs routeGuardDenied with strict false", async () => {
+  const { decision, rows } = await decideAndReadLog(
+    agentCall("s-log-lax", { subagent_type: "general-purpose", prompt: "look into the bug" }, strictFalseProject),
+  );
+  assert.equal(decision, "allow");
+  assertOneRow(rows, {
+    sessionId: "s-log-lax",
+    event: "routeGuardDenied",
+    subagentType: "general-purpose",
+    rule: "ad-hoc-no-model",
+    matchedKeyword: null,
+    strict: false,
+  });
+});
+
+test("issue #19: plain allows write no row at all", async () => {
+  const home = await mkdtemp(join(tmpdir(), "praxarch-routeguard-home-"));
+  try {
+    for (const input of [
+      { session_id: "s-log-allow", cwd: process.cwd(), hook_event_name: "PreToolUse", tool_name: "Read", tool_input: {} },
+      agentCall("s-log-allow", { subagent_type: "executor", prompt: "refactor the widget module" }),
+      agentCall("s-log-allow", { subagent_type: "general-purpose", model: "sonnet", prompt: "look into the bug" }),
+      agentCall("s-log-allow", { subagent_type: "verifier", prompt: "review the credential rotation diff" }),
+      agentCall("s-log-allow", { subagent_type: "security-executor", prompt: "rotate the JWT secret" }),
+    ]) {
+      const { decision } = await run(input, { PRAXARCH_HOME: home });
+      assert.equal(decision, "allow", JSON.stringify(input));
+    }
+    await assert.rejects(stat(join(home, "logs")), { code: "ENOENT" });
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+// The append runs after the decision is on stdout. If its failure escaped, main().catch would emit
+// a second (allow) object after the real one. So a failed write must leave stdout byte-identical
+// to a successful one. `logs` is a plain file, so mkdir fails, while config.json is still a clean
+// ENOENT. Pointing PRAXARCH_HOME itself at a file would also add a config warning to the output.
+test("issue #19: a log-write failure leaves the emitted decision byte-identical", async () => {
+  const goodHome = await mkdtemp(join(tmpdir(), "praxarch-routeguard-home-"));
+  const badHome = await mkdtemp(join(tmpdir(), "praxarch-routeguard-badlogs-"));
+  await writeFile(join(badHome, "logs"), "not a directory");
+  try {
+    for (const [event, input] of [
+      ["routeGuardDenied", agentCall("s-log-fail", { subagent_type: "mech-executor", prompt: "audit the credential rotation logic" })],
+      ["routeGuardDenied", agentCall("s-log-fail", { subagent_type: "executor", model: "sonnet", prompt: "refactor the widget module" })],
+      ["routeGuardDenied", agentCall("s-log-fail", { subagent_type: "general-purpose", prompt: "look into the bug" })],
+      ["routeGuardWarned", agentCall("s-log-fail", { subagent_type: "general-purpose", model: "opus", prompt: "audit the credential rotation logic" })],
+    ] as const) {
+      const spawnWith = (home: string) =>
+        spawnSync("node", [script], {
+          input: JSON.stringify(input),
+          env: { ...process.env, PRAXARCH_HOME: home },
+          encoding: "utf8",
+        });
+      const good = spawnWith(goodHome);
+      const bad = spawnWith(badHome);
+      assert.equal(bad.status, 0, bad.stderr);
+      assert.equal(bad.stdout, good.stdout, `${event}: stdout changed when the log write failed`);
+      // Proves the write was attempted and failed, so the equality above isn't vacuous.
+      assert.match(bad.stderr, new RegExp(`could not append the ${event} audit row`));
+    }
+  } finally {
+    await rm(goodHome, { recursive: true, force: true });
+    await rm(badHome, { recursive: true, force: true });
   }
 });
 

@@ -4,6 +4,13 @@
 
 ### Added
 
+- **route-guard denials and warnings now leave an audit row.** Every deny appends
+  `event: "routeGuardDenied"` and every soft-deny warning appends `event: "routeGuardWarned"` to
+  the monthly JSONL, with `subagentType`, `rule` (`security-keyword`, `explicit-model-on-role` or
+  `ad-hoc-no-model`), `matchedKeyword` and `strict`. Before this, route-guard logged nothing except
+  its own crashes, so there was no false-positive data to tune the security keywords on. The row is
+  written after the decision is emitted, and a failed write never changes the decision. Plain
+  allows write nothing, and the prompt is never logged.
 - **Status line is colored to match the wrapper palette.** Labels and secondary text dim, `✓verified`
   green, `✗no verdict` and `waived` amber, `✗unverified` and `blocked×N` red, `adv:<model>` cyan; every
   segment is reset-terminated. `NO_COLOR` (any non-empty value) turns it off. Content is unchanged.
