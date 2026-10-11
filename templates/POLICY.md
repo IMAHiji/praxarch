@@ -106,6 +106,13 @@ live in `~/.claude/agents/*.md` frontmatter and shift independently as models ch
    and how it was produced. The worker's first message reads the brief's facts back and names
    which it will verify before acting (NASA hearback: an unchallenged readback is not a correct
    one).
+   **Skill content goes in the brief.** Role definitions don't grant `Skill`, so a worker can't
+   load a skill itself. When the work needs a skill's rules, the orchestrator invokes the skill and
+   pastes only the sections the task depends on into the brief, attributed to the skill by name.
+   When a long task needs more than an excerpt, point the worker at the skill's file in its source
+   checkout, never at `~/.claude/plugins/cache/`: cache paths carry a commit sha that changes on
+   every plugin update. Say which commit the checkout is on, since it can differ from the installed
+   plugin.
 2. **Cheapest capable role first.** Don't reach for `executor` when `mech-executor` covers it,
    and don't delegate at all for single-file reads or quick judgment calls the orchestrator can
    make directly — delegation overhead exceeds the savings below a certain size.
